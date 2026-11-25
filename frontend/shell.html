@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b141e">
+    <title>Overview · Wave</title>
+    <link rel="icon" href="data:,">
+    <style>
+      :root {
+        color-scheme: dark;
+        background: #0b141e;
+        color: #eaf3f7;
+        font: 1rem/1.5 system-ui, sans-serif;
+      }
+
+      body { margin: 0; }
+
+      #canvas {
+        display: block;
+        visibility: hidden;
+        width: 100%;
+        height: max(100vh, var(--overview-height, 0px));
+        height: max(100dvh, var(--overview-height, 0px));
+      }
+
+      #canvas[data-ready] { visibility: visible; }
+
+      .startup-message {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 1.5rem;
+        text-align: center;
+      }
+
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="startup" class="startup-message" role="status" hidden>Loading Wave…</div>
+      <noscript><div class="startup-message">Wave requires JavaScript and WebGL 2.</div></noscript>
+      <canvas id="canvas" role="img" aria-label="Wave Overview"></canvas>
+    </main>
+    <script>
+      var Module = (() => {
+        const canvas = document.getElementById("canvas");
+        const startup = document.getElementById("startup");
+        startup.hidden = false;
+
+        function showStartupError() {
+          if (canvas.hasAttribute("data-ready")) return;
+          startup.textContent = "Wave could not start. Load the page over HTTP in a browser with WebGL 2 enabled.";
+        }
+
+        function showOverview(description) {
+          canvas.setAttribute("aria-label", description);
+          canvas.setAttribute("data-ready", "");
+          startup.hidden = true;
+        }
+
+        window.addEventListener("error", showStartupError, true);
+        window.addEventListener("unhandledrejection", showStartupError);
+        return { canvas, showOverview, onAbort: showStartupError };
+      })();
+    </script>
+    {{{ SCRIPT }}}
+  </body>
+</html>
