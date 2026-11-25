@@ -205,6 +205,13 @@ void PreviewSession::stop()
     requests_.clear();
 }
 
+void PreviewSession::Request::expire(double now)
+{
+    if (!reply && deadline > 0 && now >= deadline) {
+        reply = PreviewReply{PreviewReply::Status::timed_out, {}};
+    }
+}
+
 void PreviewSession::update()
 {
     const double now = emscripten_get_now();
@@ -212,9 +219,7 @@ void PreviewSession::update()
         fail();
     }
     for (auto& [id, request] : requests_) {
-        if (!request.reply && request.deadline > 0 && now >= request.deadline) {
-            request.reply = PreviewReply{PreviewReply::Status::timed_out, {}};
-        }
+        request.expire(now);
     }
 }
 
@@ -310,10 +315,12 @@ bool PreviewSession::receive(std::string_view payload)
         const auto id = frame.find("request_id");
         if (id != frame.end() && id->is_number_unsigned()) {
             const auto request = requests_.find(id->get<std::uint64_t>());
-            if (request != requests_.end() && request->second.action == feedback_action_ &&
-                !request->second.reply) {
-                const auto status = feedback_ok_ ? PreviewReply::Status::accepted : PreviewReply::Status::rejected;
-                request->second.reply = PreviewReply{status, feedback_};
+            if (request != requests_.end() && request->second.action == feedback_action_) {
+                request->second.expire(emscripten_get_now());
+                if (!request->second.reply) {
+                    const auto status = feedback_ok_ ? PreviewReply::Status::accepted : PreviewReply::Status::rejected;
+                    request->second.reply = PreviewReply{status, feedback_};
+                }
             }
         }
     }

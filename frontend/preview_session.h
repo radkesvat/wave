@@ -56,6 +56,8 @@ private:
         std::string action;
         double deadline;
         std::optional<PreviewReply> reply;
+
+        void expire(double now);
     };
 
     void fail();
