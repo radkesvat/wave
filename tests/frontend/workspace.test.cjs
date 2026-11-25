@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { once } = require('node:events');
+const { EventEmitter, once } = require('node:events');
 const { readFile } = require('node:fs/promises');
 const { createServer } = require('node:http');
 const { join } = require('node:path');
@@ -66,21 +66,58 @@ function fixture() {
         users: [{ ...user, id: 1, name: 'Avery Brooks' }, { ...user, id: 2, name: 'Bella Chen' }],
         users_live: true,
         logs: [{ ts: '09:41:02', level: 'info', message: 'Preview fixture is ready.' }],
-        server: overviewSnapshot, settings: {}, topology: {}, bot: {}, console: {},
+        server: overviewSnapshot,
+        settings: {
+            name: 'Wave Preview', admin_username: 'demo', domain: 'wave.example.invalid', port: 2030,
+            websocket_path: '/ws/preview', site_template: 'Wave Standard', certificate_path: 'preview/server.crt',
+            private_key_path: 'preview/server.key', multiplex: true,
+        },
+        topology: {
+            nodes: [
+                { id: 'inside', label: 'Office', type: 'Client', address: '192.0.2.10', x: 0.5, y: 0.5, map: 'inside' },
+                { id: 'outside', label: 'Relay', type: 'Router', address: '192.0.2.20', x: 0.5, y: 0.5, map: 'outside' },
+            ],
+            links: [], routes: [],
+        },
+        bot: {
+            connected: false, name: 'Wave Preview Bot', admin_link: 'wave-preview://bot/admin',
+            notifications: true, allow_status: true, allow_config: false,
+            notification_rules: { high_cpu: { enabled: true, sound: false } },
+            permissions: { status: true },
+            overrides: { domain: 'relay.example.invalid', sni: 'tls.example.invalid', ws_host: '', port: 443 },
+        },
+        console: {},
     };
 }
 
-async function mockPreview(page, { gate = Promise.resolve(), handle = () => '' } = {}) {
-    const data = fixture();
+async function mockPreview(page, { data = fixture(), gate = Promise.resolve(), handle } = {}) {
+    const connected = Promise.withResolvers();
+    const events = new EventEmitter();
+    const actions = [];
     await page.routeWebSocket(previewUrl, async socket => {
+        const send = fields => socket.send(JSON.stringify({ type: 'snapshot', data, ...fields }));
         socket.onMessage(raw => {
             const request = JSON.parse(raw);
-            const feedback = handle(data, request);
-            socket.send(JSON.stringify({ type: 'snapshot', data, action: request.action, ok: true, feedback }));
+            const reply = ({ ok = true, feedback = '' } = {}) =>
+                send({ action: request.action, request_id: request.request_id, ok, feedback });
+            actions.push({ request, reply });
+            events.emit('action');
+            if (!handle) reply();
+            else handle(data, request, reply);
         });
         await gate;
-        socket.send(JSON.stringify({ type: 'snapshot', data }));
+        send();
+        connected.resolve(send);
     });
+    return {
+        broadcast: async () => (await connected.promise)(),
+        actions,
+        async action(index) {
+            const signal = AbortSignal.timeout(5000);
+            while (index >= actions.length) await once(events, 'action', { signal });
+            return actions[index];
+        },
+    };
 }
 
 async function waitForCanvas(page, viewport, scrolls) {
@@ -101,6 +138,42 @@ async function openView(page, name) {
     await link.focus();
     await page.keyboard.press('Enter');
     await page.waitForFunction(name => document.querySelector('[aria-current="page"]')?.textContent === name, name);
+}
+
+async function settleCanvas(page) {
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
+
+async function canvasClick(page, x, y) {
+    await page.mouse.click(x, y, { delay: 40 });
+    await settleCanvas(page);
+}
+
+async function replaceText(page, x, y, value) {
+    await canvasClick(page, x, y);
+    await page.locator('#wave-text-input').waitFor({ state: 'visible' });
+    await page.keyboard.press('Control+a');
+    await settleCanvas(page);
+    await page.keyboard.insertText(value);
+    await settleCanvas(page);
+}
+
+function assertRequest(request, expected) {
+    const { request_id: id, ...fields } = request;
+    assert.ok(Number.isSafeInteger(id) && id > 0, `Expected a positive request ID, got ${id}`);
+    assert.deepEqual(fields, expected);
+    return id;
+}
+
+async function openSetup(page) {
+    await canvasClick(page, 132, 23);
+    await page.waitForFunction(() => document.getElementById('menu').getAttribute('aria-expanded') === 'true');
+    await canvasClick(page, 170, 160);
+    await page.getByRole('img', { name: /Wave first-run setup. Step 1 of 3/ }).waitFor();
+    await canvasClick(page, 449, 244);
+    await page.getByRole('img', { name: /Step 2 of 3/ }).waitFor();
+    await canvasClick(page, 495, 294);
+    await page.getByRole('img', { name: /Step 3 of 3/ }).waitFor();
 }
 
 test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async () => {
@@ -151,14 +224,14 @@ test('pastes into user search on HTTP and mutates the matching row and Logs', as
     const page = await browser.newPage({ viewport: desktop });
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: url });
     const actions = [];
-    await mockPreview(page, { handle(data, action) {
+    await mockPreview(page, { handle(data, action, reply) {
         actions.push(action);
         const changed = data.users.find(row => row.id === action.id);
-        if (!changed || action.action !== 'set_user_enabled') return 'Unexpected request.';
+        assert.ok(changed && action.action === 'set_user_enabled');
         changed.enabled = action.enabled;
         const message = `Disabled ${changed.name} in the preview.`;
         data.logs.push({ ts: '09:41:13', level: 'success', message });
-        return message;
+        reply({ feedback: message });
     } });
 
     try {
@@ -208,44 +281,257 @@ test('narrow touch selects the workspace and swipes starting on Menu scroll with
 
 test('first-run setup shows progress, validates input, and completes through the preview socket', async () => {
     const page = await browser.newPage({ viewport: desktop });
-    const actions = [];
-    await mockPreview(page, { handle(_data, action) {
-        actions.push(action);
-        return 'Applied demo setup.';
+    const preview = await mockPreview(page, { handle(_data, _action, reply) {
+        reply({ feedback: 'Applied demo setup.' });
     } });
 
     try {
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
-        await page.mouse.click(132, 23);
-        await page.waitForFunction(() => document.getElementById('menu').getAttribute('aria-expanded') === 'true');
-        await page.mouse.click(170, 160);
-        await page.getByRole('img', { name: /Wave first-run setup. Step 1 of 3/ }).waitFor();
-        await page.mouse.click(449, 244);
-        await page.getByRole('img', { name: /Step 2 of 3/ }).waitFor();
-        await page.mouse.click(495, 294);
-        await page.getByRole('img', { name: /Step 3 of 3/ }).waitFor();
-        await page.mouse.click(511, 327);
+        await openSetup(page);
+        await canvasClick(page, 511, 327);
         await page.getByRole('img', { name: /Enter a demo username and password/ }).waitFor();
-        assert.equal(actions.length, 0);
-        await page.mouse.click(458, 294);
-        await page.mouse.click(511, 327);
+        assert.equal(preview.actions.length, 0);
+        await canvasClick(page, 458, 294);
+        await canvasClick(page, 511, 327);
         await page.getByRole('img', { name: /Applied demo setup/ }).waitFor();
-        assert.deepEqual(actions, [{ action: 'setup', name: 'Wave Preview', domain: 'wave.example',
-            username: 'demo', password: 'wave-demo' }]);
+        assert.equal(preview.actions.length, 1);
+        assertRequest(preview.actions[0].request, {
+            action: 'setup', name: 'Wave Preview', domain: 'wave.example', username: 'demo', password: 'wave-demo',
+        });
     } finally {
         await page.close();
     }
 });
 
-test('reports unavailable sample data after a malformed preview snapshot', async () => {
-    const page = await browser.newPage();
-    await page.routeWebSocket(previewUrl, socket => socket.send('{"type":"snapshot","data":{}}'));
+test('a reopened setup waits for its own reply and retries an active rejection', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    const preview = await mockPreview(page, { handle() {} });
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        window.WebSocket = class extends NativeWebSocket {
+            constructor(...args) {
+                super(...args);
+                this.addEventListener('message', ({ data }) => {
+                    window.lastPreviewRequestId = JSON.parse(data).request_id;
+                });
+            }
+        };
+    });
+    const pending = /Wave first-run setup\. Step 3 of 3\. Applying demo setup/;
+    const description = name => page.getByRole('img', { name });
+    async function submit(index) {
+        await canvasClick(page, 511, 327);
+        await description(pending).waitFor();
+        return preview.action(index);
+    }
+
     try {
         await page.goto(url);
+        await description(/Wave Users.*2 users/).waitFor();
+        await openSetup(page);
+        await canvasClick(page, 458, 294);
+        const first = await submit(0);
+
+        await openSetup(page);
+        await canvasClick(page, 458, 294);
+        const second = await submit(1);
+        first.reply({ ok: false, feedback: 'The first setup was rejected.' });
+        await page.waitForFunction(id => window.lastPreviewRequestId === id, first.request.request_id);
+        await settleCanvas(page);
+        assert.equal(await description(pending).count(), 1);
+        second.reply({ feedback: 'The reopened setup completed.' });
+        await description(/The reopened setup completed/).waitFor();
+
+        await openSetup(page);
+        await canvasClick(page, 458, 294);
+        const third = await submit(2);
+        third.reply({ ok: false, feedback: 'The active setup was rejected.' });
+        await description(/The active setup was rejected/).waitFor();
+        const retry = await submit(3);
+        retry.reply({ feedback: 'The setup retry completed.' });
+        await description(/The setup retry completed/).waitFor();
+
+        const ids = [first, second, third, retry].map(({ request }) => assertRequest(request, {
+            action: 'setup', name: 'Wave Preview', domain: 'wave.example', username: 'demo', password: 'wave-demo',
+        }));
+        assert.equal(new Set(ids).size, ids.length);
+    } finally {
+        await page.close();
+    }
+});
+
+test('applies a populated Settings draft after a broadcast and a page change', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    const data = fixture();
+    const original = { ...data.settings };
+    const preview = await mockPreview(page, { data, handle(current, request, reply) {
+        Object.assign(current.settings, request.settings);
+        reply({ feedback: 'Applied sample panel settings.' });
+    } });
+
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await openView(page, 'Panel Settings');
+        await replaceText(page, 325, 141, 'Harbor QA');
+        data.settings.name = 'Another client';
+        data.logs.push({ ts: '09:41:03', level: 'info', message: 'Received another client’s settings.' });
+        await preview.broadcast();
+        await page.getByRole('img', { name: /Received another client’s settings/ }).waitFor();
+        await openView(page, 'Server Status');
+        await openView(page, 'Panel Settings');
+        await canvasClick(page, 245, 414);
+        await canvasClick(page, 480, 424);
+        await page.getByRole('img', { name: /Applied sample panel settings/ }).waitFor();
+        assert.equal(preview.actions.length, 1);
+        assertRequest(preview.actions[0].request, { action: 'apply_settings', settings: { ...original, name: 'Harbor QA' } });
+    } finally {
+        await page.close();
+    }
+});
+
+for (const order of [['Settings', 'Overrides'], ['Overrides', 'Settings']]) {
+    test(`both bot edits survive stale snapshots when ${order[0]} saves first`, async () => {
+        const data = fixture();
+        const initial = structuredClone(data.bot);
+        const tabs = new Map();
+        let rejected = false;
+
+        try {
+            for (const name of order) {
+                const page = await browser.newPage({ viewport: desktop });
+                tabs.set(name, { page });
+                const preview = await mockPreview(page, { data, handle(current, request, reply) {
+                    if (name === 'Overrides' && order[0] === name && !rejected) {
+                        rejected = true;
+                        reply({ ok: false, feedback: 'Rejected the sample overrides.' });
+                        return;
+                    }
+                    Object.assign(current.bot, request.settings);
+                    reply({ feedback: `Saved sample bot ${name}.` });
+                } });
+                tabs.get(name).preview = preview;
+                await page.goto(url);
+                await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+                await openView(page, 'Telegram Bot');
+            }
+
+            // Both pages received the same initial snapshot. The fixture publishes no
+            // intermediate broadcast, so the other page saves from that snapshot too.
+            for (const name of order) {
+                const { page, preview } = tabs.get(name);
+                await page.bringToFront();
+                if (name === 'Settings') {
+                    await canvasClick(page, 320, 80);
+                    await canvasClick(page, 212, 113);
+                    await canvasClick(page, 220, 211);
+                    await canvasClick(page, 250, 278);
+                } else {
+                    await canvasClick(page, 404, 80);
+                    await replaceText(page, 230, 326, '8443');
+                    await canvasClick(page, 250, 360);
+                    if (order[0] === name) {
+                        await page.getByRole('img', { name: /Rejected the sample overrides/ }).waitFor();
+                        await canvasClick(page, 250, 360);
+                        const first = (await preview.action(0)).request;
+                        const retry = (await preview.action(1)).request;
+                        assert.deepEqual(retry.settings, first.settings);
+                        assert.notEqual(retry.request_id, first.request_id);
+                    }
+                }
+
+                await page.getByRole('img', { name: new RegExp(`Saved sample bot ${name}`) }).waitFor();
+                const { request } = preview.actions.at(-1);
+                if (name === 'Settings') {
+                    assert.deepEqual(Object.keys(request.settings).sort(), [
+                        'allow_config', 'allow_status', 'notification_rules', 'notifications', 'permissions',
+                    ]);
+                    assert.equal(request.settings.notifications, false);
+                    assert.equal(request.settings.allow_status, initial.allow_status);
+                    assert.equal(request.settings.allow_config, initial.allow_config);
+                    assert.deepEqual(request.settings.notification_rules.high_cpu, initial.notification_rules.high_cpu);
+                    assert.equal(request.settings.permissions.status, initial.permissions.status);
+                    assertRequest(request, { action: 'apply_bot_settings', settings: request.settings });
+                } else {
+                    assertRequest(request, {
+                        action: 'apply_bot_settings', settings: { overrides: { ...initial.overrides, port: 8443 } },
+                    });
+                }
+            }
+
+            assert.equal(data.bot.notifications, false);
+            assert.equal(data.bot.overrides.port, 8443);
+        } finally {
+            await Promise.all([...tabs.values()].map(({ page }) => page.close()));
+        }
+    });
+}
+
+test('preserves selection and zoom for each topology map when switching pages', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    await mockPreview(page);
+    async function capture() {
+        await page.mouse.move(185, 50);
+        await settleCanvas(page);
+        return page.screenshot({ clip: { x: 198, y: 100, width: 1040, height: 420 } });
+    }
+
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await openView(page, 'Nodes & Routers');
+        const insideInitial = await capture();
+        await canvasClick(page, 720, 301);
+        const insideSelected = await capture();
+        await canvasClick(page, 240, 114);
+        const insideZoomed = await capture();
+        assert.ok(!insideSelected.equals(insideInitial), 'Inside map selection changed the drawing.');
+        assert.ok(!insideZoomed.equals(insideSelected), 'Inside map zoom changed the drawing.');
+
+        await canvasClick(page, 340, 80);
+        const outsideInitial = await capture();
+        await canvasClick(page, 720, 301);
+        const outsideSelected = await capture();
+        await canvasClick(page, 210, 114);
+        const outsideZoomed = await capture();
+        assert.ok(!outsideSelected.equals(outsideInitial), 'Outside map selection changed the drawing.');
+        assert.ok(!outsideZoomed.equals(outsideSelected), 'Outside map zoom changed the drawing.');
+
+        await openView(page, 'Server Status');
+        await openView(page, 'Nodes & Routers');
+        await canvasClick(page, 250, 80);
+        assert.ok((await capture()).equals(insideZoomed), 'Inside map kept its selection and zoom.');
+        await canvasClick(page, 340, 80);
+        assert.ok((await capture()).equals(outsideZoomed), 'Outside map kept its selection and zoom.');
+    } finally {
+        await page.close();
+    }
+});
+
+test('Overview shows loading and unavailable data, and About opens without preview data', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    const gate = Promise.withResolvers();
+    await page.addInitScript(() => { window.open = url => { window.openedUrl = url; }; });
+    await page.routeWebSocket(previewUrl, async socket => {
+        await gate.promise;
+        socket.send('{"type":"snapshot","data":{}}');
+    });
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*Loading sample data/ }).waitFor();
+        await openView(page, 'Overview');
+        await page.getByRole('img', { name: /Wave Overview.*Loading sample data/ }).waitFor();
+        gate.resolve();
+        await page.getByRole('img', { name: /Wave Overview.*Sample data unavailable/ }).waitFor();
+        await openView(page, 'Users');
         await page.getByRole('img', { name: /Wave Users.*Sample data unavailable/ }).waitFor();
         assert.equal(await page.getByRole('link', { name: 'Users' }).getAttribute('aria-current'), 'page');
+        await openView(page, 'About');
+        await canvasClick(page, 329, 225);
+        assert.equal(await page.evaluate(() => window.openedUrl), '/licenses/wave.txt');
     } finally {
+        gate.resolve();
         await page.close();
     }
 });

@@ -137,6 +137,15 @@ void feedback(const PreviewSession& session, std::initializer_list<std::string_v
     }
 }
 
+void feedback(const PreviewReply& reply)
+{
+    if (!reply.message.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, reply.ok() ? mint : warm);
+        wrapped(reply.message);
+        ImGui::PopStyleColor();
+    }
+}
+
 struct Series {
     const Json& samples;
     const char* name;
@@ -311,19 +320,19 @@ void sync_settings(SecondaryViewsState::Settings& state, const Json& settings)
 void render_settings(SecondaryViewsState::Settings& state, PreviewSession& session, bool narrow)
 {
     const auto& settings = field(session.data(), "settings");
-    const auto* result = session.feedback_for("apply_settings");
-    if (state.applying && result && result->revision > state.apply_feedback) {
-        state.applying = false;
-        if (result->ok) {
+    if (auto reply = session.take_reply(state.apply_request)) {
+        if (reply->ok()) {
             state.dirty = false;
             state.password.fill('\0');
+        } else if (reply->status == PreviewReply::Status::timed_out) {
+            reply->message = "Preview did not confirm the update. Check the connection and try again.";
+        } else if (reply->status == PreviewReply::Status::disconnected) {
+            reply->message = "The preview connection closed. Try again after reconnecting.";
         }
-    } else if (state.applying && ImGui::GetTime() >= state.apply_deadline) {
-        state.applying = false;
-        state.apply_timed_out = true;
+        state.apply_reply = std::move(reply);
     }
     sync_settings(state, settings);
-    ImGui::BeginDisabled(state.applying);
+    ImGui::BeginDisabled(state.apply_request.has_value());
     const bool columns = !narrow && ImGui::GetContentRegionAvail().x >= 680 &&
         ImGui::BeginTable("settings-columns", 2, ImGuiTableFlags_SizingStretchSame);
     if (columns) {
@@ -380,20 +389,15 @@ void render_settings(SecondaryViewsState::Settings& state, PreviewSession& sessi
             state.dirty = false;
             state.source = nullptr;
             state.password.fill('\0');
-            state.apply_timed_out = false;
+            state.apply_reply.reset();
             sync_settings(state, settings);
         }
     }
     ImGui::EndDisabled();
-    if (state.applying) {
+    if (state.apply_request) {
         ImGui::TextDisabled("Applying sample panel settings...");
-    } else if (state.apply_timed_out) {
-        ImGui::PushStyleColor(ImGuiCol_Text, warm);
-        ImGui::TextWrapped("Preview did not confirm the update. Check the connection and try again.");
-        ImGui::PopStyleColor();
-    }
-    if (!state.applying && !state.apply_timed_out) {
-        feedback(session, {"apply_settings"});
+    } else if (state.apply_reply) {
+        feedback(*state.apply_reply);
     }
 
     fit_preview_dialog(430);
@@ -410,11 +414,10 @@ void render_settings(SecondaryViewsState::Settings& state, PreviewSession& sessi
             if (state.password[0]) {
                 draft["password"] = state.password.data();
             }
-            state.apply_feedback = session.feedback_revision();
-            if (session.send({{"action", "apply_settings"}, {"settings", std::move(draft)}})) {
-                state.applying = true;
-                state.apply_timed_out = false;
-                state.apply_deadline = ImGui::GetTime() + 5.0;
+            state.apply_request = session.submit({{"action", "apply_settings"}, {"settings", std::move(draft)}},
+                                                 5000);
+            if (state.apply_request) {
+                state.apply_reply.reset();
                 ImGui::CloseCurrentPopup();
             }
         }
@@ -901,16 +904,19 @@ void bot_setup_dialog(BotState& state, PreviewSession& session, const Json& bot)
 {
     fit_preview_dialog(500);
     if (!ImGui::BeginPopupModal("Set up a sample bot", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!ImGui::IsPopupOpen("Set up a sample bot")) {
+            session.abandon(state.connect_request);
+        }
         return;
     }
-    const auto* result = session.feedback_for("bot_connect");
-    if (state.setup == BotState::Setup::connecting) {
-        if (result && result->revision > state.connect_feedback) {
-            state.setup = result->ok ? BotState::Setup::complete : BotState::Setup::token;
-        } else if (ImGui::GetTime() >= state.connect_deadline) {
-            state.setup = BotState::Setup::token;
-            state.connect_timed_out = true;
+    if (auto reply = session.take_reply(state.connect_request)) {
+        state.setup = reply->ok() ? BotState::Setup::complete : BotState::Setup::token;
+        if (reply->status == PreviewReply::Status::timed_out) {
+            reply->message = "Preview did not confirm the bot connection. Try again.";
+        } else if (reply->status == PreviewReply::Status::disconnected) {
+            reply->message = "The preview connection closed. Try again after reconnecting.";
         }
+        state.connect_reply = std::move(reply);
     }
     switch (state.setup) {
     case BotState::Setup::intro:
@@ -926,11 +932,11 @@ void bot_setup_dialog(BotState& state, PreviewSession& session, const Json& bot)
         ImGui::TextWrapped("Use the supplied sample token or enter another demo value.");
         ImGui::BeginDisabled(std::string_view(state.token.data()).size() < 4);
         if (ImGui::Button("Connect sample bot")) {
-            state.connect_feedback = session.feedback_revision();
-            if (session.send({{"action", "bot_connect"}, {"token", state.token.data()}})) {
+            state.connect_request = session.submit({{"action", "bot_connect"}, {"token", state.token.data()}},
+                                                   5000);
+            if (state.connect_request) {
                 state.setup = BotState::Setup::connecting;
-                state.connect_timed_out = false;
-                state.connect_deadline = ImGui::GetTime() + 5.0;
+                state.connect_reply.reset();
             }
         }
         ImGui::EndDisabled();
@@ -938,12 +944,8 @@ void bot_setup_dialog(BotState& state, PreviewSession& session, const Json& bot)
         if (ImGui::Button("Back")) {
             state.setup = BotState::Setup::intro;
         }
-        if (state.connect_timed_out) {
-            ImGui::PushStyleColor(ImGuiCol_Text, warm);
-            ImGui::TextWrapped("Preview did not confirm the bot connection. Try again.");
-            ImGui::PopStyleColor();
-        } else if (result && result->revision > state.connect_feedback && !result->ok) {
-            feedback(session, {"bot_connect"});
+        if (state.connect_reply) {
+            feedback(*state.connect_reply);
         }
         break;
     case BotState::Setup::connecting:
@@ -962,6 +964,7 @@ void bot_setup_dialog(BotState& state, PreviewSession& session, const Json& bot)
             ImGui::SameLine();
         }
         if (ImGui::Button("Close")) {
+            session.abandon(state.connect_request);
             ImGui::CloseCurrentPopup();
         }
     }
@@ -979,9 +982,9 @@ void bot_connection(BotState& state, PreviewSession& session, const Json& bot, b
         ImGui::TextColored(warm, "Sample bot disconnected");
     }
     if (ImGui::Button(connected ? "Open setup demo" : "Set up bot")) {
+        session.abandon(state.connect_request);
         state.setup = BotState::Setup::intro;
-        state.connect_feedback = session.feedback_revision();
-        state.connect_timed_out = false;
+        state.connect_reply.reset();
         fill(state.token, "wave-preview-token");
         ImGui::OpenPopup("Set up a sample bot");
     }
@@ -1019,8 +1022,48 @@ void bot_connection(BotState& state, PreviewSession& session, const Json& bot, b
     }
 }
 
-void bot_settings(BotState& state, PreviewSession& session, const Json& bot)
+void submit_bot_save(BotState::Save& save, PreviewSession& session, Json settings)
 {
+    save.request = session.submit({{"action", "apply_bot_settings"}, {"settings", std::move(settings)}}, 5000);
+    if (save.request) {
+        save.reply.reset();
+    } else {
+        save.reply = PreviewReply{PreviewReply::Status::disconnected,
+                                  "The preview connection is unavailable."};
+    }
+}
+
+bool finish_bot_save(BotState::Save& save, PreviewSession& session, bool& dirty)
+{
+    auto reply = session.take_reply(save.request);
+    if (!reply) {
+        return false;
+    }
+    if (reply->status == PreviewReply::Status::timed_out) {
+        reply->message = "Preview did not confirm the update. Try again.";
+    } else if (reply->status == PreviewReply::Status::disconnected) {
+        reply->message = "The preview connection closed. Try again after reconnecting.";
+    }
+    const bool saved = reply->ok();
+    save.reply = std::move(reply);
+    if (saved) {
+        dirty = false;
+    }
+    return saved;
+}
+
+void show_bot_save(const BotState::Save& save)
+{
+    if (save.request) {
+        ImGui::TextDisabled("Saving sample bot settings...");
+    } else if (save.reply) {
+        feedback(*save.reply);
+    }
+}
+
+void bot_settings(BotState& state, PreviewSession& session)
+{
+    ImGui::BeginDisabled(state.settings_save.request.has_value());
     state.settings_dirty |= ImGui::Checkbox("Admin notifications", &state.notifications);
     state.settings_dirty |= ImGui::Checkbox("Allow status requests", &state.allow_status);
     state.settings_dirty |= ImGui::Checkbox("Allow demo configuration requests", &state.allow_config);
@@ -1062,19 +1105,19 @@ void bot_settings(BotState& state, PreviewSession& session, const Json& bot)
         for (std::size_t i = 0; i < permission_options.size(); ++i) {
             permissions[permission_options[i].key] = state.permissions[i];
         }
-        if (session.send({{"action", "apply_bot_settings"}, {"settings", {
-                {"notifications", state.notifications}, {"allow_status", state.allow_status},
-                {"allow_config", state.allow_config}, {"notification_rules", std::move(rules)},
-                {"permissions", std::move(permissions)}, {"overrides", field(bot, "overrides")}}}})) {
-            state.settings_dirty = false;
-        }
+        submit_bot_save(state.settings_save, session, {
+            {"notifications", state.notifications}, {"allow_status", state.allow_status},
+            {"allow_config", state.allow_config}, {"notification_rules", std::move(rules)},
+            {"permissions", std::move(permissions)}});
     }
     ImGui::EndDisabled();
-    feedback(session, {"apply_bot_settings"});
+    ImGui::EndDisabled();
+    show_bot_save(state.settings_save);
 }
 
-void bot_overrides(BotState& state, PreviewSession& session, const Json& bot)
+void bot_overrides(BotState& state, PreviewSession& session)
 {
+    ImGui::BeginDisabled(state.overrides_save.request.has_value());
     ImGui::TextWrapped("Use sample overrides in the configuration that this preview bot shows.");
     state.overrides_dirty |= edit("Domain", state.domain, "preview.example");
     state.overrides_dirty |= edit("Server name (SNI)", state.sni);
@@ -1087,16 +1130,14 @@ void bot_overrides(BotState& state, PreviewSession& session, const Json& bot)
         ImGui::PopStyleColor();
     }
     ImGui::BeginDisabled(!state.overrides_dirty || !valid);
-    if (ImGui::Button("Save overrides") &&
-        session.send({{"action", "apply_bot_settings"}, {"settings", {
-            {"notifications", bool_field(bot, "notifications")}, {"allow_status", bool_field(bot, "allow_status")},
-            {"allow_config", bool_field(bot, "allow_config")}, {"overrides", {
-                {"domain", state.domain.data()}, {"sni", state.sni.data()},
-                {"ws_host", state.ws_host.data()}, {"port", state.port}}}}}})) {
-        state.overrides_dirty = false;
+    if (ImGui::Button("Save overrides")) {
+        submit_bot_save(state.overrides_save, session, {{"overrides", {
+            {"domain", state.domain.data()}, {"sni", state.sni.data()},
+            {"ws_host", state.ws_host.data()}, {"port", state.port}}}});
     }
     ImGui::EndDisabled();
-    feedback(session, {"apply_bot_settings"});
+    ImGui::EndDisabled();
+    show_bot_save(state.overrides_save);
 }
 
 void bot_actions(BotState& state, PreviewSession& session, const Json& bot)
@@ -1145,6 +1186,11 @@ void bot_actions(BotState& state, PreviewSession& session, const Json& bot)
 void render_bot(BotState& state, PreviewSession& session, bool narrow)
 {
     const auto& bot = field(session.data(), "bot");
+    const bool settings_saved = finish_bot_save(state.settings_save, session, state.settings_dirty);
+    const bool overrides_saved = finish_bot_save(state.overrides_save, session, state.overrides_dirty);
+    if (settings_saved || overrides_saved) {
+        state.source = nullptr;
+    }
     sync_bot(state, bot);
     if (ImGui::BeginTabBar("bot-views", ImGuiTabBarFlags_FittingPolicyScroll)) {
         if (ImGui::BeginTabItem("Connection")) {
@@ -1152,11 +1198,11 @@ void render_bot(BotState& state, PreviewSession& session, bool narrow)
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Settings")) {
-            bot_settings(state, session, bot);
+            bot_settings(state, session);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Overrides")) {
-            bot_overrides(state, session, bot);
+            bot_overrides(state, session);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Actions")) {

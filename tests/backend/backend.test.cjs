@@ -257,6 +257,43 @@ test('simulates preview setup, settings, bot actions, and console entirely in me
     assert.deepEqual((await requestPreview(socket, 'clear_logs')).data.logs, []);
 });
 
+test('merges independent bot settings and overrides updates from stale clients in either order', async t => {
+    for (const order of [['settings', 'overrides'], ['overrides', 'settings']]) {
+        await t.test(`${order[0]} first`, async clients => {
+            const settingsClient = await connectPreview(clients);
+            const overridesClient = await connectPreview(clients);
+            const { bot } = settingsClient.initial;
+            assert.deepEqual(overridesClient.initial.bot, bot);
+            const notifications = !bot.notifications;
+            const port = bot.overrides.port === 443 ? 8443 : 443;
+            const edits = {
+                settings: {
+                    socket: settingsClient.socket,
+                    fields: {
+                        notifications, allow_status: bot.allow_status, allow_config: bot.allow_config,
+                        notification_rules: bot.notification_rules, permissions: bot.permissions,
+                    },
+                },
+                overrides: {
+                    socket: overridesClient.socket,
+                    fields: { overrides: { ...overridesClient.initial.bot.overrides, port } },
+                },
+            };
+            const [first, second] = order.map(name => edits[name]);
+            const save = edit => requestPreview(edit.socket, 'apply_bot_settings', { settings: edit.fields });
+            const firstReply = await save(first);
+            assert.equal(firstReply.ok, true, firstReply.feedback);
+            const observed = nextPreviewSnapshot(first.socket, frame => frame.request_id === undefined &&
+                frame.data.bot.notifications === notifications && frame.data.bot.overrides.port === port);
+            const secondReply = await save(second);
+            assert.equal(secondReply.ok, true, secondReply.feedback);
+            const expected = { ...bot, notifications, overrides: { ...bot.overrides, port } };
+            assert.deepEqual(secondReply.data.bot, expected);
+            assert.deepEqual((await observed).data.bot, expected);
+        });
+    }
+});
+
 async function expectStartupFailure(args, diagnostic) {
     await assert.rejects(run(backend, args, { cwd, timeout }), error => {
         assert.ok(Number.isInteger(error.code) && error.code !== 0, error);

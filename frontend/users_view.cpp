@@ -102,21 +102,21 @@ std::string remaining(int minutes)
     return std::format("{}m", minutes);
 }
 
-void open_dialog(UsersViewState& state, Dialog dialog)
+void open_dialog(UsersViewState& state, PreviewSession& session, Dialog dialog)
 {
+    session.abandon(state.request_id);
     state.dialog = dialog;
     state.open_dialog = true;
     state.draft = {};
     state.message = {};
     state.configuration.clear();
     state.qr.reset();
-    state.pending_action.clear();
     state.local_feedback.clear();
 }
 
-void open_user_dialog(UsersViewState& state, Dialog dialog, const UserRow& user)
+void open_user_dialog(UsersViewState& state, PreviewSession& session, Dialog dialog, const UserRow& user)
 {
-    open_dialog(state, dialog);
+    open_dialog(state, session, dialog);
     state.draft = read_draft(user);
     if (dialog == Dialog::share) {
         state.configuration = text_field(user.record, "configuration");
@@ -139,33 +139,30 @@ bool send(UsersViewState& state, PreviewSession& session, Json request)
 void submit(UsersViewState& state, PreviewSession& session, const char* action, Json request)
 {
     request["action"] = action;
-    const auto revision = session.feedback_revision();
-    if (send(state, session, std::move(request))) {
-        state.pending_action = action;
-        state.feedback_revision = revision;
-    }
+    state.request_id = session.submit(std::move(request));
+    state.local_feedback = state.request_id ? "" : "Preview connection unavailable. Try again after reconnecting.";
 }
 
-void row_options(UsersViewState& state, const UserRow& user)
+void row_options(UsersViewState& state, PreviewSession& session, const UserRow& user)
 {
     if (ImGui::Button("Options")) ImGui::OpenPopup("User options");
     if (!ImGui::BeginPopup("User options")) return;
 
-    if (ImGui::MenuItem("Edit")) open_user_dialog(state, Dialog::edit, user);
-    if (ImGui::MenuItem("Notes")) open_user_dialog(state, Dialog::notes, user);
-    if (ImGui::MenuItem("Share configuration")) open_user_dialog(state, Dialog::share, user);
-    if (ImGui::MenuItem("Reset traffic")) open_user_dialog(state, Dialog::reset_traffic, user);
+    if (ImGui::MenuItem("Edit")) open_user_dialog(state, session, Dialog::edit, user);
+    if (ImGui::MenuItem("Notes")) open_user_dialog(state, session, Dialog::notes, user);
+    if (ImGui::MenuItem("Share configuration")) open_user_dialog(state, session, Dialog::share, user);
+    if (ImGui::MenuItem("Reset traffic")) open_user_dialog(state, session, Dialog::reset_traffic, user);
     if (ImGui::BeginMenu("Bot actions")) {
         if (ImGui::MenuItem("Copy demo invite")) {
             ImGui::SetClipboardText(std::format("wave-preview://workspace/bot/invite/{}", user.id).c_str());
             state.local_feedback = "Demo invite copied.";
         }
-        if (ImGui::MenuItem("Send configuration")) open_user_dialog(state, Dialog::configuration, user);
-        if (ImGui::MenuItem("Send message")) open_user_dialog(state, Dialog::message, user);
+        if (ImGui::MenuItem("Send configuration")) open_user_dialog(state, session, Dialog::configuration, user);
+        if (ImGui::MenuItem("Send message")) open_user_dialog(state, session, Dialog::message, user);
         ImGui::EndMenu();
     }
     ImGui::Separator();
-    if (ImGui::MenuItem("Delete")) open_user_dialog(state, Dialog::remove, user);
+    if (ImGui::MenuItem("Delete")) open_user_dialog(state, session, Dialog::remove, user);
     ImGui::EndPopup();
 }
 
@@ -263,7 +260,7 @@ void desktop_users(UsersViewState& state, PreviewSession& session, const std::ve
                 }
             }
             if (ImGui::TableNextColumn()) enabled_control(state, session, user, false);
-            if (ImGui::TableNextColumn()) row_options(state, user);
+            if (ImGui::TableNextColumn()) row_options(state, session, user);
             if (ImGui::TableNextColumn()) ImGui::Text("%.2f MiB", user.upload_rate);
             if (ImGui::TableNextColumn()) ImGui::Text("%.2f MiB", user.download_rate);
             if (ImGui::TableNextColumn()) ImGui::Text("%.1f GiB", user.upload_total);
@@ -343,7 +340,7 @@ void compact_users(UsersViewState& state, PreviewSession& session, const std::ve
         enabled_control(state, session, user, true);
         ImGui::SameLine(0, 3);
         ImGui::TextColored(user.enabled ? mint : amber, "%s", user.enabled ? "On" : "Off");
-        row_options(state, user);
+        row_options(state, session, user);
         ImGui::PopID();
     }
     ImGui::EndTable();
@@ -464,11 +461,11 @@ const char* dialog_title(Dialog dialog)
     return "User action";
 }
 
-void close_dialog(UsersViewState& state)
+void close_dialog(UsersViewState& state, PreviewSession& session)
 {
     ImGui::CloseCurrentPopup();
     state.dialog.reset();
-    state.pending_action.clear();
+    session.abandon(state.request_id);
     state.local_feedback.clear();
 }
 
@@ -486,27 +483,24 @@ void render_dialog(UsersViewState& state, PreviewSession& session)
     fit_preview_dialog(460);
     bool open = true;
     if (!ImGui::BeginPopupModal(name.c_str(), &open, ImGuiWindowFlags_NoSavedSettings)) {
-        if (!ImGui::IsPopupOpen(dialog_id)) state.dialog.reset();
+        if (!ImGui::IsPopupOpen(dialog_id)) {
+            state.dialog.reset();
+            session.abandon(state.request_id);
+        }
         return;
     }
 
-    if (!state.pending_action.empty()) {
-        const auto* feedback = session.feedback_for(state.pending_action);
-        if (session.status() != PreviewStatus::ready) {
-            state.local_feedback = "Preview connection unavailable.";
-            state.pending_action.clear();
-        } else if (feedback && feedback->revision > state.feedback_revision) {
-            if (feedback->ok) {
-                close_dialog(state);
-                ImGui::EndPopup();
-                return;
-            }
-            state.local_feedback = feedback->message;
-            state.pending_action.clear();
+    if (const auto reply = session.take_reply(state.request_id)) {
+        if (reply->ok()) {
+            close_dialog(state, session);
+            ImGui::EndPopup();
+            return;
         }
+        state.local_feedback = reply->status == PreviewReply::Status::disconnected
+            ? "Preview connection unavailable." : reply->message;
     }
 
-    const bool pending = !state.pending_action.empty();
+    const bool pending = state.request_id.has_value();
     ImGui::BeginDisabled(pending);
     switch (dialog) {
     case Dialog::create:
@@ -564,7 +558,7 @@ void render_dialog(UsersViewState& state, PreviewSession& session)
 
     if (dialog != Dialog::share) ImGui::SameLine();
     if (ImGui::Button(dialog == Dialog::share || dialog == Dialog::notes ? "Close" : "Cancel") || !open) {
-        close_dialog(state);
+        close_dialog(state, session);
     } else if (pending) {
         ImGui::TextDisabled("Applying to preview…");
     } else if (!state.local_feedback.empty()) {
@@ -586,7 +580,7 @@ void render_users(UsersViewState& state, PreviewSession& session, bool narrow)
     const float width = ImGui::GetContentRegionAvail().x;
     const bool compact = narrow || width < 745.0f;
     ImGui::BeginDisabled(!ready);
-    if (ImGui::Button("Create user")) open_dialog(state, Dialog::create);
+    if (ImGui::Button("Create user")) open_dialog(state, session, Dialog::create);
     ImGui::SameLine();
     if (ImGui::Button(live ? "Live data" : "Paused")) {
         send(state, session, {{"action", "set_users_live"}, {"live", !live}});
@@ -594,8 +588,8 @@ void render_users(UsersViewState& state, PreviewSession& session, bool narrow)
     if (width >= 285.0f) ImGui::SameLine();
     if (ImGui::Button("Bot actions")) ImGui::OpenPopup("User bot actions");
     if (ImGui::BeginPopup("User bot actions")) {
-        if (ImGui::MenuItem("Send configurations to all")) open_dialog(state, Dialog::bulk_configuration);
-        if (ImGui::MenuItem("Broadcast message")) open_dialog(state, Dialog::broadcast);
+        if (ImGui::MenuItem("Send configurations to all")) open_dialog(state, session, Dialog::bulk_configuration);
+        if (ImGui::MenuItem("Broadcast message")) open_dialog(state, session, Dialog::broadcast);
         ImGui::EndPopup();
     }
     ImGui::EndDisabled();

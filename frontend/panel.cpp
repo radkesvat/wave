@@ -91,15 +91,15 @@ void draw_header(const PanelLayout& layout, ImVec2 viewport)
     draw.AddText(ImGui::GetFont(), 15, {preview_x, y}, accent, "Preview");
 }
 
-void open_workspace_entry(PanelState& state, EntryPage page)
+void open_workspace_entry(PanelState& state, EntryPage page, PreviewSession& session)
 {
-    open_entry(state.entry, page);
+    open_entry(state.entry, page, session);
     if (page == EntryPage::workspace) {
         state.page = PanelPage::users;
     }
 }
 
-void render_menus(PanelState& state, int focus)
+void render_menus(PanelState& state, int focus, PreviewSession& session)
 {
     ImGui::SetCursorScreenPos({104, 9});
     if (ImGui::Button("Menu", {55, 30}) || state.browser_control == 1) {
@@ -124,10 +124,10 @@ void render_menus(PanelState& state, int focus)
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Demo sign-in")) {
-            open_workspace_entry(state, EntryPage::sign_in);
+            open_workspace_entry(state, EntryPage::sign_in, session);
         }
         if (ImGui::MenuItem("First-run setup")) {
-            open_workspace_entry(state, EntryPage::setup);
+            open_workspace_entry(state, EntryPage::setup, session);
         }
         if (ImGui::MenuItem("Demo sign-out")) {
             state.requested_dialog = PanelDialog::sign_out;
@@ -262,7 +262,7 @@ void render_dialogs(PanelState& state, PreviewSession& session)
             ImGui::TextWrapped("Return to the demo sign-in screen?");
             if (ImGui::Button("Sign out")) {
                 session.send({{"action", "sign_out"}});
-                open_workspace_entry(state, EntryPage::sign_in);
+                open_workspace_entry(state, EntryPage::sign_in, session);
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
@@ -434,7 +434,7 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
 
     PanelLayout layout(viewport.x, state);
     draw_header(layout, viewport);
-    render_menus(state, browser_focus);
+    render_menus(state, browser_focus, session);
     state.browser_control = 0;
     layout = PanelLayout(viewport.x, state);
     if (state.entry.page != EntryPage::workspace) {

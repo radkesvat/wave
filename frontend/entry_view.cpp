@@ -37,26 +37,21 @@ void submit(EntryViewState& state, PreviewSession& session)
         request["name"] = state.panel_name;
         request["domain"] = state.domain;
     }
-    state.requested_at = session.feedback_revision();
-    state.pending = session.send(std::move(request));
-    state.message = state.pending ? (setup ? "Applying demo setup…" : "Checking demo credentials…")
-                                  : "The preview connection is unavailable.";
+    state.request_id = session.submit(std::move(request));
+    state.message = state.request_id ? (setup ? "Applying demo setup…" : "Checking demo credentials…")
+                                     : "The preview connection is unavailable.";
 }
 
-void receive_result(EntryViewState& state, const PreviewSession& session)
+void receive_result(EntryViewState& state, PreviewSession& session)
 {
-    if (!state.pending) {
+    const auto reply = session.take_reply(state.request_id);
+    if (!reply) {
         return;
     }
-    if (session.status() == PreviewStatus::unavailable) {
-        state.pending = false;
+    if (reply->status == PreviewReply::Status::disconnected) {
         state.message = "The preview connection closed. Try again after reconnecting.";
-        return;
-    }
-    const std::string_view action = state.page == EntryPage::setup ? "setup" : "sign_in";
-    if (const auto* reply = session.feedback_for(action); reply && reply->revision > state.requested_at) {
-        state.pending = false;
-        state.complete = reply->ok;
+    } else {
+        state.complete = reply->ok();
         state.message = reply->message;
     }
 }
@@ -122,8 +117,9 @@ void render_setup(EntryViewState& state, PreviewSession& session)
 
 } // namespace
 
-void open_entry(EntryViewState& state, EntryPage page)
+void open_entry(EntryViewState& state, EntryPage page, PreviewSession& session)
 {
+    session.abandon(state.request_id);
     state = {};
     state.page = page;
 }
@@ -140,12 +136,12 @@ void render_entry(EntryViewState& state, PreviewSession& session)
         ImGui::TextUnformatted(state.page == EntryPage::setup ? "Setup complete" : "Sign-in complete");
         ImGui::TextWrapped("%s", state.message.c_str());
         if (ImGui::Button("Open workspace")) {
-            open_entry(state, EntryPage::workspace);
+            open_entry(state, EntryPage::workspace, session);
         }
         return;
     }
 
-    ImGui::BeginDisabled(state.pending);
+    ImGui::BeginDisabled(state.request_id.has_value());
     if (state.page == EntryPage::setup) {
         render_setup(state, session);
     } else {
@@ -165,7 +161,7 @@ void render_entry(EntryViewState& state, PreviewSession& session)
     }
     ImGui::Spacing();
     if (ImGui::Button("Back to workspace")) {
-        open_entry(state, EntryPage::workspace);
+        open_entry(state, EntryPage::workspace, session);
     }
 }
 

@@ -21,12 +21,24 @@ struct PreviewFeedback {
     bool ok = false;
 };
 
+struct PreviewReply {
+    enum class Status { accepted, rejected, disconnected, timed_out };
+
+    Status status;
+    std::string message;
+
+    bool ok() const { return status == Status::accepted; }
+};
+
 class PreviewSession {
 public:
     void start();
     void stop();
     void update();
     bool send(nlohmann::json request);
+    std::optional<std::uint64_t> submit(nlohmann::json request, double timeout_ms = 0);
+    std::optional<PreviewReply> take_reply(std::optional<std::uint64_t>& request_id);
+    void abandon(std::optional<std::uint64_t>& request_id);
 
     PreviewStatus status() const { return status_; }
     bool ready() const { return status_ == PreviewStatus::ready; }
@@ -35,10 +47,15 @@ public:
     std::string_view feedback() const { return feedback_; }
     bool feedback_ok() const { return feedback_ok_; }
     std::string_view feedback_action() const { return feedback_action_; }
-    std::uint64_t feedback_revision() const { return feedback_revision_; }
     const PreviewFeedback* feedback_for(std::string_view action) const;
 
 private:
+    struct Request {
+        std::string action;
+        double deadline;
+        std::optional<PreviewReply> reply;
+    };
+
     void fail();
     bool receive(std::string_view payload);
 
@@ -50,6 +67,8 @@ private:
     std::string feedback_;
     std::string feedback_action_;
     std::map<std::string, PreviewFeedback, std::less<>> action_feedback_;
+    std::map<std::uint64_t, Request> requests_;
+    std::uint64_t next_request_id_ = 1;
     bool feedback_ok_ = false;
     std::uint64_t feedback_revision_ = 0;
 };

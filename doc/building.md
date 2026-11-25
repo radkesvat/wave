@@ -127,6 +127,16 @@ The workspace opens `/ws/preview` on the same host and port. A JSON frame with
 `type` set to `snapshot` carries Users, Logs, server metrics, settings,
 topology, bot status, and console data in `data`. Requests specify an `action`
 and its fields. The server replies with a snapshot and action feedback.
+Forms that wait for confirmation send a unique numeric `request_id`. The
+server echoes it to the requesting browser, and the form completes only
+from the reply carrying its ID. Browsers still apply valid snapshot data
+when a reply arrives after the form has been closed or replaced.
+
+Both Telegram Bot forms use `apply_bot_settings`. Settings sends
+`notifications`, `allow_status`, `allow_config`, `notification_rules`, and
+`permissions`. Overrides sends `overrides` alone. The server merges the
+submitted fields so saves from the two forms can arrive in either order.
+
 Other connected browsers receive the shared updates. Overview and Server
 Status use the same server metrics. Restarting the process restores the
 sample data. The console, credentials, and bot actions run as in-memory

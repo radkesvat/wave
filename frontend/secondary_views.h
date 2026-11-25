@@ -1,5 +1,7 @@
 #pragma once
 
+#include "preview_session.h"
+
 #include <nlohmann/json.hpp>
 
 #include <array>
@@ -27,10 +29,8 @@ struct SecondaryViewsState {
         int port = 2030;
         bool multiplex = false;
         bool dirty = false;
-        bool applying = false;
-        bool apply_timed_out = false;
-        double apply_deadline = 0;
-        std::uint64_t apply_feedback = 0;
+        std::optional<std::uint64_t> apply_request;
+        std::optional<PreviewReply> apply_reply;
         std::string backup;
     } settings;
 
@@ -59,6 +59,10 @@ struct SecondaryViewsState {
             bool enabled = true;
             bool sound = false;
         };
+        struct Save {
+            std::optional<std::uint64_t> request;
+            std::optional<PreviewReply> reply;
+        };
         enum class Setup { intro, token, connecting, complete };
 
         nlohmann::json source;
@@ -71,8 +75,10 @@ struct SecondaryViewsState {
         std::array<char, 481> message{};
         int port = 0;
         int audience = 0;
-        double connect_deadline = 0;
-        std::uint64_t connect_feedback = 0;
+        std::optional<std::uint64_t> connect_request;
+        std::optional<PreviewReply> connect_reply;
+        Save settings_save;
+        Save overrides_save;
         Setup setup = Setup::intro;
         bool notifications = false;
         bool allow_status = false;
@@ -80,7 +86,6 @@ struct SecondaryViewsState {
         bool settings_dirty = false;
         bool overrides_dirty = false;
         bool access_link_copied = false;
-        bool connect_timed_out = false;
     } bot;
 };
 

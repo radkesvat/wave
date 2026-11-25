@@ -40,8 +40,7 @@ struct UsersViewState {
     std::array<char, 513> message{};
     std::string configuration;
     std::optional<qrcodegen::QrCode> qr;
-    std::string pending_action;
-    std::uint64_t feedback_revision = 0;
+    std::optional<std::uint64_t> request_id;
     std::string local_feedback;
 };
 

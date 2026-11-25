@@ -135,12 +135,19 @@ void PreviewSession::stop()
         emscripten_websocket_delete(socket_);
     }
     socket_ = 0;
+    requests_.clear();
 }
 
 void PreviewSession::update()
 {
-    if (status_ == PreviewStatus::loading && emscripten_get_now() >= deadline_) {
+    const double now = emscripten_get_now();
+    if (status_ == PreviewStatus::loading && now >= deadline_) {
         fail();
+    }
+    for (auto& [id, request] : requests_) {
+        if (!request.reply && request.deadline > 0 && now >= request.deadline) {
+            request.reply = PreviewReply{PreviewReply::Status::timed_out, {}};
+        }
     }
 }
 
@@ -156,6 +163,49 @@ bool PreviewSession::send(Json request)
     }
     action_feedback_.try_emplace(action->get_ref<const std::string&>());
     return true;
+}
+
+std::optional<std::uint64_t> PreviewSession::submit(Json request, double timeout_ms)
+{
+    const auto action = request.find("action");
+    if (action == request.end() || !action->is_string()) {
+        return std::nullopt;
+    }
+    const auto action_name = action->get<std::string>();
+    const auto id = next_request_id_++;
+    request["request_id"] = id;
+    if (!send(std::move(request))) {
+        return std::nullopt;
+    }
+    const double deadline = timeout_ms > 0 ? emscripten_get_now() + timeout_ms : 0;
+    requests_.emplace(id, Request{action_name, deadline, std::nullopt});
+    return id;
+}
+
+std::optional<PreviewReply> PreviewSession::take_reply(std::optional<std::uint64_t>& request_id)
+{
+    if (!request_id) {
+        return std::nullopt;
+    }
+    const auto request = requests_.find(*request_id);
+    if (request == requests_.end()) {
+        request_id.reset();
+        return PreviewReply{PreviewReply::Status::disconnected, {}};
+    }
+    if (!request->second.reply) {
+        return std::nullopt;
+    }
+    auto reply = std::move(request->second.reply);
+    abandon(request_id);
+    return reply;
+}
+
+void PreviewSession::abandon(std::optional<std::uint64_t>& request_id)
+{
+    if (request_id) {
+        requests_.erase(*request_id);
+        request_id.reset();
+    }
 }
 
 const PreviewFeedback* PreviewSession::feedback_for(std::string_view action) const
@@ -189,6 +239,15 @@ bool PreviewSession::receive(std::string_view payload)
         const auto known_action = action_feedback_.find(feedback_action_);
         if (known_action != action_feedback_.end()) {
             known_action->second = {feedback_, feedback_revision_, feedback_ok_};
+        }
+        const auto id = frame.find("request_id");
+        if (id != frame.end() && id->is_number_unsigned()) {
+            const auto request = requests_.find(id->get<std::uint64_t>());
+            if (request != requests_.end() && request->second.action == feedback_action_ &&
+                !request->second.reply) {
+                const auto status = feedback_ok_ ? PreviewReply::Status::accepted : PreviewReply::Status::rejected;
+                request->second.reply = PreviewReply{status, feedback_};
+            }
         }
     }
     data_ = std::move(frame["data"]);
