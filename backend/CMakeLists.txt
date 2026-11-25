@@ -1,6 +1,3 @@
-cmake_minimum_required(VERSION 3.24)
-project(WaveBackend LANGUAGES CXX)
-
 include(FetchContent)
 # Keep the preview build independent of system TLS and compression libraries.
 set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF)
@@ -22,8 +19,3 @@ set_target_properties(wave-backend PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 target_link_libraries(wave-backend PRIVATE httplib::httplib)
-
-include(CTest)
-if(BUILD_TESTING)
-    add_subdirectory("../tests/backend" "${CMAKE_CURRENT_BINARY_DIR}/tests")
-endif()

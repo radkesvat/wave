@@ -83,16 +83,16 @@ The backend needs CMake 3.24 or newer, Ninja, and a host C++20 compiler. The
 first configure downloads cpp-httplib v0.67.0 and verifies the archive against
 the checksum pinned in the native CMake project. [cpp-httplib release](https://github.com/yhirose/cpp-httplib/releases/tag/v0.67.0)
 
-Use a shell with the native compiler on `PATH` and run these commands from the
-Wave root. Use `backend-debug` in both commands for a debug build.
+Run these commands from the Wave root with the native compiler on `PATH`.
+Use `backend-debug` in both commands for a debug build.
 
 ```sh
-(
-  cd backend &&
-  cmake --preset backend-release &&
-  cmake --build --preset backend-release
-)
+cmake --preset backend-release
+cmake --build --preset backend-release
 ```
+
+If an existing backend build directory was configured from `backend/`, add
+`--fresh` to the first configure command to reset its CMake cache.
 
 The executable is `build/backend-release/wave-backend` or
 `build/backend-debug/wave-backend`. After building the frontend with the
@@ -122,7 +122,7 @@ from the other machine.
 
 The backend smoke tests use Node.js 22 or later, a temporary site fixture,
 and an OS-assigned loopback port. They can run without an Emscripten build
-or npm dependencies. From `backend/`, run the test preset that matches the
+or npm dependencies. From the Wave root, run the test preset that matches the
 build.
 
 ```sh

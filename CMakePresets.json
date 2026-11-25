@@ -2,10 +2,15 @@
   "version": 3,
   "configurePresets": [
     {
-      "name": "web",
+      "name": "ninja",
       "hidden": true,
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    {
+      "name": "web",
+      "hidden": true,
+      "inherits": "ninja",
       "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
     },
     {
@@ -21,6 +26,20 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "backend-debug",
+      "inherits": "ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "backend-release",
+      "inherits": "ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
     }
   ],
   "buildPresets": [
@@ -31,11 +50,19 @@
     {
       "name": "web-release",
       "configurePreset": "web-release"
+    },
+    {
+      "name": "backend-debug",
+      "configurePreset": "backend-debug"
+    },
+    {
+      "name": "backend-release",
+      "configurePreset": "backend-release"
     }
   ],
   "testPresets": [
     {
-      "name": "web",
+      "name": "wave-tests",
       "hidden": true,
       "output": {
         "outputOnFailure": true
@@ -46,13 +73,23 @@
     },
     {
       "name": "web-debug",
-      "inherits": "web",
+      "inherits": "wave-tests",
       "configurePreset": "web-debug"
     },
     {
       "name": "web-release",
-      "inherits": "web",
+      "inherits": "wave-tests",
       "configurePreset": "web-release"
+    },
+    {
+      "name": "backend-debug",
+      "inherits": "wave-tests",
+      "configurePreset": "backend-debug"
+    },
+    {
+      "name": "backend-release",
+      "inherits": "wave-tests",
+      "configurePreset": "backend-release"
     }
   ]
 }
