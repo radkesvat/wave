@@ -25,7 +25,9 @@ source ./emsdk_env.sh
 
 ## Build
 
-From the Wave root in that shell, run the following commands.
+Run the build commands from the Wave root after activating the SDK.
+
+### Debug
 
 ```sh
 cmake --preset web-debug
@@ -33,15 +35,25 @@ cmake --build --preset web-debug
 python3 -m http.server 8000 --bind 127.0.0.1 --directory build/web-debug/site
 ```
 
-When switching SDK versions, use `cmake --fresh --preset web-debug` for the
-configure step to reset CMake's cached compiler and toolchain.
+### Release
+
+```sh
+cmake --preset web-release
+cmake --build --preset web-release
+python3 -m http.server 8000 --bind 127.0.0.1 --directory build/web-release/site
+```
+
+The release preset uses `-O3 -DNDEBUG` and enables link-time optimization
+with `-flto` during compilation and linking. It generates a browser-only
+JavaScript loader. [Emscripten optimization guide](https://emscripten.org/docs/optimizing/Optimizing-Code.html#lto)
 
 Open [the local Wave preview](http://127.0.0.1:8000/) and check that Overview
 opens with the disconnected status, sample metrics, and download chart.
 
-The preset writes `index.html`, `index.js`, `index.wasm`, and third-party license
-notices under `build/web-debug/site/`. Serve that directory over HTTP. To see
-the compile and link commands, run `cmake --build --preset web-debug --verbose`.
+Each preset writes `index.html`, `index.js`, `index.wasm`, and third-party
+license notices to its own `site/` directory. Add `--verbose` to a build command
+to show the compile and link commands. When switching SDK versions, add
+`--fresh` to the configure command to reset CMake's cached compiler and toolchain.
 
 ## Browser smoke test
 

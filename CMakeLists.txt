@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 project(Wave LANGUAGES CXX)
 
 if(NOT EMSCRIPTEN)
-    message(FATAL_ERROR "Activate the Emscripten SDK and configure with cmake --preset web-debug.")
+    message(FATAL_ERROR "Activate the Emscripten SDK and configure with the web-debug or web-release preset.")
 endif()
 
 include(FetchContent)
@@ -33,7 +33,10 @@ set_target_properties(wave PROPERTIES
 )
 target_include_directories(wave PRIVATE "${imgui_SOURCE_DIR}" "${imgui_SOURCE_DIR}/backends")
 target_compile_definitions(wave PRIVATE IMGUI_IMPL_OPENGL_ES3)
-target_compile_options(wave PRIVATE -sUSE_SDL=2)
+target_compile_options(wave PRIVATE
+    -sUSE_SDL=2
+    "$<$<CONFIG:Release>:-flto>"
+)
 
 set(wave_shell "${CMAKE_CURRENT_SOURCE_DIR}/frontend/shell.html")
 set(wave_font "${imgui_SOURCE_DIR}/misc/fonts/Karla-Regular.ttf")
@@ -42,6 +45,8 @@ target_link_options(wave PRIVATE
     -sUSE_SDL=2
     -sMIN_WEBGL_VERSION=2
     -sMAX_WEBGL_VERSION=2
+    "$<$<CONFIG:Release>:-flto>"
+    "$<$<CONFIG:Release>:-sENVIRONMENT=web>"
     "SHELL:--shell-file \"${wave_shell}\""
     "SHELL:--embed-file \"${wave_font}@/karla.ttf\""
 )
