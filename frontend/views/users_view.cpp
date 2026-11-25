@@ -22,8 +22,7 @@ constexpr ImVec4 mint{0.41f, 0.90f, 0.77f, 1.0f};
 constexpr ImVec4 amber{0.97f, 0.75f, 0.47f, 1.0f};
 constexpr const char* dialog_id = "###user-dialog";
 
-template <std::size_t Size>
-void copy_field(std::array<char, Size>& destination, std::string_view value)
+template <std::size_t Size> void copy_field(std::array<char, Size>& destination, std::string_view value)
 {
     const auto length = std::min(value.size(), Size - 1);
     std::copy_n(value.begin(), length, destination.begin());
@@ -48,9 +47,15 @@ UserDraft make_draft(const UserRecord& user)
 
 std::string remaining(int minutes)
 {
-    if (minutes < 0) return "Unlimited";
-    if (minutes >= 1440) return std::format("{}d {}h", minutes / 1440, minutes / 60 % 24);
-    if (minutes >= 60) return std::format("{}h {}m", minutes / 60, minutes % 60);
+    if (minutes < 0) {
+        return "Unlimited";
+    }
+    if (minutes >= 1440) {
+        return std::format("{}d {}h", minutes / 1440, minutes / 60 % 24);
+    }
+    if (minutes >= 60) {
+        return std::format("{}h {}m", minutes / 60, minutes % 60);
+    }
     return std::format("{}m", minutes);
 }
 
@@ -73,7 +78,8 @@ void open_user_dialog(UsersViewState& state, PreviewSession& session, Dialog dia
     if (dialog == Dialog::share) {
         state.configuration = user.configuration;
         if (!state.configuration.empty() && state.configuration.size() <= 512) {
-            state.qr = qrcodegen::QrCode::encodeText(state.configuration.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
+            state.qr =
+                qrcodegen::QrCode::encodeText(state.configuration.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
         }
     }
 }
@@ -92,29 +98,48 @@ void submit(UsersViewState& state, PreviewSession& session, const char* action, 
 {
     request["action"] = action;
     state.request_id = session.submit(std::move(request));
-    state.local_feedback = state.request_id ? "" : "Preview connection unavailable. Try again after reconnecting.";
+    state.local_feedback =
+        state.request_id ? "" : "Preview connection unavailable. Try again after reconnecting.";
 }
 
 void row_options(UsersViewState& state, PreviewSession& session, const UserRecord& user)
 {
-    if (ImGui::Button("Options")) ImGui::OpenPopup("User options");
-    if (!ImGui::BeginPopup("User options")) return;
+    if (ImGui::Button("Options")) {
+        ImGui::OpenPopup("User options");
+    }
+    if (!ImGui::BeginPopup("User options")) {
+        return;
+    }
 
-    if (ImGui::MenuItem("Edit")) open_user_dialog(state, session, Dialog::edit, user);
-    if (ImGui::MenuItem("Notes")) open_user_dialog(state, session, Dialog::notes, user);
-    if (ImGui::MenuItem("Share configuration")) open_user_dialog(state, session, Dialog::share, user);
-    if (ImGui::MenuItem("Reset traffic")) open_user_dialog(state, session, Dialog::reset_traffic, user);
+    if (ImGui::MenuItem("Edit")) {
+        open_user_dialog(state, session, Dialog::edit, user);
+    }
+    if (ImGui::MenuItem("Notes")) {
+        open_user_dialog(state, session, Dialog::notes, user);
+    }
+    if (ImGui::MenuItem("Share configuration")) {
+        open_user_dialog(state, session, Dialog::share, user);
+    }
+    if (ImGui::MenuItem("Reset traffic")) {
+        open_user_dialog(state, session, Dialog::reset_traffic, user);
+    }
     if (ImGui::BeginMenu("Bot actions")) {
         if (ImGui::MenuItem("Copy demo invite")) {
             ImGui::SetClipboardText(std::format("wave-preview://workspace/bot/invite/{}", user.id).c_str());
             state.local_feedback = "Demo invite copied.";
         }
-        if (ImGui::MenuItem("Send configuration")) open_user_dialog(state, session, Dialog::configuration, user);
-        if (ImGui::MenuItem("Send message")) open_user_dialog(state, session, Dialog::message, user);
+        if (ImGui::MenuItem("Send configuration")) {
+            open_user_dialog(state, session, Dialog::configuration, user);
+        }
+        if (ImGui::MenuItem("Send message")) {
+            open_user_dialog(state, session, Dialog::message, user);
+        }
         ImGui::EndMenu();
     }
     ImGui::Separator();
-    if (ImGui::MenuItem("Delete")) open_user_dialog(state, session, Dialog::remove, user);
+    if (ImGui::MenuItem("Delete")) {
+        open_user_dialog(state, session, Dialog::remove, user);
+    }
     ImGui::EndPopup();
 }
 
@@ -122,15 +147,17 @@ void enabled_control(UsersViewState& state, PreviewSession& session, const UserR
 {
     bool enabled = user.enabled;
     ImGui::PushStyleColor(ImGuiCol_Text, enabled ? mint : amber);
-    if (ImGui::Checkbox(compact ? "##enabled" : (enabled ? "Enabled##enabled" : "Disabled##enabled"), &enabled)) {
+    if (ImGui::Checkbox(compact ? "##enabled" : (enabled ? "Enabled##enabled" : "Disabled##enabled"),
+                        &enabled)) {
         send(state, session, {{"action", "set_user_enabled"}, {"id", user.id}, {"enabled", enabled}});
     }
-    if (compact && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", enabled ? "Enabled" : "Disabled");
+    if (compact && ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", enabled ? "Enabled" : "Disabled");
+    }
     ImGui::PopStyleColor();
 }
 
-template <typename Value>
-int comparison(const Value& left, const Value& right)
+template <typename Value> int comparison(const Value& left, const Value& right)
 {
     return (right < left) - (left < right);
 }
@@ -138,17 +165,24 @@ int comparison(const Value& left, const Value& right)
 int compare_users(const UserRecord& left, const UserRecord& right, Column column)
 {
     switch (column) {
-    case Column::name: return comparison(left.name, right.name);
-    case Column::enabled: return comparison(left.enabled, right.enabled);
-    case Column::upload_rate: return comparison(left.upload_rate, right.upload_rate);
-    case Column::download_rate: return comparison(left.download_rate, right.download_rate);
-    case Column::upload_total: return comparison(left.upload_total, right.upload_total);
-    case Column::download_total: return comparison(left.download_total, right.download_total);
+    case Column::name:
+        return comparison(left.name, right.name);
+    case Column::enabled:
+        return comparison(left.enabled, right.enabled);
+    case Column::upload_rate:
+        return comparison(left.upload_rate, right.upload_rate);
+    case Column::download_rate:
+        return comparison(left.download_rate, right.download_rate);
+    case Column::upload_total:
+        return comparison(left.upload_total, right.upload_total);
+    case Column::download_total:
+        return comparison(left.download_total, right.download_total);
     case Column::remaining: {
         const auto rank = [](int minutes) { return minutes < 0 ? INT_MAX : minutes; };
         return comparison(rank(left.remaining_minutes), rank(right.remaining_minutes));
     }
-    default: return comparison(left.id, right.id);
+    default:
+        return comparison(left.id, right.id);
     }
 }
 
@@ -156,7 +190,9 @@ std::vector<const UserRecord*> sorted_users(const std::vector<UserRecord>& users
 {
     std::vector<const UserRecord*> order;
     for (const auto& user : users) {
-        if (state.search.PassFilter(user.name.data(), user.name.data() + user.name.size())) order.push_back(&user);
+        if (state.search.PassFilter(user.name.data(), user.name.data() + user.name.size())) {
+            order.push_back(&user);
+        }
     }
     std::ranges::sort(order, [&](const UserRecord* left, const UserRecord* right) {
         const auto sort = compare_users(*left, *right, state.sort_column);
@@ -167,15 +203,21 @@ std::vector<const UserRecord*> sorted_users(const std::vector<UserRecord>& users
 
 void desktop_users(UsersViewState& state, PreviewSession& session, const std::vector<UserRecord>& users)
 {
-    constexpr auto flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter |
-                           ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
-    if (!ImGui::BeginTable("Users table", 9, flags, {0, 0})) return;
+    constexpr auto flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                           ImGuiTableFlags_BordersOuter | ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY |
+                           ImGuiTableFlags_SizingStretchProp;
+    if (!ImGui::BeginTable("Users table", 9, flags, {0, 0})) {
+        return;
+    }
 
     constexpr auto fixed = ImGuiTableColumnFlags_WidthFixed;
-    ImGui::TableSetupColumn("ID", fixed | ImGuiTableColumnFlags_DefaultSort, 32, static_cast<ImGuiID>(Column::id));
-    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 1, static_cast<ImGuiID>(Column::name));
+    ImGui::TableSetupColumn("ID", fixed | ImGuiTableColumnFlags_DefaultSort, 32,
+                            static_cast<ImGuiID>(Column::id));
+    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 1,
+                            static_cast<ImGuiID>(Column::name));
     ImGui::TableSetupColumn("State", fixed, 91, static_cast<ImGuiID>(Column::enabled));
-    ImGui::TableSetupColumn("Actions", fixed | ImGuiTableColumnFlags_NoSort, 67, static_cast<ImGuiID>(Column::actions));
+    ImGui::TableSetupColumn("Actions", fixed | ImGuiTableColumnFlags_NoSort, 67,
+                            static_cast<ImGuiID>(Column::actions));
     ImGui::TableSetupColumn("Upload / s", fixed, 87, static_cast<ImGuiID>(Column::upload_rate));
     ImGui::TableSetupColumn("Download / s", fixed, 95, static_cast<ImGuiID>(Column::download_rate));
     ImGui::TableSetupColumn("Total up", fixed, 77, static_cast<ImGuiID>(Column::upload_total));
@@ -203,21 +245,38 @@ void desktop_users(UsersViewState& state, PreviewSession& session, const std::ve
             const auto& user = *order[i];
             ImGui::PushID(user.id);
             ImGui::TableNextRow(ImGuiTableRowFlags_None, 30);
-            if (ImGui::TableNextColumn()) ImGui::TextDisabled("%d", user.id);
+            if (ImGui::TableNextColumn()) {
+                ImGui::TextDisabled("%d", user.id);
+            }
             if (ImGui::TableNextColumn()) {
                 const auto* end = user.name.data() + user.name.size();
                 ImGui::TextUnformatted(user.name.data(), end);
-                if (ImGui::IsItemHovered() && ImGui::CalcTextSize(user.name.data(), end).x > ImGui::GetContentRegionAvail().x) {
+                if (ImGui::IsItemHovered() &&
+                    ImGui::CalcTextSize(user.name.data(), end).x > ImGui::GetContentRegionAvail().x) {
                     ImGui::SetTooltip("%.*s", static_cast<int>(user.name.size()), user.name.data());
                 }
             }
-            if (ImGui::TableNextColumn()) enabled_control(state, session, user, false);
-            if (ImGui::TableNextColumn()) row_options(state, session, user);
-            if (ImGui::TableNextColumn()) ImGui::Text("%.2f MiB", user.upload_rate);
-            if (ImGui::TableNextColumn()) ImGui::Text("%.2f MiB", user.download_rate);
-            if (ImGui::TableNextColumn()) ImGui::Text("%.1f GiB", user.upload_total);
-            if (ImGui::TableNextColumn()) ImGui::Text("%.1f GiB", user.download_total);
-            if (ImGui::TableNextColumn()) ImGui::TextUnformatted(remaining(user.remaining_minutes).c_str());
+            if (ImGui::TableNextColumn()) {
+                enabled_control(state, session, user, false);
+            }
+            if (ImGui::TableNextColumn()) {
+                row_options(state, session, user);
+            }
+            if (ImGui::TableNextColumn()) {
+                ImGui::Text("%.2f MiB", user.upload_rate);
+            }
+            if (ImGui::TableNextColumn()) {
+                ImGui::Text("%.2f MiB", user.download_rate);
+            }
+            if (ImGui::TableNextColumn()) {
+                ImGui::Text("%.1f GiB", user.upload_total);
+            }
+            if (ImGui::TableNextColumn()) {
+                ImGui::Text("%.1f GiB", user.download_total);
+            }
+            if (ImGui::TableNextColumn()) {
+                ImGui::TextUnformatted(remaining(user.remaining_minutes).c_str());
+            }
             ImGui::PopID();
         }
     }
@@ -226,12 +285,21 @@ void desktop_users(UsersViewState& state, PreviewSession& session, const std::ve
 
 void compact_users(UsersViewState& state, PreviewSession& session, const std::vector<UserRecord>& users)
 {
-    constexpr const char* choices[] = {"ID", "Name", "Enabled", "Upload rate", "Download rate",
-                                       "Total upload", "Total download", "Time left"};
-    constexpr Column columns[] = {Column::id, Column::name, Column::enabled, Column::upload_rate,
-                                  Column::download_rate, Column::upload_total, Column::download_total, Column::remaining};
+    constexpr const char* choices[] = {
+        "ID",           "Name",           "Enabled",  "Upload rate", "Download rate",
+        "Total upload", "Total download", "Time left"};
+    constexpr Column columns[] = {Column::id,
+                                  Column::name,
+                                  Column::enabled,
+                                  Column::upload_rate,
+                                  Column::download_rate,
+                                  Column::upload_total,
+                                  Column::download_total,
+                                  Column::remaining};
     ImGui::SetNextItemWidth(146);
-    if (ImGui::Combo("##user-sort", &state.compact_sort, choices, IM_ARRAYSIZE(choices))) state.compact_page = 0;
+    if (ImGui::Combo("##user-sort", &state.compact_sort, choices, IM_ARRAYSIZE(choices))) {
+        state.compact_page = 0;
+    }
     state.sort_column = columns[state.compact_sort];
     ImGui::SameLine();
     if (ImGui::Button(state.descending ? "Descending" : "Ascending")) {
@@ -247,11 +315,15 @@ void compact_users(UsersViewState& state, PreviewSession& session, const std::ve
     state.compact_page = std::min(state.compact_page, final_page);
 
     ImGui::BeginDisabled(state.compact_page == 0);
-    if (ImGui::Button("Previous")) --state.compact_page;
+    if (ImGui::Button("Previous")) {
+        --state.compact_page;
+    }
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(state.compact_page == final_page);
-    if (ImGui::Button("Next")) ++state.compact_page;
+    if (ImGui::Button("Next")) {
+        ++state.compact_page;
+    }
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::TextDisabled("Page %d of %d", state.compact_page + 1, final_page + 1);
@@ -261,11 +333,14 @@ void compact_users(UsersViewState& state, PreviewSession& session, const std::ve
         return;
     }
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, {4, 5});
-    const bool table_open = ImGui::BeginTable("Compact users table", 3,
-        ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter |
-        ImGuiTableFlags_SizingStretchProp);
+    const bool table_open =
+        ImGui::BeginTable("Compact users table", 3,
+                          ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                              ImGuiTableFlags_BordersOuter | ImGuiTableFlags_SizingStretchProp);
     ImGui::PopStyleVar();
-    if (!table_open) return;
+    if (!table_open) {
+        return;
+    }
 
     ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 1);
     ImGui::TableSetupColumn("Traffic", ImGuiTableColumnFlags_WidthFixed, 110);
@@ -300,7 +375,9 @@ void compact_users(UsersViewState& state, PreviewSession& session, const std::ve
 
 void user_form(UserDraft& draft, bool initial_focus)
 {
-    if (initial_focus) ImGui::SetKeyboardFocusHere();
+    if (initial_focus) {
+        ImGui::SetKeyboardFocusHere();
+    }
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##user-name", "User name", draft.name.data(), draft.name.size());
     ImGui::Checkbox("Enabled", &draft.enabled);
@@ -333,17 +410,25 @@ void submit_user(UsersViewState& state, PreviewSession& session, bool editing)
         state.local_feedback = "Enter a user name.";
         return;
     }
-    if (draft.remaining_minutes < -1 || std::min({draft.upload_limit, draft.download_limit, draft.traffic_limit, draft.ip_limit}) < 0) {
+    if (draft.remaining_minutes < -1 ||
+        std::min({draft.upload_limit, draft.download_limit, draft.traffic_limit, draft.ip_limit}) < 0) {
         state.local_feedback = "Enter nonnegative limits or -1 for unlimited time.";
         return;
     }
 
-    Json request = {{"name", draft.name.data()}, {"enabled", draft.enabled}, {"notes", draft.notes.data()},
+    Json request = {{"name", draft.name.data()},
+                    {"enabled", draft.enabled},
+                    {"notes", draft.notes.data()},
                     {"remaining_minutes", draft.remaining_minutes},
-                    {"options", {{"protocol", draft.protocol == 0 ? "tcp" : "tcp_websocket"},
-                        {"upload_limit", draft.upload_limit}, {"download_limit", draft.download_limit},
-                        {"traffic_limit", draft.traffic_limit}, {"ip_limit", draft.ip_limit}}}};
-    if (editing) request["id"] = draft.id;
+                    {"options",
+                     {{"protocol", draft.protocol == 0 ? "tcp" : "tcp_websocket"},
+                      {"upload_limit", draft.upload_limit},
+                      {"download_limit", draft.download_limit},
+                      {"traffic_limit", draft.traffic_limit},
+                      {"ip_limit", draft.ip_limit}}}};
+    if (editing) {
+        request["id"] = draft.id;
+    }
     submit(state, session, editing ? "edit_user" : "create_user", std::move(request));
 }
 
@@ -351,11 +436,15 @@ void export_qr(const qrcodegen::QrCode& code)
 {
     constexpr int quiet = 4;
     const int size = code.getSize() + 2 * quiet;
-    auto svg = std::format("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\" shape-rendering=\"crispEdges\">"
-                           "<rect width=\"100%\" height=\"100%\" fill=\"white\"/><path d=\"", size, size);
+    auto svg = std::format(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\" shape-rendering=\"crispEdges\">"
+        "<rect width=\"100%\" height=\"100%\" fill=\"white\"/><path d=\"",
+        size, size);
     for (int y = 0; y < code.getSize(); ++y) {
         for (int x = 0; x < code.getSize(); ++x) {
-            if (code.getModule(x, y)) svg += std::format("M{} {}h1v1h-1z", x + quiet, y + quiet);
+            if (code.getModule(x, y)) {
+                svg += std::format("M{} {}h1v1h-1z", x + quiet, y + quiet);
+            }
         }
     }
     svg += "\"/></svg>";
@@ -372,7 +461,8 @@ void configuration_dialog(UsersViewState& state)
 
     constexpr int quiet = 4;
     const int count = state.qr->getSize();
-    const float module = std::max(1.0f, std::floor(std::min(235.0f, ImGui::GetContentRegionAvail().x) / (count + 2 * quiet)));
+    const float module =
+        std::max(1.0f, std::floor(std::min(235.0f, ImGui::GetContentRegionAvail().x) / (count + 2 * quiet)));
     const float size = (count + 2 * quiet) * module;
     const auto origin = ImGui::GetCursorScreenPos();
     auto* draw = ImGui::GetWindowDrawList();
@@ -393,22 +483,34 @@ void configuration_dialog(UsersViewState& state)
         state.local_feedback = "Preview configuration copied.";
     }
     ImGui::SameLine();
-    if (ImGui::Button("Download QR")) export_qr(*state.qr);
+    if (ImGui::Button("Download QR")) {
+        export_qr(*state.qr);
+    }
 }
 
 const char* dialog_title(Dialog dialog)
 {
     switch (dialog) {
-    case Dialog::create: return "Create user";
-    case Dialog::edit: return "Edit user";
-    case Dialog::notes: return "User notes";
-    case Dialog::share: return "Share configuration";
-    case Dialog::reset_traffic: return "Reset traffic";
-    case Dialog::remove: return "Delete user";
-    case Dialog::broadcast: return "Broadcast preview message";
-    case Dialog::bulk_configuration: return "Send configurations to all";
-    case Dialog::configuration: return "Send preview configuration";
-    case Dialog::message: return "Send preview message";
+    case Dialog::create:
+        return "Create user";
+    case Dialog::edit:
+        return "Edit user";
+    case Dialog::notes:
+        return "User notes";
+    case Dialog::share:
+        return "Share configuration";
+    case Dialog::reset_traffic:
+        return "Reset traffic";
+    case Dialog::remove:
+        return "Delete user";
+    case Dialog::broadcast:
+        return "Broadcast preview message";
+    case Dialog::bulk_configuration:
+        return "Send configurations to all";
+    case Dialog::configuration:
+        return "Send preview configuration";
+    case Dialog::message:
+        return "Send preview message";
     }
     return "User action";
 }
@@ -423,7 +525,9 @@ void close_dialog(UsersViewState& state, PreviewSession& session)
 
 void render_dialog(UsersViewState& state, PreviewSession& session)
 {
-    if (!state.dialog) return;
+    if (!state.dialog) {
+        return;
+    }
     const bool opening = state.open_dialog;
     if (opening) {
         ImGui::OpenPopup(dialog_id);
@@ -449,7 +553,8 @@ void render_dialog(UsersViewState& state, PreviewSession& session)
             return;
         }
         state.local_feedback = reply->status == PreviewReply::Status::disconnected
-            ? "Preview connection unavailable." : reply->message;
+                                   ? "Preview connection unavailable."
+                                   : reply->message;
     }
 
     const bool pending = state.request_id.has_value();
@@ -465,7 +570,9 @@ void render_dialog(UsersViewState& state, PreviewSession& session)
     case Dialog::notes:
         ImGui::Text("%s", state.draft.name.data());
         ImGui::TextWrapped("%s", state.draft.notes[0] ? state.draft.notes.data() : "No notes for this user.");
-        if (ImGui::Button("Edit notes")) state.dialog = Dialog::edit;
+        if (ImGui::Button("Edit notes")) {
+            state.dialog = Dialog::edit;
+        }
         break;
     case Dialog::share:
         configuration_dialog(state);
@@ -473,7 +580,8 @@ void render_dialog(UsersViewState& state, PreviewSession& session)
     case Dialog::reset_traffic:
     case Dialog::remove: {
         const bool remove = dialog == Dialog::remove;
-        ImGui::TextWrapped(remove ? "Delete the preview user %s?" : "Reset upload and download totals for %s?",
+        ImGui::TextWrapped(remove ? "Delete the preview user %s?"
+                                  : "Reset upload and download totals for %s?",
                            state.draft.name.data());
         if (ImGui::Button(remove ? "Delete user" : "Reset totals")) {
             submit(state, session, remove ? "delete_user" : "reset_user_traffic", {{"id", state.draft.id}});
@@ -482,33 +590,47 @@ void render_dialog(UsersViewState& state, PreviewSession& session)
     }
     case Dialog::broadcast:
     case Dialog::message:
-        if (dialog == Dialog::broadcast) ImGui::TextUnformatted("Preview audience: all users");
-        else ImGui::Text("Preview recipient: %s", state.draft.name.data());
+        if (dialog == Dialog::broadcast) {
+            ImGui::TextUnformatted("Preview audience: all users");
+        } else {
+            ImGui::Text("Preview recipient: %s", state.draft.name.data());
+        }
         ImGui::InputTextMultiline("##preview-message", state.message.data(), state.message.size(), {-1, 105});
         if (ImGui::Button("Simulate send")) {
-            if (std::string_view(state.message.data()).find_first_not_of(" \r\n\t") == std::string_view::npos) {
+            if (std::string_view(state.message.data()).find_first_not_of(" \r\n\t") ==
+                std::string_view::npos) {
                 state.local_feedback = "Enter a message to send.";
             } else {
-                Json request = {{"kind", dialog == Dialog::broadcast ? "broadcast" : "message"}, {"message", state.message.data()}};
-                if (dialog == Dialog::message) request["id"] = state.draft.id;
+                Json request = {{"kind", dialog == Dialog::broadcast ? "broadcast" : "message"},
+                                {"message", state.message.data()}};
+                if (dialog == Dialog::message) {
+                    request["id"] = state.draft.id;
+                }
                 submit(state, session, "user_bot_action", std::move(request));
             }
         }
         break;
     case Dialog::bulk_configuration:
     case Dialog::configuration:
-        if (dialog == Dialog::bulk_configuration) ImGui::TextWrapped("Simulate sending the latest configuration to all users.");
-        else ImGui::TextWrapped("Simulate sending a configuration to %s.", state.draft.name.data());
+        if (dialog == Dialog::bulk_configuration) {
+            ImGui::TextWrapped("Simulate sending the latest configuration to all users.");
+        } else {
+            ImGui::TextWrapped("Simulate sending a configuration to %s.", state.draft.name.data());
+        }
         if (ImGui::Button("Simulate send")) {
             Json request = {{"kind", "configuration"}};
-            if (dialog == Dialog::configuration) request["id"] = state.draft.id;
+            if (dialog == Dialog::configuration) {
+                request["id"] = state.draft.id;
+            }
             submit(state, session, "user_bot_action", std::move(request));
         }
         break;
     }
     ImGui::EndDisabled();
 
-    if (dialog != Dialog::share) ImGui::SameLine();
+    if (dialog != Dialog::share) {
+        ImGui::SameLine();
+    }
     if (ImGui::Button(dialog == Dialog::share || dialog == Dialog::notes ? "Close" : "Cancel") || !open) {
         close_dialog(state, session);
     } else if (pending) {
@@ -532,40 +654,58 @@ void render_users(UsersViewState& state, PreviewSession& session, bool narrow)
     const float width = ImGui::GetContentRegionAvail().x;
     const bool compact = narrow || width < 745.0f;
     ImGui::BeginDisabled(!ready);
-    if (ImGui::Button("Create user")) open_dialog(state, session, Dialog::create);
+    if (ImGui::Button("Create user")) {
+        open_dialog(state, session, Dialog::create);
+    }
     ImGui::SameLine();
     if (ImGui::Button(users.live ? "Live data" : "Paused")) {
         send(state, session, {{"action", "set_users_live"}, {"live", !users.live}});
     }
-    if (width >= 285.0f) ImGui::SameLine();
-    if (ImGui::Button("Bot actions")) ImGui::OpenPopup("User bot actions");
+    if (width >= 285.0f) {
+        ImGui::SameLine();
+    }
+    if (ImGui::Button("Bot actions")) {
+        ImGui::OpenPopup("User bot actions");
+    }
     if (ImGui::BeginPopup("User bot actions")) {
-        if (ImGui::MenuItem("Send configurations to all")) open_dialog(state, session, Dialog::bulk_configuration);
-        if (ImGui::MenuItem("Broadcast message")) open_dialog(state, session, Dialog::broadcast);
+        if (ImGui::MenuItem("Send configurations to all")) {
+            open_dialog(state, session, Dialog::bulk_configuration);
+        }
+        if (ImGui::MenuItem("Broadcast message")) {
+            open_dialog(state, session, Dialog::broadcast);
+        }
         ImGui::EndPopup();
     }
     ImGui::EndDisabled();
 
-    if (!compact) ImGui::SameLine();
+    if (!compact) {
+        ImGui::SameLine();
+    }
     ImGui::SetNextItemWidth(compact ? -64.0f : 190.0f);
-    if (state.search.DrawWithHint("Search##users", "Name")) state.compact_page = 0;
+    if (state.search.DrawWithHint("Search##users", "Name")) {
+        state.compact_page = 0;
+    }
 
     if (!ready) {
-        ImGui::TextDisabled("%s", session.status() == PreviewStatus::loading ? "Loading preview users…" : "Preview users unavailable.");
+        ImGui::TextDisabled("%s", session.status() == PreviewStatus::loading ? "Loading preview users…"
+                                                                             : "Preview users unavailable.");
     } else {
         const auto action = session.feedback_action();
         const auto feedback = session.feedback();
         if (!state.dialog && !state.local_feedback.empty()) {
             ImGui::TextWrapped("%s", state.local_feedback.c_str());
         } else if (!feedback.empty() && (action.ends_with("_user") || action.starts_with("set_user") ||
-                   action.starts_with("user_") || action == "reset_user_traffic")) {
+                                         action.starts_with("user_") || action == "reset_user_traffic")) {
             ImGui::PushStyleColor(ImGuiCol_Text, session.feedback_ok() ? mint : amber);
             ImGui::TextWrapped("%.*s", static_cast<int>(feedback.size()), feedback.data());
             ImGui::PopStyleColor();
         }
 
-        if (compact) compact_users(state, session, users.rows);
-        else desktop_users(state, session, users.rows);
+        if (compact) {
+            compact_users(state, session, users.rows);
+        } else {
+            desktop_users(state, session, users.rows);
+        }
     }
     render_dialog(state, session);
     ImGui::PopID();

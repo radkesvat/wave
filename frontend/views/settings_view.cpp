@@ -47,7 +47,7 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
     sync_settings(state, settings);
     ImGui::BeginDisabled(state.apply_request.has_value());
     const bool columns = !narrow && ImGui::GetContentRegionAvail().x >= 680 &&
-        ImGui::BeginTable("settings-columns", 2, ImGuiTableFlags_SizingStretchSame);
+                         ImGui::BeginTable("settings-columns", 2, ImGuiTableFlags_SizingStretchSame);
     if (columns) {
         ImGui::TableNextColumn();
     }
@@ -76,7 +76,7 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
     }
 
     const bool valid = state.name[0] && state.username[0] && state.domain[0] && state.site_template[0] &&
-        state.websocket_path[0] == '/' && state.port >= 1 && state.port <= 65535;
+                       state.websocket_path[0] == '/' && state.port >= 1 && state.port <= 65535;
     if (state.dirty && !valid) {
         ImGui::PushStyleColor(ImGuiCol_Text, warm);
         ImGui::TextWrapped("Enter a panel name, admin name, domain, template, /path and port 1-65535.");
@@ -89,8 +89,10 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Backup preview")) {
-        state.backup = Json{{"format", "wave-preview"}, {"settings", settings},
-                            {"users", array_field(session.data(), "users")}}.dump(2);
+        state.backup = Json{{"format", "wave-preview"},
+                            {"settings", settings},
+                            {"users", array_field(session.data(), "users")}}
+                           .dump(2);
         session.send({{"action", "backup_settings"}});
         ImGui::OpenPopup("Sample backup");
     }
@@ -117,8 +119,10 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
     if (ImGui::BeginPopupModal("Apply preview settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped("Save these values to this Wave process for the preview?");
         if (ImGui::Button("Confirm apply")) {
-            Json draft = {{"name", state.name.data()}, {"admin_username", state.username.data()},
-                          {"domain", state.domain.data()}, {"port", state.port},
+            Json draft = {{"name", state.name.data()},
+                          {"admin_username", state.username.data()},
+                          {"domain", state.domain.data()},
+                          {"port", state.port},
                           {"websocket_path", state.websocket_path.data()},
                           {"site_template", state.site_template.data()},
                           {"certificate_path", state.certificate_path.data()},
@@ -127,8 +131,8 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
             if (state.password[0]) {
                 draft["password"] = state.password.data();
             }
-            state.apply_request = session.submit({{"action", "apply_settings"}, {"settings", std::move(draft)}},
-                                                 5000);
+            state.apply_request =
+                session.submit({{"action", "apply_settings"}, {"settings", std::move(draft)}}, 5000);
             if (state.apply_request) {
                 state.apply_reply.reset();
                 ImGui::CloseCurrentPopup();
@@ -143,8 +147,8 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
     fit_preview_dialog(540);
     if (ImGui::BeginPopupModal("Sample backup", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped("Applied preview settings and sample user records");
-        ImGui::InputTextMultiline("##sample-backup", state.backup.data(), state.backup.size() + 1,
-                                 {-1, 170}, ImGuiInputTextFlags_ReadOnly);
+        ImGui::InputTextMultiline("##sample-backup", state.backup.data(), state.backup.size() + 1, {-1, 170},
+                                  ImGuiInputTextFlags_ReadOnly);
         if (ImGui::Button("Copy backup")) {
             ImGui::SetClipboardText(state.backup.c_str());
         }

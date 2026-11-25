@@ -17,19 +17,22 @@ struct Option {
 };
 
 constexpr std::array notification_options{
-    Option{"login_failed", "Demo sign-in failed"}, Option{"login_succeeded", "Demo sign-in succeeded"},
-    Option{"settings_changed", "Settings changed"}, Option{"high_cpu", "High CPU usage"},
-    Option{"high_memory", "High memory usage"}, Option{"server_reboot", "Server reboot"},
-    Option{"panel_started", "Panel started"}, Option{"user_expired", "User duration expired"},
+    Option{"login_failed", "Demo sign-in failed"},    Option{"login_succeeded", "Demo sign-in succeeded"},
+    Option{"settings_changed", "Settings changed"},   Option{"high_cpu", "High CPU usage"},
+    Option{"high_memory", "High memory usage"},       Option{"server_reboot", "Server reboot"},
+    Option{"panel_started", "Panel started"},         Option{"user_expired", "User duration expired"},
     Option{"traffic_limit", "Traffic limit reached"}, Option{"user_created", "User created"},
-    Option{"user_disabled", "User disabled"}, Option{"user_enabled", "User enabled"},
-    Option{"user_deleted", "User deleted"}, Option{"user_support", "User requests support"},
+    Option{"user_disabled", "User disabled"},         Option{"user_enabled", "User enabled"},
+    Option{"user_deleted", "User deleted"},           Option{"user_support", "User requests support"},
 };
 
 constexpr std::array permission_options{
-    Option{"status", "View status"}, Option{"traffic", "View traffic usage"},
-    Option{"ip_limit", "View address limit"}, Option{"speed_limit", "View speed limit"},
-    Option{"traffic_limit", "View traffic limit"}, Option{"expiration", "View time remaining"},
+    Option{"status", "View status"},
+    Option{"traffic", "View traffic usage"},
+    Option{"ip_limit", "View address limit"},
+    Option{"speed_limit", "View speed limit"},
+    Option{"traffic_limit", "View traffic limit"},
+    Option{"expiration", "View time remaining"},
     Option{"notes", "View user notes"},
 };
 
@@ -94,8 +97,8 @@ void bot_setup_dialog(BotViewState& state, PreviewSession& session, const Json& 
         ImGui::TextWrapped("Use the supplied sample token or enter another demo value.");
         ImGui::BeginDisabled(std::string_view(state.token.data()).size() < 4);
         if (ImGui::Button("Connect sample bot")) {
-            state.connect_request = session.submit({{"action", "bot_connect"}, {"token", state.token.data()}},
-                                                   5000);
+            state.connect_request =
+                session.submit({{"action", "bot_connect"}, {"token", state.token.data()}}, 5000);
             if (state.connect_request) {
                 state.setup = BotViewState::Setup::connecting;
                 state.connect_reply.reset();
@@ -186,12 +189,13 @@ void bot_connection(BotViewState& state, PreviewSession& session, const Json& bo
 
 void submit_bot_save(BotViewState::Save& save, PreviewSession& session, Json settings)
 {
-    save.request = session.submit({{"action", "apply_bot_settings"}, {"settings", std::move(settings)}}, 5000);
+    save.request =
+        session.submit({{"action", "apply_bot_settings"}, {"settings", std::move(settings)}}, 5000);
     if (save.request) {
         save.reply.reset();
     } else {
-        save.reply = PreviewReply{PreviewReply::Status::disconnected,
-                                  "The preview connection is unavailable."};
+        save.reply =
+            PreviewReply{PreviewReply::Status::disconnected, "The preview connection is unavailable."};
     }
 }
 
@@ -231,7 +235,8 @@ void bot_settings(BotViewState& state, PreviewSession& session)
     state.settings_dirty |= ImGui::Checkbox("Allow demo configuration requests", &state.allow_config);
 
     if (ImGui::CollapsingHeader("Notification rules", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (ImGui::BeginTable("bot-notifications", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
+        if (ImGui::BeginTable("bot-notifications", 3,
+                              ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
             ImGui::TableSetupColumn("Event", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_WidthFixed, 54);
             ImGui::TableSetupColumn("Sound", ImGuiTableColumnFlags_WidthFixed, 49);
@@ -267,10 +272,12 @@ void bot_settings(BotViewState& state, PreviewSession& session)
         for (std::size_t i = 0; i < permission_options.size(); ++i) {
             permissions[permission_options[i].key] = state.permissions[i];
         }
-        submit_bot_save(state.settings_save, session, {
-            {"notifications", state.notifications}, {"allow_status", state.allow_status},
-            {"allow_config", state.allow_config}, {"notification_rules", std::move(rules)},
-            {"permissions", std::move(permissions)}});
+        submit_bot_save(state.settings_save, session,
+                        {{"notifications", state.notifications},
+                         {"allow_status", state.allow_status},
+                         {"allow_config", state.allow_config},
+                         {"notification_rules", std::move(rules)},
+                         {"permissions", std::move(permissions)}});
     }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
@@ -293,9 +300,12 @@ void bot_overrides(BotViewState& state, PreviewSession& session)
     }
     ImGui::BeginDisabled(!state.overrides_dirty || !valid);
     if (ImGui::Button("Save overrides")) {
-        submit_bot_save(state.overrides_save, session, {{"overrides", {
-            {"domain", state.domain.data()}, {"sni", state.sni.data()},
-            {"ws_host", state.ws_host.data()}, {"port", state.port}}}});
+        submit_bot_save(state.overrides_save, session,
+                        {{"overrides",
+                          {{"domain", state.domain.data()},
+                           {"sni", state.sni.data()},
+                           {"ws_host", state.ws_host.data()},
+                           {"port", state.port}}}});
     }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
@@ -317,8 +327,8 @@ void bot_actions(BotViewState& state, PreviewSession& session, const Json& bot)
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Test status")) {
-        session.send({{"action", "bot_action"}, {"kind", "test status"},
-                      {"audience", audiences[state.audience]}});
+        session.send(
+            {{"action", "bot_action"}, {"kind", "test status"}, {"audience", audiences[state.audience]}});
     }
     const auto message = string_field(bot, "last_message");
     if (!message.empty()) {
@@ -332,9 +342,10 @@ void bot_actions(BotViewState& state, PreviewSession& session, const Json& bot)
         wrapped(audiences[state.audience]);
         ImGui::Separator();
         wrapped(state.message.data());
-        if (ImGui::Button("Simulate send") &&
-            session.send({{"action", "bot_action"}, {"kind", "message"}, {"message", state.message.data()},
-                          {"audience", audiences[state.audience]}})) {
+        if (ImGui::Button("Simulate send") && session.send({{"action", "bot_action"},
+                                                            {"kind", "message"},
+                                                            {"message", state.message.data()},
+                                                            {"audience", audiences[state.audience]}})) {
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();

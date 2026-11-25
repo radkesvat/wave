@@ -87,8 +87,7 @@ inline void wrapped(std::string_view value)
     ImGui::PopTextWrapPos();
 }
 
-template <std::size_t N>
-inline void fill(std::array<char, N>& buffer, std::string_view value)
+template <std::size_t N> inline void fill(std::array<char, N>& buffer, std::string_view value)
 {
     const auto length = std::min(value.size(), buffer.size() - 1);
     std::copy_n(value.begin(), length, buffer.begin());
@@ -97,7 +96,7 @@ inline void fill(std::array<char, N>& buffer, std::string_view value)
 
 template <std::size_t N>
 inline bool edit(const char* label, std::array<char, N>& buffer, const char* hint = "",
-          ImGuiInputTextFlags flags = 0)
+                 ImGuiInputTextFlags flags = 0)
 {
     ImGui::PushID(label);
     ImGui::TextUnformatted(label);

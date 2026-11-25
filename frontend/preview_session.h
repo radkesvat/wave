@@ -14,7 +14,11 @@
 
 namespace wave {
 
-enum class PreviewStatus { loading, ready, unavailable };
+enum class PreviewStatus {
+    loading,
+    ready,
+    unavailable
+};
 
 struct PreviewFeedback {
     std::string message;
@@ -23,16 +27,24 @@ struct PreviewFeedback {
 };
 
 struct PreviewReply {
-    enum class Status { accepted, rejected, disconnected, timed_out };
+    enum class Status {
+        accepted,
+        rejected,
+        disconnected,
+        timed_out
+    };
 
     Status status;
     std::string message;
 
-    bool ok() const { return status == Status::accepted; }
+    bool ok() const
+    {
+        return status == Status::accepted;
+    }
 };
 
 class PreviewSession {
-public:
+  public:
     void start();
     void stop();
     void update();
@@ -41,17 +53,41 @@ public:
     std::optional<PreviewReply> take_reply(std::optional<std::uint64_t>& request_id);
     void abandon(std::optional<std::uint64_t>& request_id);
 
-    PreviewStatus status() const { return status_; }
-    bool ready() const { return status_ == PreviewStatus::ready; }
-    const nlohmann::json& data() const { return data_; }
-    const OverviewData* overview() const { return ready() && overview_ ? &*overview_ : nullptr; }
-    const UsersData& users() const { return users_; }
-    std::string_view feedback() const { return feedback_; }
-    bool feedback_ok() const { return feedback_ok_; }
-    std::string_view feedback_action() const { return feedback_action_; }
+    PreviewStatus status() const
+    {
+        return status_;
+    }
+    bool ready() const
+    {
+        return status_ == PreviewStatus::ready;
+    }
+    const nlohmann::json& data() const
+    {
+        return data_;
+    }
+    const OverviewData* overview() const
+    {
+        return ready() && overview_ ? &*overview_ : nullptr;
+    }
+    const UsersData& users() const
+    {
+        return users_;
+    }
+    std::string_view feedback() const
+    {
+        return feedback_;
+    }
+    bool feedback_ok() const
+    {
+        return feedback_ok_;
+    }
+    std::string_view feedback_action() const
+    {
+        return feedback_action_;
+    }
     const PreviewFeedback* feedback_for(std::string_view action) const;
 
-private:
+  private:
     struct Request {
         std::string action;
         double deadline;

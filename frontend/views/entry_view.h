@@ -8,7 +8,11 @@ namespace wave {
 
 class PreviewSession;
 
-enum class EntryPage { workspace, sign_in, setup };
+enum class EntryPage {
+    workspace,
+    sign_in,
+    setup
+};
 
 struct EntryViewState {
     EntryPage page = EntryPage::workspace;

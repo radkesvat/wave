@@ -42,7 +42,8 @@ constexpr float narrow_header = 78;
 constexpr float breakpoint = 760;
 constexpr float nav_row = 34;
 constexpr int narrow_navigation_columns = 2;
-constexpr auto narrow_navigation_rows = (navigation.size() + narrow_navigation_columns - 1) / narrow_navigation_columns;
+constexpr auto narrow_navigation_rows =
+    (navigation.size() + narrow_navigation_columns - 1) / narrow_navigation_columns;
 constexpr float narrow_navigation_height = narrow_navigation_rows * nav_row + 2 * margin;
 constexpr float narrow_work_height = 660;
 constexpr float narrow_logs_height = 232;
@@ -67,8 +68,7 @@ void focus_outline()
 {
     const ImVec2 min = ImGui::GetItemRectMin();
     const ImVec2 max = ImGui::GetItemRectMax();
-    ImGui::GetWindowDrawList()->AddRect({min.x - 1, min.y - 1}, {max.x + 1, max.y + 1},
-                                       accent, 6, 2);
+    ImGui::GetWindowDrawList()->AddRect({min.x - 1, min.y - 1}, {max.x + 1, max.y + 1}, accent, 6, 2);
 }
 
 void draw_header(const PanelLayout& layout, ImVec2 viewport)
@@ -164,7 +164,8 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
     const float width = layout.narrow ? viewport.x - 2 * margin : sidebar_width - margin;
     const float item_width = (width - (columns + 1) * 6) / columns;
     ImGui::SetCursorScreenPos({margin, layout.header_height + margin});
-    const float height = layout.narrow ? narrow_navigation_height - margin : viewport.y - layout.header_height - 2 * margin;
+    const float height =
+        layout.narrow ? narrow_navigation_height - margin : viewport.y - layout.header_height - 2 * margin;
     if (ImGui::BeginChild("Navigation", {width, height}, ImGuiChildFlags_Borders,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
         ImGui::SetCursorPosY(5);
@@ -173,8 +174,8 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
             const int column = static_cast<int>(i) % columns;
             ImGui::SetCursorPos({7 + column * (item_width + 5), 5 + row * nav_row});
             const auto& item = navigation[i];
-            if (ImGui::Selectable(item.label, state.page == item.page,
-                                  ImGuiSelectableFlags_NoAutoClosePopups, {item_width - 4, 29})) {
+            if (ImGui::Selectable(item.label, state.page == item.page, ImGuiSelectableFlags_NoAutoClosePopups,
+                                  {item_width - 4, 29})) {
                 state.page = item.page;
             }
             if (focus == static_cast<int>(item.page)) {
@@ -188,11 +189,16 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
 const char* dialog_title(PanelDialog dialog)
 {
     switch (dialog) {
-    case PanelDialog::sign_out: return "Demo sign-out";
-    case PanelDialog::version: return "Wave version";
-    case PanelDialog::diagnostics: return "Connection diagnostics";
-    case PanelDialog::input: return "Mini keyboard";
-    case PanelDialog::none: return "";
+    case PanelDialog::sign_out:
+        return "Demo sign-out";
+    case PanelDialog::version:
+        return "Wave version";
+    case PanelDialog::diagnostics:
+        return "Connection diagnostics";
+    case PanelDialog::input:
+        return "Mini keyboard";
+    case PanelDialog::none:
+        return "";
     }
     return "";
 }
@@ -247,7 +253,8 @@ void render_dialogs(PanelState& state, PreviewSession& session)
         ImGui::OpenPopup(dialog_title(state.requested_dialog));
         state.requested_dialog = PanelDialog::none;
     }
-    for (const auto dialog : {PanelDialog::sign_out, PanelDialog::version, PanelDialog::diagnostics, PanelDialog::input}) {
+    for (const auto dialog :
+         {PanelDialog::sign_out, PanelDialog::version, PanelDialog::diagnostics, PanelDialog::input}) {
         const char* title = dialog_title(dialog);
         if (!ImGui::IsPopupOpen(title)) {
             continue;
@@ -272,8 +279,9 @@ void render_dialogs(PanelState& state, PreviewSession& session)
             ImGui::TextLinkOpenURL("Project releases", "https://github.com/radkesvat/wave/releases");
             break;
         case PanelDialog::diagnostics:
-            ImGui::Text("Preview socket: %s", session.status() == PreviewStatus::ready ? "Connected" :
-                session.status() == PreviewStatus::loading ? "Connecting" : "Unavailable");
+            ImGui::Text("Preview socket: %s", session.status() == PreviewStatus::ready     ? "Connected"
+                                              : session.status() == PreviewStatus::loading ? "Connecting"
+                                                                                           : "Unavailable");
             ImGui::TextUnformatted("WaterWall: Disconnected");
             ImGui::TextUnformatted("Transport: HTTP and JSON WebSocket");
             ImGui::Text("Renderer: %.0f frames/s, %.2f× scale", ImGui::GetIO().Framerate,
@@ -284,7 +292,8 @@ void render_dialogs(PanelState& state, PreviewSession& session)
                 }
             }
             if (session.feedback_action() == "refresh") {
-                ImGui::TextWrapped("%.*s", static_cast<int>(session.feedback().size()), session.feedback().data());
+                ImGui::TextWrapped("%.*s", static_cast<int>(session.feedback().size()),
+                                   session.feedback().data());
             }
             break;
         case PanelDialog::input:
@@ -299,13 +308,14 @@ void render_dialogs(PanelState& state, PreviewSession& session)
         ImGui::EndPopup();
     }
     if (state.metrics_open) {
-        ImGui::SetNextWindowSize({std::min(520.0f, ImGui::GetIO().DisplaySize.x - 24), 350}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSize({std::min(520.0f, ImGui::GetIO().DisplaySize.x - 24), 350},
+                                 ImGuiCond_Appearing);
         ImGui::ShowMetricsWindow(&state.metrics_open);
     }
 }
 
-void render_view(PanelState& state, PreviewSession& session, bool narrow,
-                 const OverviewData* overview, bool overview_loading)
+void render_view(PanelState& state, PreviewSession& session, bool narrow, const OverviewData* overview,
+                 bool overview_loading)
 {
     if (!session.ready() && state.page != PanelPage::about && state.page != PanelPage::overview) {
         ImGui::TextUnformatted(panel_page_name(state.page));
@@ -321,14 +331,30 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow,
         return;
     }
     switch (state.page) {
-    case PanelPage::users: render_users(state.users, session, narrow); break;
-    case PanelPage::server: render_server_status(session.data()["server"], narrow); break;
-    case PanelPage::settings: render_settings(state.settings, session, narrow); break;
-    case PanelPage::console: render_console(state.console, session, narrow); break;
-    case PanelPage::topology: render_topology(state.topology, session.data()["topology"], narrow); break;
-    case PanelPage::bot: render_bot(state.bot, session, narrow); break;
-    case PanelPage::about: render_about(); break;
-    case PanelPage::overview: render_overview(overview, overview_loading); break;
+    case PanelPage::users:
+        render_users(state.users, session, narrow);
+        break;
+    case PanelPage::server:
+        render_server_status(session.data()["server"], narrow);
+        break;
+    case PanelPage::settings:
+        render_settings(state.settings, session, narrow);
+        break;
+    case PanelPage::console:
+        render_console(state.console, session, narrow);
+        break;
+    case PanelPage::topology:
+        render_topology(state.topology, session.data()["topology"], narrow);
+        break;
+    case PanelPage::bot:
+        render_bot(state.bot, session, narrow);
+        break;
+    case PanelPage::about:
+        render_about();
+        break;
+    case PanelPage::overview:
+        render_overview(overview, overview_loading);
+        break;
     }
 }
 
@@ -402,8 +428,8 @@ void configure_panel_style(bool high_contrast)
     colors[ImGuiCol_TableRowBgAlt] = color(IM_COL32(22, 40, 54, 255));
 }
 
-void render_panel(PanelState& state, PreviewSession& session, const OverviewData* overview, bool overview_loading,
-                  int browser_focus)
+void render_panel(PanelState& state, PreviewSession& session, const OverviewData* overview,
+                  bool overview_loading, int browser_focus)
 {
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     if (state.browser_control && state.navigation_open && state.entry.page == EntryPage::workspace) {
@@ -418,8 +444,9 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
     ImGui::SetNextWindowSize(viewport);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
-    ImGui::Begin("Wave workspace", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::Begin("Wave workspace", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar(2);
 
     PanelLayout layout(viewport.x, state);
@@ -437,9 +464,11 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
     } else {
         render_navigation(state, layout, viewport, browser_focus);
         const float width = std::max(1.0f, viewport.x - layout.workspace.x - margin);
-        const float logs_height = layout.narrow ? narrow_logs_height : std::clamp(viewport.y * 0.25f, 195.0f, 244.0f);
-        const float work_height = layout.narrow ? narrow_work_height :
-            std::max(1.0f, viewport.y - layout.workspace.y - logs_height - 2 * margin);
+        const float logs_height =
+            layout.narrow ? narrow_logs_height : std::clamp(viewport.y * 0.25f, 195.0f, 244.0f);
+        const float work_height =
+            layout.narrow ? narrow_work_height
+                          : std::max(1.0f, viewport.y - layout.workspace.y - logs_height - 2 * margin);
         ImGui::PushID(static_cast<int>(state.page));
         ImGui::SetCursorScreenPos(layout.workspace);
         if (ImGui::BeginChild("View", {width, work_height}, ImGuiChildFlags_Borders)) {
@@ -465,19 +494,22 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
         return std::format("Wave demo sign-in. {}", state.entry.message);
     }
     if (state.entry.page == EntryPage::setup) {
-        return std::format("Wave first-run setup. Step {} of 3. {}", state.entry.step + 1, state.entry.message);
+        return std::format("Wave first-run setup. Step {} of 3. {}", state.entry.step + 1,
+                           state.entry.message);
     }
     if (state.page == PanelPage::overview) {
         return describe_overview(overview, overview_loading);
     }
-    const auto description = std::format("Wave {}. Preview. WaterWall disconnected.", panel_page_name(state.page));
+    const auto description =
+        std::format("Wave {}. Preview. WaterWall disconnected.", panel_page_name(state.page));
     if (!session.ready()) {
-        return description + (session.status() == PreviewStatus::loading ? " Loading sample data." : " Sample data unavailable.");
+        return description + (session.status() == PreviewStatus::loading ? " Loading sample data."
+                                                                         : " Sample data unavailable.");
     }
 
     const auto& logs = session.data()["logs"];
-    std::string result = std::format("{} Sample data. {} users. {} log entries.",
-                                     description, session.data()["users"].size(), logs.size());
+    std::string result = std::format("{} Sample data. {} users. {} log entries.", description,
+                                     session.data()["users"].size(), logs.size());
     if (!logs.empty() && logs.back().is_object()) {
         const auto message = logs.back().find("message");
         if (message != logs.back().end() && message->is_string()) {

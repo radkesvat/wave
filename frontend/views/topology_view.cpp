@@ -41,8 +41,10 @@ float distance_to_link(ImVec2 mouse, ImVec2 start, ImVec2 end)
     const float x = end.x - start.x;
     const float y = end.y - start.y;
     const float length_squared = x * x + y * y;
-    const float fraction = length_squared > 0 ? std::clamp(
-        ((mouse.x - start.x) * x + (mouse.y - start.y) * y) / length_squared, 0.0f, 1.0f) : 0.0f;
+    const float fraction =
+        length_squared > 0
+            ? std::clamp(((mouse.x - start.x) * x + (mouse.y - start.y) * y) / length_squared, 0.0f, 1.0f)
+            : 0.0f;
     return std::hypot(mouse.x - start.x - x * fraction, mouse.y - start.y - y * fraction);
 }
 
@@ -52,8 +54,8 @@ struct GraphNode {
     ImVec2 position;
 };
 
-void draw_topology(TopologyViewState::Map& state, const Json& nodes, const Json& links,
-                   std::string_view map, bool narrow)
+void draw_topology(TopologyViewState::Map& state, const Json& nodes, const Json& links, std::string_view map,
+                   bool narrow)
 {
     ImGui::BeginDisabled(state.zoom <= 0.7f);
     if (ImGui::Button("-##zoom")) {
@@ -115,8 +117,9 @@ void draw_topology(TopologyViewState::Map& state, const Json& nodes, const Json&
         }
         const float x = static_cast<float>(std::clamp(numeric_field(node, "x", 0.5), 0.0, 1.0));
         const float y = static_cast<float>(std::clamp(numeric_field(node, "y", 0.5), 0.0, 1.0));
-        graph_nodes.push_back({node, string_field(node, "id"),
-            {center.x + (x - 0.5f) * span_x, center.y + (y - 0.5f) * span_y}});
+        graph_nodes.push_back({node,
+                               string_field(node, "id"),
+                               {center.x + (x - 0.5f) * span_x, center.y + (y - 0.5f) * span_y}});
     }
     const auto lookup_node = [&](std::string_view id) {
         return std::ranges::find(graph_nodes, id, &GraphNode::id);
@@ -149,8 +152,8 @@ void draw_topology(TopologyViewState::Map& state, const Json& nodes, const Json&
     for (const auto& node : graph_nodes) {
         const ImVec2 start{node.position.x - node_width / 2, node.position.y - node_height / 2};
         const ImVec2 end{start.x + node_width, start.y + node_height};
-        if (inspect_graph && mouse.x >= start.x && mouse.x <= end.x &&
-            mouse.y >= start.y && mouse.y <= end.y) {
+        if (inspect_graph && mouse.x >= start.x && mouse.x <= end.x && mouse.y >= start.y &&
+            mouse.y <= end.y) {
             inspect(state, Selection::node, node.id);
         }
         const bool active = state.selection == Selection::node && state.selected == node.id;
@@ -170,14 +173,13 @@ void draw_topology(TopologyViewState::Map& state, const Json& nodes, const Json&
 
 const Json* selected_item(const Json& items, std::string_view id)
 {
-    const auto item = std::ranges::find_if(items, [&](const Json& value) {
-        return string_field(value, "id") == id;
-    });
+    const auto item =
+        std::ranges::find_if(items, [&](const Json& value) { return string_field(value, "id") == id; });
     return item == items.end() ? nullptr : &*item;
 }
 
-void topology_details(const TopologyViewState::Map& state, const Json& nodes,
-                      const Json& links, const Json& routes)
+void topology_details(const TopologyViewState::Map& state, const Json& nodes, const Json& links,
+                      const Json& routes)
 {
     if (state.selected.empty()) {
         return;
@@ -188,14 +190,16 @@ void topology_details(const TopologyViewState::Map& state, const Json& nodes,
     case Selection::node:
         selected = selected_item(nodes, state.selected);
         if (selected) {
-            wrapped(std::format("{} ({})", string_field(*selected, "label"), string_field(*selected, "type")));
+            wrapped(
+                std::format("{} ({})", string_field(*selected, "label"), string_field(*selected, "type")));
             wrapped(string_field(*selected, "address"));
         }
         break;
     case Selection::link:
         selected = selected_item(links, state.selected);
         if (selected) {
-            wrapped(std::format("{} ({})", string_field(*selected, "label"), string_field(*selected, "type")));
+            wrapped(
+                std::format("{} ({})", string_field(*selected, "label"), string_field(*selected, "type")));
             wrapped(std::format("{} to {}", node_label(nodes, string_field(*selected, "from")),
                                 node_label(nodes, string_field(*selected, "to"))));
         }
@@ -220,8 +224,7 @@ void topology_details(const TopologyViewState::Map& state, const Json& nodes,
     }
 }
 
-void render_map(TopologyViewState::Map& state, const Json& topology, std::string_view map,
-                bool narrow)
+void render_map(TopologyViewState::Map& state, const Json& topology, std::string_view map, bool narrow)
 {
     const auto& nodes = array_field(topology, "nodes");
     const auto& links = array_field(topology, "links");

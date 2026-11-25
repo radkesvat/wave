@@ -31,8 +31,8 @@ void submit(EntryViewState& state, PreviewSession& session)
         return;
     }
     const bool setup = state.page == EntryPage::setup;
-    nlohmann::json request{{"action", setup ? "setup" : "sign_in"},
-                           {"username", state.username}, {"password", state.password}};
+    nlohmann::json request{
+        {"action", setup ? "setup" : "sign_in"}, {"username", state.username}, {"password", state.password}};
     if (setup) {
         request["name"] = state.panel_name;
         request["domain"] = state.domain;
@@ -145,7 +145,8 @@ void render_entry(EntryViewState& state, PreviewSession& session)
     if (state.page == EntryPage::setup) {
         render_setup(state, session);
     } else {
-        ImGui::TextWrapped("Default example: demo / wave-demo. Use your saved demo credentials after a change.");
+        ImGui::TextWrapped(
+            "Default example: demo / wave-demo. Use your saved demo credentials after a change.");
         credentials(state, false);
         if (ImGui::Button("Sign in")) {
             submit(state, session);

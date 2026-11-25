@@ -35,7 +35,8 @@ struct ConsoleHistory {
 int handle_console_history(ImGuiInputTextCallbackData* data)
 {
     auto& history = *static_cast<ConsoleHistory*>(data->UserData);
-    const auto command = history_step(history.items, history.position, data->EventKey == ImGuiKey_UpArrow ? -1 : 1);
+    const auto command =
+        history_step(history.items, history.position, data->EventKey == ImGuiKey_UpArrow ? -1 : 1);
     data->DeleteChars(0, data->BufTextLen);
     data->InsertChars(0, command.data(), command.data() + command.size());
     return 0;
@@ -49,7 +50,8 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
     const auto& lines = array_field(console, "output");
     const auto& history = array_field(console, "history");
     const bool running = bool_field(console, "running");
-    ImGui::TextColored(running ? mint : warm, "%s", running ? "Bash preview running" : "Bash preview stopped");
+    ImGui::TextColored(running ? mint : warm, "%s",
+                       running ? "Bash preview running" : "Bash preview stopped");
     ImGui::TextWrapped("Try help, uptime, whoami or status for canned responses.");
 
     if (ImGui::Button("Options")) {
@@ -117,9 +119,10 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
     ImGui::BeginDisabled(!running);
     ConsoleHistory navigation{history, state.history_position};
     ImGui::SetNextItemWidth(narrow ? -1.0f : -170.0f);
-    const bool submitted = ImGui::InputTextWithHint("##console-command", "Demo command",
-        state.command.data(), state.command.size(), ImGuiInputTextFlags_EnterReturnsTrue |
-        ImGuiInputTextFlags_CallbackHistory, handle_console_history, &navigation);
+    const bool submitted = ImGui::InputTextWithHint(
+        "##console-command", "Demo command", state.command.data(), state.command.size(),
+        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory, handle_console_history,
+        &navigation);
     if (!narrow) {
         ImGui::SameLine();
     }

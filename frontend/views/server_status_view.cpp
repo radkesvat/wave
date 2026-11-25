@@ -23,8 +23,8 @@ void chart(const char* title, const char* unit, double ceiling, float height,
     ImGui::SeparatorText(title);
     for (const auto& line : series) {
         if (!line.samples.empty()) {
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(line.color), "%s  %.1f %s",
-                               line.name, number(line.samples.back()), unit);
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(line.color), "%s  %.1f %s", line.name,
+                               number(line.samples.back()), unit);
         }
     }
 
@@ -44,15 +44,14 @@ void chart(const char* title, const char* unit, double ceiling, float height,
         const float y = bottom - (bottom - top) * tick / 4;
         draw.AddLineH(left, right, y, plot_grid);
         const auto label = std::format("{:.0f}", ceiling * tick / 4);
-        draw.AddText({left - ImGui::CalcTextSize(label.c_str()).x - 5, y - 8},
-                     plot_muted, label.c_str());
+        draw.AddText({left - ImGui::CalcTextSize(label.c_str()).x - 5, y - 8}, plot_muted, label.c_str());
     }
     draw.AddText({left, bottom + 5}, plot_muted, "Past hour");
     draw.AddText({right - ImGui::CalcTextSize("Now").x, bottom + 5}, plot_muted, "Now");
 
     const auto mouse = ImGui::GetIO().MousePos;
-    const bool hovered = ImGui::IsItemHovered() && mouse.x >= left && mouse.x <= right &&
-        mouse.y >= top && mouse.y <= bottom;
+    const bool hovered =
+        ImGui::IsItemHovered() && mouse.x >= left && mouse.x <= right && mouse.y >= top && mouse.y <= bottom;
     const float fraction = hovered ? (mouse.x - left) / (right - left) : 1;
     if (hovered) {
         draw.AddLineV(mouse.x, top, bottom, plot_muted);
@@ -78,7 +77,8 @@ void chart(const char* title, const char* unit, double ceiling, float height,
     if (hovered && ImGui::BeginTooltip()) {
         for (const auto& line : series) {
             if (!line.samples.empty()) {
-                const auto index = static_cast<std::size_t>(std::lround(fraction * (line.samples.size() - 1)));
+                const auto index =
+                    static_cast<std::size_t>(std::lround(fraction * (line.samples.size() - 1)));
                 ImGui::Text("%s %.1f %s", line.name, number(line.samples[index]), unit);
             }
         }
@@ -120,10 +120,9 @@ void server_info(const Json& server)
                                numeric_field(server, "cpu_percent")));
         row("Memory", std::format("{:.1f} / {:.1f} GiB", numeric_field(server, "memory_used_gib"),
                                   numeric_field(server, "memory_total_gib")));
-        row("Users", std::format("{} total, {} enabled, {} online",
-                                 integer_field(server, "users_total"),
-                                 integer_field(server, "users_enabled"),
-                                 integer_field(server, "users_active")));
+        row("Users",
+            std::format("{} total, {} enabled, {} online", integer_field(server, "users_total"),
+                        integer_field(server, "users_enabled"), integer_field(server, "users_active")));
         row("Upload total", std::format("{:.1f} GiB", numeric_field(server, "upload_total")));
         row("Download total", std::format("{:.1f} GiB", numeric_field(server, "download_total")));
         ImGui::EndTable();
@@ -135,7 +134,7 @@ void server_info(const Json& server)
 void render_server_status(const nlohmann::json& server, bool narrow)
 {
     const bool columns = !narrow && ImGui::GetContentRegionAvail().x >= 580 &&
-        ImGui::BeginTable("server-plots", 2, ImGuiTableFlags_SizingStretchSame);
+                         ImGui::BeginTable("server-plots", 2, ImGuiTableFlags_SizingStretchSame);
     if (columns) {
         ImGui::TableNextColumn();
     }
@@ -150,7 +149,7 @@ void render_server_status(const nlohmann::json& server, bool narrow)
     }
 
     const bool traffic_columns = !narrow && ImGui::GetContentRegionAvail().x >= 720 &&
-        ImGui::BeginTable("server-summary", 2, ImGuiTableFlags_SizingStretchSame);
+                                 ImGui::BeginTable("server-summary", 2, ImGuiTableFlags_SizingStretchSame);
     if (traffic_columns) {
         ImGui::TableNextColumn();
     }

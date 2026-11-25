@@ -26,8 +26,29 @@ struct UserDraft {
 };
 
 struct UsersViewState {
-    enum class Dialog { create, edit, notes, share, reset_traffic, remove, broadcast, bulk_configuration, configuration, message };
-    enum class Column { id, name, enabled, actions, upload_rate, download_rate, upload_total, download_total, remaining };
+    enum class Dialog {
+        create,
+        edit,
+        notes,
+        share,
+        reset_traffic,
+        remove,
+        broadcast,
+        bulk_configuration,
+        configuration,
+        message
+    };
+    enum class Column {
+        id,
+        name,
+        enabled,
+        actions,
+        upload_rate,
+        download_rate,
+        upload_total,
+        download_total,
+        remaining
+    };
 
     ImGuiTextFilter search;
     Column sort_column = Column::id;

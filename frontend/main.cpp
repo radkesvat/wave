@@ -17,6 +17,7 @@ namespace {
 
 std::string clipboard_text;
 
+// clang-format off
 EM_JS(void, set_panel_height, (int height), {
     Module['canvas'].style.setProperty('--panel-height', height + 'px');
 });
@@ -64,6 +65,7 @@ EM_JS(void, install_text_input, (), {
 EM_JS(void, show_startup_error, (), {
     Module['onAbort']();
 });
+// clang-format on
 
 struct Application {
     SDL_Window* window = nullptr;
@@ -90,9 +92,8 @@ struct Application {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-        window = SDL_CreateWindow("Wave", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-                                  1, 1, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE |
-                                            SDL_WINDOW_ALLOW_HIGHDPI);
+        window = SDL_CreateWindow("Wave", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1, 1,
+                                  SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
         if (!window) {
             return false;
         }
@@ -135,7 +136,9 @@ struct Application {
             clipboard_text = text;
             copy_text(text);
         };
-        platform.Platform_OpenInShellFn = [](ImGuiContext*, const char* path) { return open_browser_link(path); };
+        platform.Platform_OpenInShellFn = [](ImGuiContext*, const char* path) {
+            return open_browser_link(path);
+        };
         wave::configure_panel_style();
         install_text_input();
         register_header_controls(wave::panel_menu_control, wave::panel_tools_control);

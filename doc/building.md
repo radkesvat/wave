@@ -80,6 +80,18 @@ The **Frontend** GitHub Actions workflow builds and tests both presets on
 pushes to `main` and on pull requests. Each successful job uploads its
 generated site as a separate artifact.
 
+## Frontend C++ formatting
+
+Use clang-format 23.1.6 with `clang-format` on your `PATH`. The
+`frontend/.clang-format` configuration applies to the frontend sources
+and headers. Run the check from the Wave root. [LLVM 23.1.6 release](https://github.com/llvm/llvm-project/releases/tag/llvmorg-23.1.6)
+
+```sh
+rg --files -0 frontend -g '*.cpp' -g '*.h' | xargs -0 clang-format --dry-run --Werror
+```
+
+Replace `--dry-run --Werror` with `-i` to apply the format.
+
 ## Native backend
 
 The backend needs CMake 3.24 or newer, Ninja, and a host C++20 compiler. The

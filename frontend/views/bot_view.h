@@ -18,7 +18,12 @@ struct BotViewState {
         std::optional<std::uint64_t> request;
         std::optional<PreviewReply> reply;
     };
-    enum class Setup { intro, token, connecting, complete };
+    enum class Setup {
+        intro,
+        token,
+        connecting,
+        complete
+    };
 
     nlohmann::json source;
     std::array<Notification, 14> rules{};

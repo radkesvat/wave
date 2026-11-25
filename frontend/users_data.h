@@ -5,7 +5,10 @@
 
 namespace wave {
 
-enum class UserProtocol { tcp, tcp_websocket };
+enum class UserProtocol {
+    tcp,
+    tcp_websocket
+};
 
 struct UserRecord {
     int id;

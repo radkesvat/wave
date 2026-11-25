@@ -8,7 +8,11 @@ namespace wave {
 
 struct TopologyViewState {
     struct Map {
-        enum class Selection { node, link, route };
+        enum class Selection {
+            node,
+            link,
+            route
+        };
         Selection selection = Selection::node;
         std::string selected;
         float zoom = 1.0f;

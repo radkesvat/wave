@@ -14,11 +14,13 @@ using Json = nlohmann::json;
 constexpr double connect_timeout_ms = 5000;
 constexpr std::size_t max_snapshot_bytes = 1024 * 1024;
 
+// clang-format off
 EM_JS_DEPS(preview_url, "$stringToNewUTF8");
 EM_JS(char*, preview_url, (), {
     if (location.protocol !== 'http:') return 0;
     return stringToNewUTF8('ws://' + location.host + '/ws/preview');
 });
+// clang-format on
 
 bool valid_snapshot(const Json& data)
 {
@@ -64,9 +66,9 @@ std::optional<OverviewData> read_overview(const Json& server)
     const auto history = server.find("download_history");
     const auto count = result.download_mib_per_second.size();
     if (cpu == server.end() || !read_metric(*cpu, result.cpu_percent) || result.cpu_percent > 100 ||
-        used == server.end() || !read_metric(*used, result.memory_used_gib) ||
-        total == server.end() || !read_metric(*total, result.memory_total_gib) ||
-        result.memory_used_gib > result.memory_total_gib || uptime == server.end() || !uptime->is_number_integer() ||
+        used == server.end() || !read_metric(*used, result.memory_used_gib) || total == server.end() ||
+        !read_metric(*total, result.memory_total_gib) || result.memory_used_gib > result.memory_total_gib ||
+        uptime == server.end() || !uptime->is_number_integer() ||
         uptime->get<std::uint64_t>() > static_cast<std::uint64_t>(std::chrono::minutes::max().count()) ||
         history == server.end() || !history->is_array() || history->size() < count) {
         return std::nullopt;
@@ -138,7 +140,7 @@ UsersData read_users(const Json& data)
             .notes = std::string(text_field(user, "notes")),
             .configuration = std::string(text_field(user, "configuration")),
             .protocol = text_field(options, "protocol") == "tcp_websocket" ? UserProtocol::tcp_websocket
-                                                                            : UserProtocol::tcp,
+                                                                           : UserProtocol::tcp,
             .upload_limit = integer_field(options, "upload_limit"),
             .download_limit = integer_field(options, "download_limit"),
             .traffic_limit = integer_field(options, "traffic_limit"),
@@ -166,8 +168,8 @@ void PreviewSession::start()
         fail();
         return;
     }
-    EmscriptenWebSocketCreateAttributes attributes{.url = url.get(), .protocols = nullptr,
-                                                   .createOnMainThread = true};
+    EmscriptenWebSocketCreateAttributes attributes{
+        .url = url.get(), .protocols = nullptr, .createOnMainThread = true};
     socket_ = emscripten_websocket_new(&attributes);
     if (socket_ <= 0) {
         fail();
@@ -318,7 +320,8 @@ bool PreviewSession::receive(std::string_view payload)
             if (request != requests_.end() && request->second.action == feedback_action_) {
                 request->second.expire(emscripten_get_now());
                 if (!request->second.reply) {
-                    const auto status = feedback_ok_ ? PreviewReply::Status::accepted : PreviewReply::Status::rejected;
+                    const auto status =
+                        feedback_ok_ ? PreviewReply::Status::accepted : PreviewReply::Status::rejected;
                     request->second.reply = PreviewReply{status, feedback_};
                 }
             }

@@ -26,7 +26,13 @@ enum class PanelPage {
     about = 106,
     overview = 107,
 };
-enum class PanelDialog { none, sign_out, version, diagnostics, input };
+enum class PanelDialog {
+    none,
+    sign_out,
+    version,
+    diagnostics,
+    input
+};
 
 inline constexpr int panel_menu_control = 1;
 inline constexpr int panel_tools_control = 2;
@@ -59,8 +65,8 @@ const char* panel_page_name(PanelPage page);
 std::span<const PanelNavigationItem> panel_navigation();
 float panel_height(float viewport_width, const PanelState& state);
 void configure_panel_style(bool high_contrast = false);
-void render_panel(PanelState& state, PreviewSession& session, const OverviewData* overview, bool overview_loading,
-                  int browser_focus);
+void render_panel(PanelState& state, PreviewSession& session, const OverviewData* overview,
+                  bool overview_loading, int browser_focus);
 std::string describe_panel(const PanelState& state, const PreviewSession& session,
                            const OverviewData* overview, bool overview_loading);
 
