@@ -1,6 +1,7 @@
 #pragma once
 
 #include "overview_data.h"
+#include "users_data.h"
 
 #include <emscripten/websocket.h>
 #include <nlohmann/json.hpp>
@@ -44,6 +45,7 @@ public:
     bool ready() const { return status_ == PreviewStatus::ready; }
     const nlohmann::json& data() const { return data_; }
     const OverviewData* overview() const { return ready() && overview_ ? &*overview_ : nullptr; }
+    const UsersData& users() const { return users_; }
     std::string_view feedback() const { return feedback_; }
     bool feedback_ok() const { return feedback_ok_; }
     std::string_view feedback_action() const { return feedback_action_; }
@@ -64,6 +66,7 @@ private:
     PreviewStatus status_ = PreviewStatus::loading;
     nlohmann::json data_ = nlohmann::json::object();
     std::optional<OverviewData> overview_;
+    UsersData users_;
     std::string feedback_;
     std::string feedback_action_;
     std::map<std::string, PreviewFeedback, std::less<>> action_feedback_;

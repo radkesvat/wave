@@ -82,6 +82,72 @@ std::optional<OverviewData> read_overview(const Json& server)
     return result;
 }
 
+const Json& field(const Json& object, std::string_view key)
+{
+    static const Json empty;
+    const auto match = object.find(key);
+    return match == object.end() ? empty : *match;
+}
+
+std::string_view text_field(const Json& object, std::string_view key)
+{
+    const auto& value = field(object, key);
+    return value.is_string() ? std::string_view(value.get_ref<const std::string&>()) : std::string_view{};
+}
+
+double number_field(const Json& object, std::string_view key, double fallback = 0)
+{
+    const auto& value = field(object, key);
+    return value.is_number() ? value.get<double>() : fallback;
+}
+
+int integer_field(const Json& object, std::string_view key, int fallback = 0)
+{
+    const auto number = number_field(object, key, fallback);
+    if (number < std::numeric_limits<int>::min() || number > std::numeric_limits<int>::max()) {
+        return fallback;
+    }
+    return static_cast<int>(number);
+}
+
+bool bool_field(const Json& object, std::string_view key)
+{
+    const auto& value = field(object, key);
+    return value.is_boolean() && value.get<bool>();
+}
+
+UsersData read_users(const Json& data)
+{
+    UsersData users;
+    users.live = data["users_live"].get<bool>();
+    for (const auto& user : data["users"]) {
+        const auto name = text_field(user, "name");
+        if (name.empty()) {
+            continue;
+        }
+        const auto& options = field(user, "options");
+        users.rows.push_back({
+            .id = integer_field(user, "id"),
+            .name = std::string(name),
+            .enabled = bool_field(user, "enabled"),
+            .upload_rate = number_field(user, "upload_rate"),
+            .download_rate = number_field(user, "download_rate"),
+            .upload_total = number_field(user, "upload_total"),
+            .download_total = number_field(user, "download_total"),
+            .remaining_minutes = integer_field(user, "remaining_minutes", -1),
+            .notes = std::string(text_field(user, "notes")),
+            .configuration = std::string(text_field(user, "configuration")),
+            .protocol = text_field(options, "protocol") == "tcp_websocket" ? UserProtocol::tcp_websocket
+                                                                            : UserProtocol::tcp,
+            .upload_limit = integer_field(options, "upload_limit"),
+            .download_limit = integer_field(options, "download_limit"),
+            .traffic_limit = integer_field(options, "traffic_limit"),
+            .ip_limit = integer_field(options, "ip_limit"),
+        });
+    }
+    return users;
+}
+
 } // namespace
 
 void PreviewSession::start()
@@ -93,6 +159,7 @@ void PreviewSession::start()
     action_feedback_.clear();
     data_.clear();
     overview_.reset();
+    users_ = {};
 
     const std::unique_ptr<char, decltype(&std::free)> url(preview_url(), std::free);
     if (!url || !emscripten_websocket_is_supported()) {
@@ -252,6 +319,7 @@ bool PreviewSession::receive(std::string_view payload)
     }
     data_ = std::move(frame["data"]);
     overview_ = read_overview(data_["server"]);
+    users_ = read_users(data_);
     status_ = PreviewStatus::ready;
     return true;
 }

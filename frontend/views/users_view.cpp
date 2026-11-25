@@ -22,32 +22,6 @@ constexpr ImVec4 mint{0.41f, 0.90f, 0.77f, 1.0f};
 constexpr ImVec4 amber{0.97f, 0.75f, 0.47f, 1.0f};
 constexpr const char* dialog_id = "###user-dialog";
 
-const Json& field(const Json& object, std::string_view key)
-{
-    static const Json empty;
-    const auto match = object.find(key);
-    return match == object.end() ? empty : *match;
-}
-
-std::string_view text_field(const Json& object, std::string_view key)
-{
-    const auto& value = field(object, key);
-    return value.is_string() ? std::string_view(value.get_ref<const std::string&>()) : std::string_view{};
-}
-
-template <typename Number>
-Number number_field(const Json& object, std::string_view key, Number fallback = 0)
-{
-    const auto& value = field(object, key);
-    return value.is_number() ? value.get<Number>() : fallback;
-}
-
-bool bool_field(const Json& object, std::string_view key)
-{
-    const auto& value = field(object, key);
-    return value.is_boolean() && value.get<bool>();
-}
-
 template <std::size_t Size>
 void copy_field(std::array<char, Size>& destination, std::string_view value)
 {
@@ -56,41 +30,19 @@ void copy_field(std::array<char, Size>& destination, std::string_view value)
     destination[length] = '\0';
 }
 
-struct UserRow {
-    const Json& record;
-    int id;
-    std::string_view name;
-    bool enabled;
-    double upload_rate;
-    double download_rate;
-    double upload_total;
-    double download_total;
-    int remaining_minutes;
-};
-
-UserRow read_user(const Json& user)
-{
-    return {user, number_field<int>(user, "id"), text_field(user, "name"), bool_field(user, "enabled"),
-            number_field<double>(user, "upload_rate"), number_field<double>(user, "download_rate"),
-            number_field<double>(user, "upload_total"), number_field<double>(user, "download_total"),
-            number_field(user, "remaining_minutes", -1)};
-}
-
-UserDraft read_draft(const UserRow& user)
+UserDraft make_draft(const UserRecord& user)
 {
     UserDraft draft;
     draft.id = user.id;
     draft.enabled = user.enabled;
     draft.remaining_minutes = user.remaining_minutes;
     copy_field(draft.name, user.name);
-    copy_field(draft.notes, text_field(user.record, "notes"));
-
-    const auto& options = field(user.record, "options");
-    draft.protocol = text_field(options, "protocol") == "tcp_websocket";
-    draft.upload_limit = number_field<int>(options, "upload_limit");
-    draft.download_limit = number_field<int>(options, "download_limit");
-    draft.traffic_limit = number_field<int>(options, "traffic_limit");
-    draft.ip_limit = number_field<int>(options, "ip_limit");
+    copy_field(draft.notes, user.notes);
+    draft.protocol = user.protocol == UserProtocol::tcp_websocket;
+    draft.upload_limit = user.upload_limit;
+    draft.download_limit = user.download_limit;
+    draft.traffic_limit = user.traffic_limit;
+    draft.ip_limit = user.ip_limit;
     return draft;
 }
 
@@ -114,12 +66,12 @@ void open_dialog(UsersViewState& state, PreviewSession& session, Dialog dialog)
     state.local_feedback.clear();
 }
 
-void open_user_dialog(UsersViewState& state, PreviewSession& session, Dialog dialog, const UserRow& user)
+void open_user_dialog(UsersViewState& state, PreviewSession& session, Dialog dialog, const UserRecord& user)
 {
     open_dialog(state, session, dialog);
-    state.draft = read_draft(user);
+    state.draft = make_draft(user);
     if (dialog == Dialog::share) {
-        state.configuration = text_field(user.record, "configuration");
+        state.configuration = user.configuration;
         if (!state.configuration.empty() && state.configuration.size() <= 512) {
             state.qr = qrcodegen::QrCode::encodeText(state.configuration.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
         }
@@ -143,7 +95,7 @@ void submit(UsersViewState& state, PreviewSession& session, const char* action, 
     state.local_feedback = state.request_id ? "" : "Preview connection unavailable. Try again after reconnecting.";
 }
 
-void row_options(UsersViewState& state, PreviewSession& session, const UserRow& user)
+void row_options(UsersViewState& state, PreviewSession& session, const UserRecord& user)
 {
     if (ImGui::Button("Options")) ImGui::OpenPopup("User options");
     if (!ImGui::BeginPopup("User options")) return;
@@ -166,7 +118,7 @@ void row_options(UsersViewState& state, PreviewSession& session, const UserRow& 
     ImGui::EndPopup();
 }
 
-void enabled_control(UsersViewState& state, PreviewSession& session, const UserRow& user, bool compact)
+void enabled_control(UsersViewState& state, PreviewSession& session, const UserRecord& user, bool compact)
 {
     bool enabled = user.enabled;
     ImGui::PushStyleColor(ImGuiCol_Text, enabled ? mint : amber);
@@ -183,7 +135,7 @@ int comparison(const Value& left, const Value& right)
     return (right < left) - (left < right);
 }
 
-int compare_users(const UserRow& left, const UserRow& right, Column column)
+int compare_users(const UserRecord& left, const UserRecord& right, Column column)
 {
     switch (column) {
     case Column::name: return comparison(left.name, right.name);
@@ -200,20 +152,20 @@ int compare_users(const UserRow& left, const UserRow& right, Column column)
     }
 }
 
-std::vector<const UserRow*> sorted_users(const std::vector<UserRow>& users, const UsersViewState& state)
+std::vector<const UserRecord*> sorted_users(const std::vector<UserRecord>& users, const UsersViewState& state)
 {
-    std::vector<const UserRow*> order;
+    std::vector<const UserRecord*> order;
     for (const auto& user : users) {
         if (state.search.PassFilter(user.name.data(), user.name.data() + user.name.size())) order.push_back(&user);
     }
-    std::ranges::sort(order, [&](const UserRow* left, const UserRow* right) {
+    std::ranges::sort(order, [&](const UserRecord* left, const UserRecord* right) {
         const auto sort = compare_users(*left, *right, state.sort_column);
         return sort == 0 ? left->id < right->id : (state.descending ? sort > 0 : sort < 0);
     });
     return order;
 }
 
-void desktop_users(UsersViewState& state, PreviewSession& session, const std::vector<UserRow>& users)
+void desktop_users(UsersViewState& state, PreviewSession& session, const std::vector<UserRecord>& users)
 {
     constexpr auto flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter |
                            ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
@@ -272,7 +224,7 @@ void desktop_users(UsersViewState& state, PreviewSession& session, const std::ve
     ImGui::EndTable();
 }
 
-void compact_users(UsersViewState& state, PreviewSession& session, const std::vector<UserRow>& users)
+void compact_users(UsersViewState& state, PreviewSession& session, const std::vector<UserRecord>& users)
 {
     constexpr const char* choices[] = {"ID", "Name", "Enabled", "Upload rate", "Download rate",
                                        "Total upload", "Total download", "Time left"};
@@ -576,14 +528,14 @@ void render_users(UsersViewState& state, PreviewSession& session, bool narrow)
     ImGui::PushID("users");
     ImGui::TextUnformatted("Users");
     const bool ready = session.status() == PreviewStatus::ready;
-    const bool live = bool_field(session.data(), "users_live");
+    const auto& users = session.users();
     const float width = ImGui::GetContentRegionAvail().x;
     const bool compact = narrow || width < 745.0f;
     ImGui::BeginDisabled(!ready);
     if (ImGui::Button("Create user")) open_dialog(state, session, Dialog::create);
     ImGui::SameLine();
-    if (ImGui::Button(live ? "Live data" : "Paused")) {
-        send(state, session, {{"action", "set_users_live"}, {"live", !live}});
+    if (ImGui::Button(users.live ? "Live data" : "Paused")) {
+        send(state, session, {{"action", "set_users_live"}, {"live", !users.live}});
     }
     if (width >= 285.0f) ImGui::SameLine();
     if (ImGui::Button("Bot actions")) ImGui::OpenPopup("User bot actions");
@@ -612,13 +564,8 @@ void render_users(UsersViewState& state, PreviewSession& session, bool narrow)
             ImGui::PopStyleColor();
         }
 
-        std::vector<UserRow> users;
-        for (const auto& record : field(session.data(), "users")) {
-            const auto row = read_user(record);
-            if (!row.name.empty()) users.push_back(row);
-        }
-        if (compact) compact_users(state, session, users);
-        else desktop_users(state, session, users);
+        if (compact) compact_users(state, session, users.rows);
+        else desktop_users(state, session, users.rows);
     }
     render_dialog(state, session);
     ImGui::PopID();

@@ -251,6 +251,83 @@ test('pastes into user search on HTTP and mutates the matching row and Logs', as
     }
 });
 
+test('keeps an open Users edit draft while replacing rows and their configuration', async () => {
+    const page = await browser.newPage({ viewport: { width: 1320, height: 840 } });
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: url });
+    const data = fixture();
+    const original = { ...user, id: 2, name: 'Albright', notes: 'Original notes', remaining_minutes: -1 };
+    delete original.options;
+    data.users = [
+        { ...user, id: 1, name: 'Alpine' },
+        original,
+        { ...user, id: 3, name: 'Aardvark' },
+        { ...user, id: 4, name: '' },
+    ];
+    const configuration = 'wave-preview://user/replaced';
+    const preview = await mockPreview(page, { data, handle(_data, _request, reply) {
+        reply({ feedback: 'Applied the Users draft.' });
+    } });
+    const description = name => page.getByRole('img', { name });
+
+    try {
+        await page.goto(url);
+        await description(/Wave Users.*4 users/).waitFor();
+        await canvasClick(page, 270, 137);
+        await replaceText(page, 540, 104, 'Al');
+        await canvasClick(page, 747, 167);
+        await canvasClick(page, 767, 184);
+        await replaceText(page, 495, 212, 'Albright local');
+
+        data.users = [
+            { ...user, id: 5, name: 'Alpine new' },
+            { ...user, id: 2, name: 'Albright remote', notes: 'Other notes', remaining_minutes: 120, configuration },
+        ];
+        await preview.broadcast();
+        await description(/Wave Users.*2 users/).waitFor();
+        await canvasClick(page, 481, 654);
+        await description(/Applied the Users draft/).waitFor();
+        assertRequest((await preview.action(0)).request, {
+            action: 'edit_user', id: 2, name: 'Albright local', notes: 'Original notes', enabled: true,
+            remaining_minutes: -1,
+            options: { protocol: 'tcp', upload_limit: 0, download_limit: 0, traffic_limit: 0, ip_limit: 0 },
+        });
+
+        await canvasClick(page, 747, 190);
+        await canvasClick(page, 800, 253);
+        await canvasClick(page, 490, 554);
+        await page.waitForFunction(async text => (await navigator.clipboard.readText()) === text, configuration);
+    } finally {
+        await page.close();
+    }
+});
+
+test('paginates the compact Users table and targets the replacement row', async () => {
+    const page = await browser.newPage({ viewport: { width: 320, height: 680 } });
+    const data = fixture();
+    data.users = Array.from({ length: 7 }, (_, index) => ({ ...user, id: index + 1, name: index ? `User ${index + 1}` : '' }));
+    const preview = await mockPreview(page, { data });
+
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*7 users/ }).waitFor();
+        data.users.splice(5, 2,
+            { ...user, id: 8, name: 'Replacement', enabled: false },
+            { ...user, id: 9, name: 'Newest' },
+        );
+        data.users_live = false;
+        data.logs.push({ ts: '09:41:03', level: 'info', message: 'Replaced a compact row.' });
+        await preview.broadcast();
+        await page.getByRole('img', { name: /Replaced a compact row/ }).waitFor();
+        await canvasClick(page, 144, 289);
+        assert.deepEqual((await preview.action(0)).request, { action: 'set_users_live', live: true });
+        await canvasClick(page, 119, 421);
+        await canvasClick(page, 224, 485);
+        assert.deepEqual((await preview.action(1)).request, { action: 'set_user_enabled', id: 8, enabled: true });
+    } finally {
+        await page.close();
+    }
+});
+
 test('narrow touch selects the workspace and swipes starting on Menu scroll without opening it', async () => {
     const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
     await mockPreview(page);
