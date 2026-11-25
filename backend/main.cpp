@@ -1,6 +1,11 @@
+#include "overview_data.h"
+#include "preview.h"
+
 #include <httplib.h>
+#include <nlohmann/json.hpp>
 
 #include <charconv>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -65,6 +70,26 @@ bool validate_site(const std::filesystem::path& site_dir)
     return true;
 }
 
+std::string make_overview_snapshot()
+{
+    using namespace std::chrono_literals;
+    constexpr wave::OverviewData sample{
+        .cpu_percent = 28.0f,
+        .memory_used_gib = 3.2f,
+        .memory_total_gib = 8.0f,
+        .uptime = 103h + 23min,
+        .download_mib_per_second = {2.1f, 3.0f, 2.8f, 5.5f, 4.6f, 7.9f, 6.8f,
+                                    10.2f, 8.3f, 8.9f, 5.7f, 6.2f, 7.4f},
+    };
+    return nlohmann::json{
+        {"cpu_percent", sample.cpu_percent},
+        {"memory_used_gib", sample.memory_used_gib},
+        {"memory_total_gib", sample.memory_total_gib},
+        {"uptime_minutes", sample.uptime.count()},
+        {"download_mib_per_second", sample.download_mib_per_second},
+    }.dump();
+}
+
 bool configure_routes(httplib::Server& server, const std::filesystem::path& site_dir)
 {
     if (!server.set_mount_point("/", site_dir.string())) {
@@ -79,6 +104,13 @@ bool configure_routes(httplib::Server& server, const std::filesystem::path& site
             }
         }
     });
+    server.WebSocket("/ws/overview",
+        [snapshot = make_overview_snapshot()](const httplib::Request&, httplib::ws::WebSocket& socket) {
+            if (socket.send(snapshot)) {
+                socket.close();
+            }
+        });
+    wave::configure_preview_route(server);
     return true;
 }
 

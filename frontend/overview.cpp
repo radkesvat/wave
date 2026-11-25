@@ -12,8 +12,6 @@
 namespace wave {
 namespace {
 
-constexpr ImU32 background = IM_COL32(11, 20, 30, 255);
-constexpr ImU32 header = IM_COL32(14, 25, 36, 255);
 constexpr ImU32 surface = IM_COL32(17, 32, 44, 255);
 constexpr ImU32 border = IM_COL32(38, 57, 72, 255);
 constexpr ImU32 foreground = IM_COL32(234, 243, 247, 255);
@@ -23,34 +21,37 @@ constexpr ImU32 accent_surface = IM_COL32(23, 53, 56, 255);
 constexpr ImU32 amber = IM_COL32(246, 192, 119, 255);
 constexpr std::string_view status = "No WaterWall instance connected";
 constexpr std::string_view sample_label = "Sample data";
+constexpr std::string_view sample_loading = "Loading sample data";
+constexpr std::string_view sample_unavailable = "Sample data unavailable";
 
 constexpr int metric_count = 3;
 constexpr float gap = 16.0f;
+constexpr float empty_card_height = 88.0f;
 
 struct OverviewLayout {
     float left;
     float width;
     int columns;
     bool compact;
-    float header_height;
+    bool wrap_status;
     float intro_y;
     float metrics_y;
     float card_height;
     float chart_y;
     float chart_height;
 
-    explicit OverviewLayout(float viewport_width)
+    OverviewLayout(float content_width, float x = 0.0f, float y = 0.0f)
     {
-        const float margin = std::min(32.0f, viewport_width * 0.06f);
-        width = std::min(1080.0f, viewport_width - 2.0f * margin);
-        left = (viewport_width - width) / 2.0f;
+        const float margin = std::min(32.0f, content_width * 0.06f);
+        width = std::min(1080.0f, content_width - 2.0f * margin);
+        left = x + (content_width - width) / 2.0f;
         constexpr float minimum_card_width = 204.0f;
         columns = std::clamp(static_cast<int>((width + gap) / (minimum_card_width + gap)),
                              1, metric_count);
         compact = columns < metric_count;
-        header_height = compact ? 64.0f : 72.0f;
-        intro_y = header_height + (compact ? 30.0f : 46.0f);
-        metrics_y = intro_y + (compact ? 146.0f : 124.0f);
+        wrap_status = width < 250.0f;
+        intro_y = y + (compact ? 30.0f : 46.0f);
+        metrics_y = intro_y + (compact ? 146.0f : 124.0f) + (wrap_status ? 18.0f : 0.0f);
         card_height = compact ? 106.0f : 132.0f;
         const int rows = (metric_count + columns - 1) / columns;
         chart_y = metrics_y + rows * (card_height + gap) + 4.0f;
@@ -58,9 +59,11 @@ struct OverviewLayout {
     }
 };
 
-void text(ImDrawList& draw, ImVec2 position, float size, ImU32 color, std::string_view label)
+void text(ImDrawList& draw, ImVec2 position, float size, ImU32 color, std::string_view label,
+          float wrap_width = 0.0f)
 {
-    draw.AddText(ImGui::GetFont(), size, position, color, label.data(), label.data() + label.size());
+    draw.AddText(ImGui::GetFont(), size, position, color, label.data(), label.data() + label.size(),
+                 wrap_width);
 }
 
 float text_width(float size, std::string_view label)
@@ -75,19 +78,6 @@ void panel(ImDrawList& draw, ImVec2 min, ImVec2 max)
     draw.AddRect(min, max, border, 14.0f);
 }
 
-void draw_header(ImDrawList& draw, const OverviewLayout& layout, float viewport_width)
-{
-    const float y = (layout.header_height - 36.0f) / 2.0f;
-    const float x = layout.left;
-    draw.AddRectFilled({0, 0}, {viewport_width, layout.header_height}, header);
-    draw.AddLine({0, layout.header_height}, {viewport_width, layout.header_height}, border);
-    draw.AddRectFilled({x, y}, {x + 36, y + 36}, accent_surface, 10.0f);
-    const ImVec2 mark[] = {{x + 7, y + 20}, {x + 12, y + 15}, {x + 16, y + 15},
-                           {x + 20, y + 21}, {x + 24, y + 21}, {x + 29, y + 16}};
-    draw.AddPolyline(mark, IM_ARRAYSIZE(mark), accent, ImDrawFlags_None, 2.5f);
-    text(draw, {x + 47, y + 4}, 25.0f, foreground, "Wave");
-}
-
 void draw_intro(ImDrawList& draw, const OverviewLayout& layout)
 {
     const float x = layout.left;
@@ -96,11 +86,12 @@ void draw_intro(ImDrawList& draw, const OverviewLayout& layout)
 
     const float status_y = y + (layout.compact ? 58.0f : 68.0f);
     draw.AddCircleFilled({x + 5, status_y + 10}, 4.0f, amber);
-    text(draw, {x + 17, status_y}, layout.width < 260.0f ? 15.0f : 17.0f, muted, status);
+    text(draw, {x + 17, status_y}, layout.width < 280.0f ? 15.0f : 17.0f, muted, status,
+         std::max(1.0f, layout.width - 17.0f));
 
     const float pill_width = text_width(15.0f, sample_label) + 38.0f;
     const float pill_x = layout.compact ? x : x + layout.width - pill_width;
-    const float pill_y = layout.compact ? y + 99.0f : layout.metrics_y - 52.0f;
+    const float pill_y = layout.compact ? layout.metrics_y - 47.0f : status_y - 6.0f;
     draw.AddRectFilled({pill_x, pill_y}, {pill_x + pill_width, pill_y + 31}, accent_surface, 15.0f);
     draw.AddCircleFilled({pill_x + 13, pill_y + 15.5f}, 3.0f, accent);
     text(draw, {pill_x + 24, pill_y + 6}, 15.0f, accent, sample_label);
@@ -173,7 +164,7 @@ void draw_traffic(ImDrawList& draw, const OverviewLayout& layout, const Overview
 
     panel(draw, {x, y}, {right_edge, bottom_edge});
     text(draw, {x + 20, y + 19}, layout.compact ? 21.0f : 24.0f, foreground, "Download traffic");
-    text(draw, {x + 20, y + 50}, 15.0f, muted, "Past hour");
+    text(draw, {x + 20, y + 50}, 15.0f, muted, "Recent samples");
     const auto latest = std::format("{:.1f} MiB/s", samples.back());
     const float latest_y = y + (layout.width < 260.0f ? 48.0f : 23.0f);
     text(draw, {right_edge - 20 - text_width(19.0f, latest), latest_y}, 19.0f, accent, latest);
@@ -183,76 +174,92 @@ void draw_traffic(ImDrawList& draw, const OverviewLayout& layout, const Overview
     const float plot_top = y + 97.0f;
     const float plot_bottom = bottom_edge - 46.0f;
     constexpr int intervals = 4;
-    const float step = std::max(1.0f, std::ceil(*std::max_element(samples.begin(), samples.end()) /
-                                               intervals));
-    const float peak = intervals * step;
+    const double maximum = *std::max_element(samples.begin(), samples.end());
+    const double step = std::max(1.0, std::ceil(maximum / intervals));
+    const double peak = intervals * step;
 
     text(draw, {x + 20, y + 73}, 13.0f, muted, "MiB/s");
     for (int i = 0; i <= intervals; ++i) {
         const float line_y = plot_bottom - (plot_bottom - plot_top) * i / intervals;
-        const auto label = std::format("{:.0f}", i * step);
+        const double tick = i * step;
+        const auto label = tick < 10000.0 ? std::format("{:.0f}", tick) : std::format("{:.0e}", tick);
         text(draw, {plot_left - 10 - text_width(14.0f, label), line_y - 8}, 14.0f, muted, label);
         draw.AddLine({plot_left, line_y}, {plot_right, line_y}, border);
     }
 
     std::array<ImVec2, std::tuple_size_v<decltype(data.download_mib_per_second)> + 2> points;
     for (std::size_t i = 0; i < samples.size(); ++i) {
+        const float fraction = static_cast<float>(samples[i] / peak);
         points[i] = {plot_left + (plot_right - plot_left) * i / (samples.size() - 1),
-                     plot_bottom - (plot_bottom - plot_top) * samples[i] / peak};
+                     plot_bottom - (plot_bottom - plot_top) * fraction};
     }
     points[samples.size()] = {plot_right, plot_bottom};
     points[samples.size() + 1] = {plot_left, plot_bottom};
-    draw.AddConcavePolyFilled(points.data(), static_cast<int>(points.size()), IM_COL32(104, 229, 195, 31));
-    draw.AddPolyline(points.data(), static_cast<int>(samples.size()), accent, ImDrawFlags_None, 2.3f);
+    if (maximum > 0.0) {
+        draw.AddConcavePolyFilled(points.data(), static_cast<int>(points.size()), IM_COL32(104, 229, 195, 31));
+    }
+    draw.AddPolyline(points.data(), static_cast<int>(samples.size()), accent, 2.3f);
     draw.AddCircleFilled(points[samples.size() - 1], 4.0f, accent);
 
-    constexpr std::string_view midpoint = "-30 min";
     constexpr std::string_view end = "Now";
-    text(draw, {plot_left, plot_bottom + 12}, 14.0f, muted, "-60 min");
-    text(draw, {(plot_left + plot_right - text_width(14.0f, midpoint)) / 2, plot_bottom + 12},
-         14.0f, muted, midpoint);
+    text(draw, {plot_left, plot_bottom + 12}, 14.0f, muted, "Earlier");
     text(draw, {plot_right - text_width(14.0f, end), plot_bottom + 12}, 14.0f, muted, end);
 }
 
 } // namespace
 
-float overview_height(float viewport_width)
+float overview_height(float content_width, bool has_data)
 {
-    const OverviewLayout layout(viewport_width);
-    return layout.chart_y + layout.chart_height + 32.0f;
+    const OverviewLayout layout(content_width);
+    const float bottom = has_data ? layout.chart_y + layout.chart_height
+                                  : layout.metrics_y + empty_card_height;
+    return bottom + 32.0f;
 }
 
-void render_overview(const OverviewData& data)
+void render_overview(ImDrawList& draw, float x, float y, float width,
+                     const OverviewData* data, bool loading)
 {
-    const ImVec2 viewport = ImGui::GetIO().DisplaySize;
-    const OverviewLayout layout(viewport.x);
-    ImDrawList& draw = *ImGui::GetBackgroundDrawList();
-
-    draw.AddRectFilled({0, 0}, viewport, background);
-    draw_header(draw, layout, viewport.x);
+    const OverviewLayout layout(width, x, y);
     draw_intro(draw, layout);
-    draw_metric(draw, layout, Metric::cpu, "CPU utilization", std::format("{:.0f}%", data.cpu_percent),
-                data.cpu_percent / 100.0f);
+    if (!data) {
+        panel(draw, {layout.left, layout.metrics_y},
+              {layout.left + layout.width, layout.metrics_y + empty_card_height});
+        text(draw, {layout.left + 20, layout.metrics_y + 30}, 19.0f, foreground,
+             loading ? sample_loading : sample_unavailable, std::max(1.0f, layout.width - 40.0f));
+        return;
+    }
+
+    draw_metric(draw, layout, Metric::cpu, "CPU utilization", std::format("{:.0f}%", data->cpu_percent),
+                data->cpu_percent / 100.0f);
     draw_metric(draw, layout, Metric::memory, "Memory",
-                std::format("{:.1f} / {:.1f} GiB", data.memory_used_gib, data.memory_total_gib),
-                data.memory_total_gib > 0 ? data.memory_used_gib / data.memory_total_gib : 0.0f);
-    const auto minutes = data.uptime.count();
+                std::format("{:.1f} / {:.1f} GiB", data->memory_used_gib, data->memory_total_gib),
+                data->memory_total_gib > 0 ? data->memory_used_gib / data->memory_total_gib : 0.0f);
+    const auto minutes = data->uptime.count();
     draw_metric(draw, layout, Metric::uptime, "Uptime",
                 std::format("{}d {}h {}m", minutes / 1440, minutes / 60 % 24, minutes % 60));
-    draw_traffic(draw, layout, data);
+    draw_traffic(draw, layout, *data);
 }
 
-std::string describe_overview(const OverviewData& data)
+std::string describe_overview(const OverviewData* data, bool loading)
 {
-    const auto minutes = data.uptime.count();
-    const auto [low, high] = std::minmax_element(data.download_mib_per_second.begin(),
-                                                data.download_mib_per_second.end());
+    if (!data) {
+        return std::format("Wave Overview. {}. {}. {}.", status, sample_label,
+                           loading ? sample_loading : sample_unavailable);
+    }
+
+    const auto total_minutes = data->uptime.count();
+    const auto days = total_minutes / 1440;
+    const auto hours = total_minutes / 60 % 24;
+    const auto minutes = total_minutes % 60;
+    const auto [low, high] = std::minmax_element(data->download_mib_per_second.begin(),
+                                                data->download_mib_per_second.end());
     return std::format("Wave Overview. {}. {}. CPU utilization {:.0f} percent. Memory {:.1f} of {:.1f} "
-                       "GiB. Uptime {} days, {} hours, {} minutes. Download traffic over the past hour "
-                       "ranged from {:.1f} to {:.1f} MiB per second. Latest {:.1f} MiB per second.",
-                       status, sample_label, data.cpu_percent, data.memory_used_gib,
-                       data.memory_total_gib, minutes / 1440, minutes / 60 % 24, minutes % 60,
-                       *low, *high, data.download_mib_per_second.back());
+                       "GiB. Uptime {} day{}, {} hour{}, {} minute{}. Recent download traffic ranged "
+                       "from {:.1f} to {:.1f} MiB per second. Latest {:.1f} MiB per second.",
+                       status, sample_label, data->cpu_percent, data->memory_used_gib,
+                       data->memory_total_gib, days, days == 1 ? "" : "s", hours,
+                       hours == 1 ? "" : "s", minutes, minutes == 1 ? "" : "s",
+                       *low, *high, data->download_mib_per_second.back());
 }
 
 } // namespace wave

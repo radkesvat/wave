@@ -1,15 +1,17 @@
 # Build and preview Wave
 
-Wave builds a static WebAssembly Overview page and a native preview server.
-Use a browser with WebGL 2 enabled to preview the Overview.
+Wave builds a WebAssembly panel and a native server that supplies its preview
+data. Use a browser with WebGL 2 enabled. The workspace starts on Users and
+shows WaterWall as disconnected.
 
 ## Prerequisites
 
 - CMake 3.24 or newer and Ninja on your `PATH`
 - Git and Python 3 for the Emscripten SDK setup
 - Emscripten SDK 7.0.1
-- Network access on the first build to fetch Dear ImGui v1.92.5 and the SDK's
-  SDL2 port
+- Network access on the first build to fetch Dear ImGui v1.93.0,
+  nlohmann/json v3.12.0, Project Nayuki QR Code generator v1.8.0, and the SDK's
+  SDL2 port. [QR release](https://github.com/nayuki/QR-Code-generator/releases/tag/v1.8.0)
 
 The SDK supplies the Clang-based `em++` driver and the Emscripten CMake toolchain.
 Install the SDK outside the Wave checkout and activate it in the shell you will
@@ -47,8 +49,8 @@ The release preset uses `-O3 -DNDEBUG` and enables link-time optimization
 with `-flto` during compilation and linking. It generates a browser-only
 JavaScript loader. [Emscripten optimization guide](https://emscripten.org/docs/optimizing/Optimizing-Code.html#lto)
 
-Open [the local Wave preview](http://127.0.0.1:8000/) and check that Overview
-opens with the disconnected status, sample metrics, and download chart.
+The static preview shows the workspace and its unavailable-data state. Use
+the native preview below for populated views and demo actions. [Static preview](http://127.0.0.1:8000/)
 
 Each preset writes `index.html`, `index.js`, `index.wasm`, and third-party
 license notices to its own `site/` directory. Add `--verbose` to a build command
@@ -66,7 +68,8 @@ npm run --prefix tests/frontend install-browser
 ```
 
 After building a preset, use the matching CTest command. Each run serves its
-built site on a separate local port and tests the Overview in Chromium.
+built site on a separate local port and supplies a WebSocket fixture for the
+workspace in Chromium.
 
 ```sh
 ctest --preset web-debug
@@ -80,8 +83,8 @@ generated site as a separate artifact.
 ## Native backend
 
 The backend needs CMake 3.24 or newer, Ninja, and a host C++20 compiler. The
-first configure downloads cpp-httplib v0.67.0 and verifies the archive against
-the checksum pinned in the native CMake project. [cpp-httplib release](https://github.com/yhirose/cpp-httplib/releases/tag/v0.67.0)
+first configure downloads cpp-httplib v0.67.0 and nlohmann/json v3.12.0 and
+verifies their pinned archive checksums. [cpp-httplib release](https://github.com/yhirose/cpp-httplib/releases/tag/v0.67.0), [nlohmann/json release](https://github.com/nlohmann/json/releases/tag/v3.12.0)
 
 Run these commands from the Wave root with the native compiler on `PATH`.
 Use `backend-debug` in both commands for a debug build.
@@ -103,12 +106,36 @@ The executable is `build/backend-release/wave-backend` or
 ./build/backend-release/wave-backend
 ```
 
+Use the Users toolbar to search, sort, create, or pause sample records. Open
+a row's Options for edits, notes, QR sharing, and simulated bot actions. The
+Logs pane records demo changes and provides search, auto-scroll, copy, and
+clear controls. Menu opens version information, demo sign-in, first-run setup,
+and demo sign-out. Tools opens diagnostics and input helpers. The initial demo
+sign-in uses the username `demo` and password `wave-demo`.
+
+On narrow screens, the Users table provides page controls. Swipe the panel
+to reach Logs. Swiping along a pane's right edge scrolls its contents.
+
 `--site-dir` selects a frontend build directory relative to the current
 working directory or by absolute path. It defaults to `build/web-release/site`
 and must contain `index.html`, `index.js`, and `index.wasm`. `--host` and
 `--port` default to `127.0.0.1` and `2030`. Pass `--port 0` to let the operating
 system choose a free port. The server prints its address and bound port at
 startup. The `/ws` endpoint echoes text messages over the same port.
+
+The workspace opens `/ws/preview` on the same host and port. A JSON frame with
+`type` set to `snapshot` carries Users, Logs, server metrics, settings,
+topology, bot status, and console data in `data`. Requests specify an `action`
+and its fields. The server replies with a snapshot and action feedback.
+Other connected browsers receive the shared updates. Overview and Server
+Status use the same server metrics. Restarting the process restores the
+sample data. The console, credentials, and bot actions run as in-memory
+demonstrations.
+
+The standalone `/ws/overview` endpoint sends one JSON text frame and closes
+the connection. Its fixed fixture contains `cpu_percent`, `memory_used_gib`,
+`memory_total_gib`, `uptime_minutes`, and `download_mib_per_second`. The last
+field contains 13 samples taken five minutes apart, oldest first.
 
 For a remote preview, bind to `0.0.0.0` and open `http://<server-ip>:2030/`
 from the other machine.

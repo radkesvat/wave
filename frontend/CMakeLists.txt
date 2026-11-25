@@ -1,14 +1,21 @@
 include(FetchContent)
-# Dear ImGui v1.92.5. Pin the archive to both its commit and content hash.
+# Dear ImGui v1.93.0. Pin the archive to both its commit and content hash.
 FetchContent_Declare(imgui
-    URL https://codeload.github.com/ocornut/imgui/tar.gz/6d910d5487d11ca567b61c7824b0c78c569d62f0
-    URL_HASH SHA256=b715a3226320aaebaea79dc6af6405ae37cdcb479817fddaef12a17d8bd15a3a
+    URL https://codeload.github.com/ocornut/imgui/tar.gz/c1aaac65e896a45f81f47a4d68f9959e0f86c859
+    URL_HASH SHA256=b3d8f99838bb3ff05e14185562345f85e00c032da4d8fc277608d7898d847114
 )
 FetchContent_MakeAvailable(imgui)
 
 add_executable(wave
+    browser_ui.cpp
+    entry_view.cpp
+    logs_view.cpp
     main.cpp
     overview.cpp
+    panel.cpp
+    preview_session.cpp
+    secondary_views.cpp
+    users_view.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
@@ -24,7 +31,13 @@ set_target_properties(wave PROPERTIES
     OUTPUT_NAME index
     SUFFIX .html
 )
-target_include_directories(wave PRIVATE "${imgui_SOURCE_DIR}" "${imgui_SOURCE_DIR}/backends")
+target_include_directories(wave PRIVATE
+    "${PROJECT_SOURCE_DIR}/common"
+    "${imgui_SOURCE_DIR}"
+    "${imgui_SOURCE_DIR}/backends"
+)
+target_link_libraries(wave PRIVATE nlohmann_json::nlohmann_json)
+include(qr_code.cmake)
 target_compile_definitions(wave PRIVATE IMGUI_IMPL_OPENGL_ES3)
 target_compile_options(wave PRIVATE
     -sUSE_SDL=2
@@ -38,6 +51,7 @@ target_link_options(wave PRIVATE
     -sUSE_SDL=2
     -sMIN_WEBGL_VERSION=2
     -sMAX_WEBGL_VERSION=2
+    -lwebsocket.js
     "$<$<CONFIG:Release>:-flto>"
     "$<$<CONFIG:Release>:-sENVIRONMENT=web>"
     "SHELL:--shell-file \"${wave_shell}\""
@@ -51,4 +65,8 @@ add_custom_command(TARGET wave POST_BUILD
 )
 
 configure_file("${imgui_SOURCE_DIR}/LICENSE.txt" "${CMAKE_BINARY_DIR}/site/licenses/dear-imgui.txt" COPYONLY)
+configure_file("${PROJECT_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/site/licenses/wave.txt" COPYONLY)
 configure_file("${PROJECT_SOURCE_DIR}/doc/licenses/karla.txt" "${CMAKE_BINARY_DIR}/site/licenses/karla.txt" COPYONLY)
+configure_file("${nlohmann_json_SOURCE_DIR}/LICENSE.MIT" "${CMAKE_BINARY_DIR}/site/licenses/nlohmann-json.txt" COPYONLY)
+configure_file("${PROJECT_SOURCE_DIR}/doc/licenses/nlohmann-json-third-party.txt"
+    "${CMAKE_BINARY_DIR}/site/licenses/nlohmann-json-third-party.txt" COPYONLY)

@@ -11,11 +11,12 @@ FetchContent_Declare(httplib
 )
 FetchContent_MakeAvailable(httplib)
 
-add_executable(wave-backend main.cpp)
+add_executable(wave-backend main.cpp preview.cpp)
 set_target_properties(wave-backend PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
     CXX_EXTENSIONS NO
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
-target_link_libraries(wave-backend PRIVATE httplib::httplib)
+target_include_directories(wave-backend PRIVATE "${PROJECT_SOURCE_DIR}/common")
+target_link_libraries(wave-backend PRIVATE httplib::httplib nlohmann_json::nlohmann_json)

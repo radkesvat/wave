@@ -1,0 +1,200 @@
+#include "preview_session.h"
+
+#include <emscripten.h>
+
+#include <cstdlib>
+#include <limits>
+#include <memory>
+#include <utility>
+
+namespace wave {
+namespace {
+
+using Json = nlohmann::json;
+constexpr double connect_timeout_ms = 5000;
+constexpr std::size_t max_snapshot_bytes = 1024 * 1024;
+
+EM_JS_DEPS(preview_url, "$stringToNewUTF8");
+EM_JS(char*, preview_url, (), {
+    if (location.protocol !== 'http:') return 0;
+    return stringToNewUTF8('ws://' + location.host + '/ws/preview');
+});
+
+bool valid_snapshot(const Json& data)
+{
+    if (!data.is_object()) {
+        return false;
+    }
+    for (const char* key : {"users", "logs"}) {
+        const auto item = data.find(key);
+        if (item == data.end() || !item->is_array()) {
+            return false;
+        }
+    }
+    for (const char* key : {"server", "settings", "topology", "bot", "console"}) {
+        const auto item = data.find(key);
+        if (item == data.end() || !item->is_object()) {
+            return false;
+        }
+    }
+    const auto live = data.find("users_live");
+    return live != data.end() && live->is_boolean();
+}
+
+bool read_metric(const Json& value, float& metric)
+{
+    if (!value.is_number()) {
+        return false;
+    }
+    const auto number = value.get<double>();
+    if (!(number >= 0 && number <= std::numeric_limits<float>::max())) {
+        return false;
+    }
+    metric = static_cast<float>(number);
+    return true;
+}
+
+std::optional<OverviewData> read_overview(const Json& server)
+{
+    OverviewData result{};
+    const auto cpu = server.find("cpu_percent");
+    const auto used = server.find("memory_used_gib");
+    const auto total = server.find("memory_total_gib");
+    const auto uptime = server.find("uptime_minutes");
+    const auto history = server.find("download_history");
+    const auto count = result.download_mib_per_second.size();
+    if (cpu == server.end() || !read_metric(*cpu, result.cpu_percent) || result.cpu_percent > 100 ||
+        used == server.end() || !read_metric(*used, result.memory_used_gib) ||
+        total == server.end() || !read_metric(*total, result.memory_total_gib) ||
+        result.memory_used_gib > result.memory_total_gib || uptime == server.end() || !uptime->is_number_integer() ||
+        uptime->get<std::uint64_t>() > static_cast<std::uint64_t>(std::chrono::minutes::max().count()) ||
+        history == server.end() || !history->is_array() || history->size() < count) {
+        return std::nullopt;
+    }
+
+    result.uptime = std::chrono::minutes(uptime->get<std::chrono::minutes::rep>());
+    const std::size_t offset = history->size() - count;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!read_metric((*history)[offset + i], result.download_mib_per_second[i])) {
+            return std::nullopt;
+        }
+    }
+    return result;
+}
+
+} // namespace
+
+void PreviewSession::start()
+{
+    stop();
+    status_ = PreviewStatus::loading;
+    feedback_.clear();
+    feedback_action_.clear();
+    action_feedback_.clear();
+    data_.clear();
+    overview_.reset();
+
+    const std::unique_ptr<char, decltype(&std::free)> url(preview_url(), std::free);
+    if (!url || !emscripten_websocket_is_supported()) {
+        fail();
+        return;
+    }
+    EmscriptenWebSocketCreateAttributes attributes{.url = url.get(), .protocols = nullptr,
+                                                   .createOnMainThread = true};
+    socket_ = emscripten_websocket_new(&attributes);
+    if (socket_ <= 0) {
+        fail();
+        return;
+    }
+
+    const auto on_message = [](int, const EmscriptenWebSocketMessageEvent* event, void* user_data) {
+        auto& session = *static_cast<PreviewSession*>(user_data);
+        // Emscripten includes a terminating NUL in the length of text messages.
+        if (!event->isText || event->numBytes <= 1 || event->numBytes - 1 > max_snapshot_bytes ||
+            !session.receive({reinterpret_cast<const char*>(event->data), event->numBytes - 1})) {
+            session.fail();
+        }
+        return true;
+    };
+    const auto on_close = [](int, const EmscriptenWebSocketCloseEvent*, void* user_data) {
+        static_cast<PreviewSession*>(user_data)->fail();
+        return true;
+    };
+    if (emscripten_websocket_set_onmessage_callback(socket_, this, on_message) != EMSCRIPTEN_RESULT_SUCCESS ||
+        emscripten_websocket_set_onclose_callback(socket_, this, on_close) != EMSCRIPTEN_RESULT_SUCCESS) {
+        fail();
+        return;
+    }
+    deadline_ = emscripten_get_now() + connect_timeout_ms;
+}
+
+void PreviewSession::stop()
+{
+    if (socket_ > 0) {
+        emscripten_websocket_close(socket_, 1000, nullptr);
+        emscripten_websocket_delete(socket_);
+    }
+    socket_ = 0;
+}
+
+void PreviewSession::update()
+{
+    if (status_ == PreviewStatus::loading && emscripten_get_now() >= deadline_) {
+        fail();
+    }
+}
+
+bool PreviewSession::send(Json request)
+{
+    if (!ready()) {
+        return false;
+    }
+    const auto action = request.find("action");
+    if (action == request.end() || !action->is_string() ||
+        emscripten_websocket_send_utf8_text(socket_, request.dump().c_str()) != EMSCRIPTEN_RESULT_SUCCESS) {
+        return false;
+    }
+    action_feedback_.try_emplace(action->get_ref<const std::string&>());
+    return true;
+}
+
+const PreviewFeedback* PreviewSession::feedback_for(std::string_view action) const
+{
+    const auto found = action_feedback_.find(action);
+    return found != action_feedback_.end() && found->second.revision != 0 ? &found->second : nullptr;
+}
+
+void PreviewSession::fail()
+{
+    status_ = PreviewStatus::unavailable;
+    stop();
+}
+
+bool PreviewSession::receive(std::string_view payload)
+{
+    auto frame = Json::parse(payload, nullptr, false);
+    if (!frame.is_object() || frame["type"] != "snapshot" || !valid_snapshot(frame["data"])) {
+        return false;
+    }
+
+    const auto action = frame.find("action");
+    const auto feedback = frame.find("feedback");
+    const auto ok = frame.find("ok");
+    if (action != frame.end() && action->is_string() && feedback != frame.end() && feedback->is_string() &&
+        ok != frame.end() && ok->is_boolean()) {
+        feedback_action_ = action->get<std::string>();
+        feedback_ = feedback->get<std::string>();
+        feedback_ok_ = ok->get<bool>();
+        ++feedback_revision_;
+        const auto known_action = action_feedback_.find(feedback_action_);
+        if (known_action != action_feedback_.end()) {
+            known_action->second = {feedback_, feedback_revision_, feedback_ok_};
+        }
+    }
+    data_ = std::move(frame["data"]);
+    overview_ = read_overview(data_["server"]);
+    status_ = PreviewStatus::ready;
+    return true;
+}
+
+} // namespace wave

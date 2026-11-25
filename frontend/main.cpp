@@ -1,4 +1,5 @@
-#include "overview.h"
+#include "panel.h"
+#include "preview_session.h"
 
 #include <GLES3/gl3.h>
 #include <SDL.h>
@@ -10,29 +11,51 @@
 
 #include <cmath>
 #include <cstdio>
+#include <string>
 
 namespace {
 
-using namespace std::chrono_literals;
+std::string clipboard_text;
 
-constexpr wave::OverviewData sample_data{
-    .cpu_percent = 28.0f,
-    .memory_used_gib = 3.2f,
-    .memory_total_gib = 8.0f,
-    .uptime = 103h + 23min,
-    .download_mib_per_second = {2.1f, 3.0f, 2.8f, 5.5f, 4.6f, 7.9f, 6.8f,
-                                10.2f, 8.3f, 8.9f, 5.7f, 6.2f, 7.4f},
-};
-
-EM_JS(void, set_overview_height, (int height), {
-    Module['canvas'].style.setProperty('--overview-height', height + 'px');
+EM_JS(void, set_panel_height, (int height), {
+    Module['canvas'].style.setProperty('--panel-height', height + 'px');
 });
 
-EM_JS(void, show_overview, (const char* description), {
-    Module['showOverview'](UTF8ToString(description));
+EM_JS(void, show_panel, (), { Module['showPanel'](); });
+
+EM_JS(void, update_panel_description, (const char* description), {
+    Module['updateDescription'](UTF8ToString(description));
 });
 
-EM_JS(void, show_startup_error, (), { Module['onAbort'](); });
+EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools), {
+    Module['updateNavigation'](page, open, menu, tools);
+});
+
+EM_JS(int, browser_panel_focus, (), { return Module['panelFocus'](); });
+
+EM_JS(void, scroll_to_top, (), { window.scrollTo(0, 0); });
+
+EM_JS(void, show_text_input, (bool active, float x, float y), { Module['setTextInput'](active, x, y); });
+
+EM_JS(void, copy_text, (const char* text), { Module['copyText'](UTF8ToString(text)); });
+
+EM_JS(bool, open_browser_link, (const char* url), {
+    window.open(UTF8ToString(url), '_blank', 'noopener,noreferrer');
+    return true;
+});
+
+EM_JS_DEPS(install_text_input, "$stringToNewUTF8,free");
+EM_JS(void, install_text_input, (), {
+    Module['installTextInput']((text, paste = false) => {
+        const value = stringToNewUTF8(text);
+        Module['_wave_input_text'](value, paste);
+        _free(value);
+    });
+});
+
+EM_JS(void, show_startup_error, (), {
+    Module['onAbort']();
+});
 
 struct Application {
     SDL_Window* window = nullptr;
@@ -41,10 +64,13 @@ struct Application {
     bool imgui_gl = false;
     bool visible = false;
     int minimum_height = 0;
+    wave::PreviewSession session;
+    wave::PanelState panel;
+    std::string displayed_description;
 
     bool initialize()
     {
-        // Let the browser handle document scrolling and zoom on this read-only page.
+        // SDL handles mouse and keyboard keys. The shell routes scrolling, taps, and browser text input.
         SDL_SetHint(SDL_HINT_EMSCRIPTEN_KEYBOARD_ELEMENT, "#canvas");
         SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
         if (SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -63,6 +89,12 @@ struct Application {
             return false;
         }
 
+        // Pointer events in the shell own touch gestures for the canvas.
+        emscripten_set_touchstart_callback("#canvas", nullptr, false, nullptr);
+        emscripten_set_touchmove_callback("#canvas", nullptr, false, nullptr);
+        emscripten_set_touchend_callback("#canvas", nullptr, false, nullptr);
+        emscripten_set_touchcancel_callback("#canvas", nullptr, false, nullptr);
+
         gl_context = SDL_GL_CreateContext(window);
         if (!gl_context || SDL_GL_MakeCurrent(window, gl_context) != 0) {
             return false;
@@ -72,9 +104,10 @@ struct Application {
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr;
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.FontDefault = io.Fonts->AddFontFromFileTTF("/karla.ttf", 16.0f);
         if (!io.FontDefault) {
-            SDL_SetError("Could not load the embedded Overview font");
+            SDL_SetError("Could not load the embedded Wave font");
             return false;
         }
 
@@ -84,11 +117,26 @@ struct Application {
             SDL_SetError("Could not initialize the Dear ImGui backends");
             return false;
         }
+        SDL_StartTextInput();
+        auto& platform = ImGui::GetPlatformIO();
+        platform.Platform_SetImeDataFn = [](ImGuiContext*, ImGuiViewport*, ImGuiPlatformImeData* data) {
+            show_text_input(data->WantTextInput, data->InputPos.x, data->InputPos.y);
+        };
+        platform.Platform_GetClipboardTextFn = [](ImGuiContext*) { return clipboard_text.c_str(); };
+        platform.Platform_SetClipboardTextFn = [](ImGuiContext*, const char* text) {
+            clipboard_text = text;
+            copy_text(text);
+        };
+        platform.Platform_OpenInShellFn = [](ImGuiContext*, const char* path) { return open_browser_link(path); };
+        wave::configure_panel_style();
+        install_text_input();
+        session.start();
         return true;
     }
 
     void shutdown()
     {
+        session.stop();
         if (imgui_gl) {
             ImGui_ImplOpenGL3_Shutdown();
         }
@@ -115,10 +163,10 @@ struct Application {
         }
 
         const int width = static_cast<int>(css_width);
-        const int required_height = static_cast<int>(std::ceil(wave::overview_height(width)));
+        const int required_height = static_cast<int>(std::ceil(wave::panel_height(width, panel)));
         if (minimum_height != required_height) {
             minimum_height = required_height;
-            set_overview_height(minimum_height);
+            set_panel_height(minimum_height);
             emscripten_get_element_css_size("#canvas", &css_width, &css_height);
         }
 
@@ -137,6 +185,9 @@ struct Application {
 
     void frame()
     {
+        session.update();
+        const auto* data = session.overview();
+        const bool loading = session.status() == wave::PreviewStatus::loading;
         if (!fit_canvas()) {
             return;
         }
@@ -149,7 +200,12 @@ struct Application {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
-        wave::render_overview(sample_data);
+        const auto previous_page = panel.page;
+        const auto previous_entry = panel.entry.page;
+        wave::render_panel(panel, session, data, loading, browser_panel_focus());
+        if (panel.page != previous_page || panel.entry.page != previous_entry) {
+            scroll_to_top();
+        }
         ImGui::Render();
 
         int drawable_width = 0;
@@ -160,23 +216,68 @@ struct Application {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
 
+        auto description = wave::describe_panel(panel, session, data, loading);
+        if (description != displayed_description) {
+            update_panel_description(description.c_str());
+            displayed_description = std::move(description);
+        }
+        update_navigation(wave::panel_navigation_index(panel.page),
+                          panel.navigation_open && panel.entry.page == wave::EntryPage::workspace,
+                          panel.menu_open, panel.tools_open);
         if (!visible) {
-            show_overview(wave::describe_overview(sample_data).c_str());
+            show_panel();
             visible = true;
         }
     }
 };
 
-void render_frame(void* application)
+Application application;
+
+void render_frame(void* context)
 {
-    static_cast<Application*>(application)->frame();
+    static_cast<Application*>(context)->frame();
 }
 
 } // namespace
 
+extern "C" EMSCRIPTEN_KEEPALIVE void wave_activate_panel_control(int control)
+{
+    application.panel.browser_control = control;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void wave_tap_panel(float x, float y)
+{
+    auto& io = ImGui::GetIO();
+    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+    io.AddMousePosEvent(x, y);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void wave_scroll_panel(float x, float y, float dx, float dy)
+{
+    auto& io = ImGui::GetIO();
+    io.AddMousePosEvent(x, y);
+    io.AddMouseWheelEvent(dx, dy);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void wave_input_text(const char* text, bool paste)
+{
+    auto& io = ImGui::GetIO();
+    if (paste) {
+        // Use the text widget's paste path so it replaces the selection even while Ctrl is held.
+        clipboard_text = text;
+        io.AddKeyEvent(ImGuiMod_Ctrl, true);
+        io.AddKeyEvent(ImGuiKey_V, true);
+        io.AddKeyEvent(ImGuiKey_V, false);
+        io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    } else {
+        io.AddInputCharactersUTF8(text);
+    }
+}
+
 int main()
 {
-    static Application application;
     if (!application.initialize()) {
         std::fprintf(stderr, "Wave startup failed: %s\n", SDL_GetError());
         show_startup_error();

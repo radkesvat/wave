@@ -1,22 +1,16 @@
 #pragma once
 
-#include <array>
-#include <chrono>
+#include "overview_data.h"
+
 #include <string>
+
+struct ImDrawList;
 
 namespace wave {
 
-struct OverviewData {
-    float cpu_percent;
-    float memory_used_gib;
-    float memory_total_gib;
-    std::chrono::minutes uptime;
-    // One sample every five minutes, oldest first.
-    std::array<float, 13> download_mib_per_second;
-};
-
-float overview_height(float viewport_width);
-void render_overview(const OverviewData& data);
-std::string describe_overview(const OverviewData& data);
+float overview_height(float content_width, bool has_data);
+void render_overview(ImDrawList& draw, float x, float y, float width,
+                     const OverviewData* data, bool loading);
+std::string describe_overview(const OverviewData* data, bool loading);
 
 } // namespace wave
