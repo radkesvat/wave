@@ -27,6 +27,14 @@ EM_JS(void, update_panel_description, (const char* description), {
     Module['updateDescription'](UTF8ToString(description));
 });
 
+EM_JS(void, register_header_controls, (int menu, int tools), {
+    Module['registerHeaderControls'](menu, tools);
+});
+
+EM_JS(void, register_panel_page, (int page, const char* label), {
+    Module['registerPanelPage'](page, UTF8ToString(label));
+});
+
 EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools), {
     Module['updateNavigation'](page, open, menu, tools);
 });
@@ -130,6 +138,10 @@ struct Application {
         platform.Platform_OpenInShellFn = [](ImGuiContext*, const char* path) { return open_browser_link(path); };
         wave::configure_panel_style();
         install_text_input();
+        register_header_controls(wave::panel_menu_control, wave::panel_tools_control);
+        for (const auto& item : wave::panel_navigation()) {
+            register_panel_page(static_cast<int>(item.page), item.label);
+        }
         session.start();
         return true;
     }
@@ -221,7 +233,7 @@ struct Application {
             update_panel_description(description.c_str());
             displayed_description = std::move(description);
         }
-        update_navigation(wave::panel_navigation_index(panel.page),
+        update_navigation(static_cast<int>(panel.page),
                           panel.navigation_open && panel.entry.page == wave::EntryPage::workspace,
                           panel.menu_open, panel.tools_open);
         if (!visible) {

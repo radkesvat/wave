@@ -192,18 +192,58 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
         await page.getByRole('img', { name: /Wave Users.*Loading sample data/ }).waitFor();
         releaseSnapshot();
         await page.getByRole('img', { name: /Wave Users.*WaterWall disconnected.*2 users.*Preview fixture is ready/ }).waitFor();
-        assert.equal(await page.getByRole('link', { name: 'Users' }).getAttribute('aria-current'), 'page');
-
-        for (const name of ['Server Status', 'Panel Settings', 'Console', 'Nodes & Routers', 'Telegram Bot', 'About']) {
-            await openView(page, name);
+        const pages = ['Server Status', 'Users', 'Panel Settings', 'Console',
+            'Nodes & Routers', 'Telegram Bot', 'About', 'Overview'];
+        const currentLink = page.locator('#navigation [aria-current="page"]');
+        const assertPage = async name => {
             await page.getByRole('img', { name: new RegExp(`^Wave ${name}\\.`) }).waitFor();
+            assert.equal(await currentLink.count(), 1);
+            assert.equal(await currentLink.textContent(), name);
+            assert.equal(await page.title(), `${name} · Wave`);
+        };
+        await assertPage('Users');
+        assert.deepEqual(await page.getByRole('navigation', { name: 'Wave' }).getByRole('link').allTextContents(), pages);
+
+        const menu = page.getByRole('button', { name: 'Menu' });
+        const tools = page.getByRole('button', { name: 'Tools' });
+        for (const [button, other] of [[menu, tools], [tools, menu]]) {
+            await button.focus();
+            await page.keyboard.press('Enter');
+            await page.locator(`#${await button.getAttribute('id')}[aria-expanded="true"]`).waitFor();
+            assert.equal(await other.getAttribute('aria-expanded'), 'false');
+            await canvasClick(page, 400, 30);
+            assert.equal(await button.getAttribute('aria-expanded'), 'false');
         }
-        await openView(page, 'Overview');
+
+        const firstNavRow = { x: 11, y: 61, width: 162, height: 34 };
+        await tools.focus();
+        await settleCanvas(page);
+        const unfocused = await page.screenshot({ clip: firstNavRow });
+        for (const [index, name] of pages.entries()) {
+            await page.keyboard.press('Tab');
+            assert.equal(await page.evaluate(() => document.activeElement.textContent), name);
+            if (index === 0) {
+                await settleCanvas(page);
+                assert.notDeepEqual(await page.screenshot({ clip: firstNavRow }), unfocused);
+            }
+            await page.keyboard.press('Enter');
+            await assertPage(name);
+        }
         await page.getByRole('img', { name: /CPU utilization 63 percent.*Memory 4\.5 of 16\.0 GiB.*Latest 9\.6 MiB/ }).waitFor();
-        await openView(page, 'Users');
+
+        for (const [index, name] of pages.entries()) {
+            await canvasClick(page, 65, 76 + 34 * index);
+            await assertPage(name);
+        }
 
         await page.setViewportSize(portrait);
         await waitForCanvas(page, portrait, true);
+        await canvasClick(page, 225, 110);
+        await assertPage('Users');
+        await canvasClick(page, 225, 212);
+        await assertPage('Overview');
+        await canvasClick(page, 225, 110);
+        await assertPage('Users');
         assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
         await page.mouse.move(190, 700);
         await page.mouse.wheel(0, 1500);

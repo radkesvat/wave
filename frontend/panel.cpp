@@ -16,20 +16,15 @@
 namespace wave {
 namespace {
 
-struct NavigationItem {
-    const char* label;
-    PanelPage page;
-};
-
 constexpr std::array navigation{
-    NavigationItem{"Server Status", PanelPage::server},
-    NavigationItem{"Users", PanelPage::users},
-    NavigationItem{"Panel Settings", PanelPage::settings},
-    NavigationItem{"Console", PanelPage::console},
-    NavigationItem{"Nodes & Routers", PanelPage::topology},
-    NavigationItem{"Telegram Bot", PanelPage::bot},
-    NavigationItem{"About", PanelPage::about},
-    NavigationItem{"Overview", PanelPage::overview},
+    PanelNavigationItem{"Server Status", PanelPage::server},
+    PanelNavigationItem{"Users", PanelPage::users},
+    PanelNavigationItem{"Panel Settings", PanelPage::settings},
+    PanelNavigationItem{"Console", PanelPage::console},
+    PanelNavigationItem{"Nodes & Routers", PanelPage::topology},
+    PanelNavigationItem{"Telegram Bot", PanelPage::bot},
+    PanelNavigationItem{"About", PanelPage::about},
+    PanelNavigationItem{"Overview", PanelPage::overview},
 };
 
 constexpr ImU32 background = IM_COL32(11, 20, 30, 255);
@@ -46,7 +41,9 @@ constexpr float desktop_header = 48;
 constexpr float narrow_header = 78;
 constexpr float breakpoint = 760;
 constexpr float nav_row = 34;
-constexpr float narrow_navigation_height = 4 * nav_row + 2 * margin;
+constexpr int narrow_navigation_columns = 2;
+constexpr auto narrow_navigation_rows = (navigation.size() + narrow_navigation_columns - 1) / narrow_navigation_columns;
+constexpr float narrow_navigation_height = narrow_navigation_rows * nav_row + 2 * margin;
 constexpr float narrow_work_height = 660;
 constexpr float narrow_logs_height = 232;
 
@@ -104,10 +101,10 @@ void open_workspace_entry(PanelState& state, EntryPage page, PreviewSession& ses
 void render_menus(PanelState& state, int focus, PreviewSession& session)
 {
     ImGui::SetCursorScreenPos({104, 9});
-    if (ImGui::Button("Menu", {55, 30}) || state.browser_control == 1) {
+    if (ImGui::Button("Menu", {55, 30}) || state.browser_control == panel_menu_control) {
         ImGui::OpenPopup("Wave menu");
     }
-    if (focus == 1) {
+    if (focus == panel_menu_control) {
         focus_outline();
     }
     ImGui::SetNextWindowPos({104, 42}, ImGuiCond_Appearing);
@@ -138,10 +135,10 @@ void render_menus(PanelState& state, int focus, PreviewSession& session)
     }
 
     ImGui::SetCursorScreenPos({165, 9});
-    if (ImGui::Button("Tools", {55, 30}) || state.browser_control == 2) {
+    if (ImGui::Button("Tools", {55, 30}) || state.browser_control == panel_tools_control) {
         ImGui::OpenPopup("Wave tools");
     }
-    if (focus == 2) {
+    if (focus == panel_tools_control) {
         focus_outline();
     }
     ImGui::SetNextWindowPos({std::min(165.0f, ImGui::GetIO().DisplaySize.x - 195), 42}, ImGuiCond_Appearing);
@@ -163,7 +160,7 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
     if (!layout.sidebar) {
         return;
     }
-    const int columns = layout.narrow ? 2 : 1;
+    const int columns = layout.narrow ? narrow_navigation_columns : 1;
     const float width = layout.narrow ? viewport.x - 2 * margin : sidebar_width - margin;
     const float item_width = (width - (columns + 1) * 6) / columns;
     ImGui::SetCursorScreenPos({margin, layout.header_height + margin});
@@ -180,7 +177,7 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
                                   ImGuiSelectableFlags_NoAutoClosePopups, {item_width - 4, 29})) {
                 state.page = item.page;
             }
-            if (focus == static_cast<int>(i) + 10) {
+            if (focus == static_cast<int>(item.page)) {
                 focus_outline();
             }
         }
@@ -339,13 +336,12 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow,
 
 const char* panel_page_name(PanelPage page)
 {
-    return navigation[panel_navigation_index(page)].label;
+    return std::ranges::find(navigation, page, &PanelNavigationItem::page)->label;
 }
 
-int panel_navigation_index(PanelPage page)
+std::span<const PanelNavigationItem> panel_navigation()
 {
-    const auto found = std::ranges::find(navigation, page, &NavigationItem::page);
-    return static_cast<int>(found - navigation.begin());
+    return navigation;
 }
 
 float panel_height(float viewport_width, const PanelState& state)
@@ -410,9 +406,12 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
                   int browser_focus)
 {
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
-    if (state.browser_control >= 10 && state.browser_control < 10 + static_cast<int>(navigation.size())) {
-        state.page = navigation[state.browser_control - 10].page;
-        state.entry.page = EntryPage::workspace;
+    if (state.browser_control && state.navigation_open && state.entry.page == EntryPage::workspace) {
+        const auto selected = std::ranges::find(navigation, static_cast<PanelPage>(state.browser_control),
+                                                &PanelNavigationItem::page);
+        if (selected != navigation.end()) {
+            state.page = selected->page;
+        }
     }
 
     ImGui::SetNextWindowPos({0, 0});

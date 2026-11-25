@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#0b141e">
-    <title>Users · Wave</title>
+    <title>Wave</title>
     <link rel="icon" href="data:,">
     <style>
       :root {
@@ -65,21 +65,12 @@
     <div id="panel-controls" class="panel-controls" hidden>
       <button id="menu" type="button" aria-expanded="false">Menu</button>
       <button id="tools" type="button" aria-expanded="false">Tools</button>
-      <nav id="navigation" aria-label="Wave">
-        <a href="#canvas">Server Status</a>
-        <a href="#canvas" aria-current="page">Users</a>
-        <a href="#canvas">Panel Settings</a>
-        <a href="#canvas">Console</a>
-        <a href="#canvas">Nodes &amp; Routers</a>
-        <a href="#canvas">Telegram Bot</a>
-        <a href="#canvas">About</a>
-        <a href="#canvas">Overview</a>
-      </nav>
+      <nav id="navigation" aria-label="Wave"></nav>
     </div>
     <main>
       <div id="startup" class="startup-message" role="status" hidden>Loading Wave…</div>
       <noscript><div class="startup-message">Wave requires JavaScript and WebGL 2.</div></noscript>
-      <canvas id="canvas" role="img" aria-label="Wave Users" tabindex="0"></canvas>
+      <canvas id="canvas" role="img" aria-label="Wave" tabindex="0"></canvas>
       <textarea id="wave-text-input" aria-label="Wave text input" tabindex="-1" autocomplete="off"
                 autocapitalize="off" spellcheck="false" rows="1" hidden></textarea>
     </main>
@@ -91,27 +82,36 @@
         const menu = document.getElementById("menu");
         const tools = document.getElementById("tools");
         const navigation = document.getElementById("navigation");
-        const links = [...navigation.querySelectorAll("a")];
         const textInput = document.getElementById("wave-text-input");
-        const menuControl = 1;
-        const toolsControl = 2;
-        const firstPageControl = 10;
-        let activePage = -1;
+        const pageLinks = new Map();
+        const controlIds = new Map();
+        let activePage;
         let touch = null;
         let writingClipboard = false;
         startup.hidden = false;
 
-        function openControl(control) {
-          canvas.focus({ preventScroll: true });
-          Module['_wave_activate_panel_control'](control);
+        function registerControl(element, id, focusCanvas) {
+          controlIds.set(element, id);
+          element.addEventListener("click", event => {
+            event.preventDefault();
+            if (focusCanvas) canvas.focus({ preventScroll: true });
+            Module['_wave_activate_panel_control'](id);
+          });
         }
 
-        menu.addEventListener("click", () => openControl(menuControl));
-        tools.addEventListener("click", () => openControl(toolsControl));
-        links.forEach((link, index) => link.addEventListener("click", event => {
-          event.preventDefault();
-          Module['_wave_activate_panel_control'](firstPageControl + index);
-        }));
+        function registerHeaderControls(menuId, toolsId) {
+          registerControl(menu, menuId, true);
+          registerControl(tools, toolsId, true);
+        }
+
+        function registerPanelPage(id, label) {
+          const link = document.createElement("a");
+          link.href = "#canvas";
+          link.textContent = label;
+          registerControl(link, id, false);
+          pageLinks.set(id, link);
+          navigation.append(link);
+        }
 
         function scrollPanel(event, dx, dy) {
           const bounds = canvas.getBoundingClientRect();
@@ -250,26 +250,23 @@
           updateExpanded(tools, toolsOpen);
           if (navigation.hidden === Boolean(open)) navigation.hidden = !open;
           if (page !== activePage) {
-            if (activePage >= 0) links[activePage].removeAttribute("aria-current");
-            links[page].setAttribute("aria-current", "page");
-            document.title = links[page].textContent + " · Wave";
+            pageLinks.get(activePage)?.removeAttribute("aria-current");
+            const link = pageLinks.get(page);
+            link.setAttribute("aria-current", "page");
+            document.title = link.textContent + " · Wave";
             activePage = page;
           }
         }
 
         function panelFocus() {
-          const focused = document.activeElement;
-          if (focused === menu) return menuControl;
-          if (focused === tools) return toolsControl;
-          const index = links.indexOf(focused);
-          return index < 0 ? 0 : firstPageControl + index;
+          return controlIds.get(document.activeElement) ?? 0;
         }
 
         window.addEventListener("error", showStartupError, true);
         window.addEventListener("unhandledrejection", showStartupError);
         return {
-          canvas, showPanel, updateDescription, updateNavigation, panelFocus, setTextInput, installTextInput,
-          copyText, onAbort: showStartupError
+          canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
+          panelFocus, setTextInput, installTextInput, copyText, onAbort: showStartupError
         };
       })();
     </script>
