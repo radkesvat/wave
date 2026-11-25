@@ -43,6 +43,12 @@ when authorized.
 
 ## 3. Implementation Workflow
 
+For both the frontend and backend, prefer the implementation that is easiest
+to read, verify, and change, even when it is slower. Introduce extra complexity
+for performance only when measurements show a meaningful benefit or an explicit
+performance requirement calls for it. When the reason for an optimization is
+hard to see from the code, explain it in a short comment beside it.
+
 1. Inspect the worktree, relevant diff or history, and nearby callers and
    dependencies. Use `rg` and `rg --files` for searches.
 2. Trace the behavior and failure paths before making changes. Check existing
