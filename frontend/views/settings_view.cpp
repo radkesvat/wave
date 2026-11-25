@@ -36,6 +36,7 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
     if (auto reply = session.take_reply(state.apply_request)) {
         if (reply->ok()) {
             state.dirty = false;
+            state.source = nullptr;
             state.password.fill('\0');
         } else if (reply->status == PreviewReply::Status::timed_out) {
             reply->message = "Preview did not confirm the update. Check the connection and try again.";

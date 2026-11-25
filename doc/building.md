@@ -142,7 +142,9 @@ and its fields. The server replies with a snapshot and action feedback.
 Forms that wait for confirmation send a unique numeric `request_id`. The
 server echoes it to the requesting browser, and the form completes only
 from the reply carrying its ID. Browsers still apply valid snapshot data
-when a reply arrives after the form has been closed or replaced.
+when a reply arrives after the form has been closed or replaced. If the
+socket closes between render frames, the form can still read a reply it
+already received. A form still waiting for its reply reports the disconnect.
 
 Both Telegram Bot forms use `apply_bot_settings`. Settings sends
 `notifications`, `allow_status`, `allow_config`, `notification_rules`, and

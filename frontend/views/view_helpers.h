@@ -31,12 +31,12 @@ inline const Json& field(const Json& object, std::string_view key)
     return it == object.end() ? empty : *it;
 }
 
-inline std::string_view string_value(const Json& value, std::string_view fallback = {})
+inline std::string_view string_value(const Json& value, std::string_view fallback = "")
 {
     return value.is_string() ? value.get_ref<const std::string&>() : fallback;
 }
 
-inline std::string_view string_field(const Json& object, std::string_view key, std::string_view fallback = {})
+inline std::string_view string_field(const Json& object, std::string_view key, std::string_view fallback = "")
 {
     return string_value(field(object, key), fallback);
 }

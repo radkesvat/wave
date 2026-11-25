@@ -204,7 +204,8 @@ void PreviewSession::stop()
         emscripten_websocket_delete(socket_);
     }
     socket_ = 0;
-    requests_.clear();
+    // A form may consume an acknowledgement on the frame after the socket closes.
+    std::erase_if(requests_, [](const auto& entry) { return !entry.second.reply; });
 }
 
 void PreviewSession::Request::expire(double now)

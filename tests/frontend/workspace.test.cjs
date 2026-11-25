@@ -107,10 +107,11 @@ async function mockPreview(page, { data = fixture(), gate = Promise.resolve(), h
         });
         await gate;
         send();
-        connected.resolve(send);
+        connected.resolve({ send, socket });
     });
     return {
-        broadcast: async () => (await connected.promise)(),
+        broadcast: async () => (await connected.promise).send(),
+        close: async () => (await connected.promise).socket.close({ code: 1000 }),
         actions,
         async action(index) {
             const signal = AbortSignal.timeout(5000);
@@ -421,6 +422,37 @@ test('first-run setup shows progress, validates input, and completes through the
     }
 });
 
+for (const acknowledged of [false, true]) {
+    const order = acknowledged ? 'after' : 'before';
+    test(`setup reports the result when the socket closes ${order} acknowledgement`, async () => {
+        const page = await browser.newPage({ viewport: desktop });
+        await page.clock.install({ time: 0 });
+        const preview = await mockPreview(page, { handle() {} });
+        try {
+            await page.goto(url);
+            await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+            await openSetup(page);
+            await canvasClick(page, 458, 294);
+            await canvasClick(page, 511, 327);
+            const { reply } = await preview.action(0);
+
+            // Hold rendering so both socket events can precede the form's next frame.
+            await page.clock.pauseAt(60_000);
+            if (acknowledged) reply({ feedback: 'Applied demo setup.' });
+            await preview.close();
+            await page.clock.resume();
+            await settleCanvas(page);
+
+            const expected = acknowledged ? 'Applied demo setup.'
+                : 'The preview connection closed. Try again after reconnecting.';
+            const description = await page.getByRole('img').getAttribute('aria-label');
+            assert.equal(description, `Wave first-run setup. Step 3 of 3. ${expected}`);
+        } finally {
+            await page.close();
+        }
+    });
+}
+
 test('a reopened setup waits for its own reply and retries an active rejection', async () => {
     const page = await browser.newPage({ viewport: desktop });
     const preview = await mockPreview(page, { handle() {} });
@@ -508,6 +540,43 @@ test('applies a populated Settings draft after a broadcast and a page change', a
     }
 });
 
+test('a later Settings save preserves a remote change received while the page was inactive', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    const data = fixture();
+    const original = { ...data.settings };
+    const preview = await mockPreview(page, { data, handle() {} });
+    const apply = async () => {
+        await canvasClick(page, 245, 414);
+        await canvasClick(page, 480, 424);
+    };
+
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await openView(page, 'Panel Settings');
+        await replaceText(page, 325, 141, 'Harbor QA');
+        await apply();
+        const first = await preview.action(0);
+        assertRequest(first.request, { action: 'apply_settings', settings: { ...original, name: 'Harbor QA' } });
+
+        await openView(page, 'Server Status');
+        data.settings = first.request.settings;
+        first.reply({ feedback: 'Applied the new panel name.' });
+        data.settings = original;
+        data.logs.push({ ts: '09:41:03', level: 'info', message: 'Another client restored the panel name.' });
+        await preview.broadcast();
+        await page.getByRole('img', { name: /Another client restored the panel name/ }).waitFor();
+
+        await openView(page, 'Panel Settings');
+        await replaceText(page, 325, 194, 'harbor-admin');
+        await apply();
+        const second = await preview.action(1);
+        assertRequest(second.request, { action: 'apply_settings', settings: { ...original, admin_username: 'harbor-admin' } });
+    } finally {
+        await page.close();
+    }
+});
+
 for (const order of [['Settings', 'Overrides'], ['Overrides', 'Settings']]) {
     test(`both bot edits survive stale snapshots when ${order[0]} saves first`, async () => {
         const data = fixture();
@@ -587,7 +656,10 @@ for (const order of [['Settings', 'Overrides'], ['Overrides', 'Settings']]) {
 
 test('preserves selection and zoom for each topology map when switching pages', async () => {
     const page = await browser.newPage({ viewport: desktop });
-    await mockPreview(page);
+    const data = fixture();
+    const unnamedNode = { id: '', label: '', map: 'inside', x: 0.25, y: 0.5 };
+    data.topology.nodes.push(unnamedNode);
+    const preview = await mockPreview(page, { data });
     async function capture() {
         await page.mouse.move(185, 50);
         await settleCanvas(page);
@@ -599,6 +671,12 @@ test('preserves selection and zoom for each topology map when switching pages', 
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
         await openView(page, 'Nodes & Routers');
         const insideInitial = await capture();
+        delete unnamedNode.id;
+        delete unnamedNode.label;
+        data.logs.push({ ts: '09:41:03', level: 'info', message: 'Received an unnamed node.' });
+        await preview.broadcast();
+        await page.getByRole('img', { name: /Received an unnamed node/ }).waitFor();
+        assert.ok((await capture()).equals(insideInitial), 'A node with missing text renders with an empty label.');
         await canvasClick(page, 720, 301);
         const insideSelected = await capture();
         await canvasClick(page, 240, 114);
