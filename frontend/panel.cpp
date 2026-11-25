@@ -337,7 +337,11 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow,
     case PanelPage::server: render_secondary(state.secondary, SecondaryView::server, session, narrow); break;
     case PanelPage::settings: render_secondary(state.secondary, SecondaryView::settings, session, narrow); break;
     case PanelPage::console: render_secondary(state.secondary, SecondaryView::console, session, narrow); break;
-    case PanelPage::topology: render_secondary(state.secondary, SecondaryView::topology, session, narrow); break;
+    case PanelPage::topology:
+        ImGui::PushID("topology");
+        render_topology(state.topology, session.data()["topology"], narrow);
+        ImGui::PopID();
+        break;
     case PanelPage::bot: render_secondary(state.secondary, SecondaryView::bot, session, narrow); break;
     case PanelPage::about:
     case PanelPage::overview: break;

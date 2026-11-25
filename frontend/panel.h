@@ -4,6 +4,7 @@
 #include "logs_view.h"
 #include "secondary_views.h"
 #include "users_view.h"
+#include "views/topology_view.h"
 
 #include <string>
 
@@ -20,6 +21,7 @@ struct PanelState {
     EntryViewState entry;
     UsersViewState users;
     LogsViewState logs;
+    TopologyViewState topology;
     SecondaryViewsState secondary;
     bool navigation_open = true;
     bool menu_open = false;

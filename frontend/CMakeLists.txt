@@ -15,6 +15,7 @@ add_executable(wave
     panel.cpp
     preview_session.cpp
     secondary_views.cpp
+    views/topology_view.cpp
     users_view.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -32,6 +33,7 @@ set_target_properties(wave PROPERTIES
     SUFFIX .html
 )
 target_include_directories(wave PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
     "${PROJECT_SOURCE_DIR}/common"
     "${imgui_SOURCE_DIR}"
     "${imgui_SOURCE_DIR}/backends"

@@ -13,7 +13,7 @@ namespace wave {
 
 class PreviewSession;
 
-enum class SecondaryView { server, settings, console, topology, bot, about };
+enum class SecondaryView { server, settings, console, bot = 4, about };
 
 struct SecondaryViewsState {
     struct Settings {
@@ -43,16 +43,6 @@ struct SecondaryViewsState {
         bool autoscroll = true;
         bool copied = false;
     } console;
-
-    struct Topology {
-        enum class Selection { node, link, route };
-        Selection selection = Selection::node;
-        std::string selected;
-        float zoom = 1.0f;
-        float offset_x = 0;
-        float offset_y = 0;
-        bool graph_dragged = false;
-    } inside_map, outside_map;
 
     struct Bot {
         struct Notification {
