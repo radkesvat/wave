@@ -1,0 +1,13 @@
+{
+  "name": "wave-frontend-tests",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "install-browser": "playwright-core install --only-shell chromium"
+  },
+  "devDependencies": {
+    "playwright-core": "1.65.1"
+  }
+}

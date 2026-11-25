@@ -55,16 +55,25 @@ license notices to its own `site/` directory. Add `--verbose` to a build command
 to show the compile and link commands. When switching SDK versions, add
 `--fresh` to the configure command to reset CMake's cached compiler and toolchain.
 
-## Browser smoke test
+## Frontend tests
 
-With the preview server running, use Node.js 22 or later and npm to run the
-optional browser smoke test. Playwright installs its headless Chromium and
-keeps the local test tooling under `build/`.
+The browser smoke tests live in `tests/frontend/`. Use Node.js 22 or later
+and npm to install the pinned test dependencies and headless Chromium.
 
 ```sh
-npm install --prefix build/browser-tests playwright-core@1.65.1
-PLAYWRIGHT_BROWSERS_PATH="$PWD/build/browser-tests/browsers" \
-  build/browser-tests/node_modules/.bin/playwright-core install --only-shell chromium
-PLAYWRIGHT_BROWSERS_PATH="$PWD/build/browser-tests/browsers" \
-  NODE_PATH="$PWD/build/browser-tests/node_modules" node --test tests/overview.test.cjs
+npm ci --prefix tests/frontend
+npm run --prefix tests/frontend install-browser
 ```
+
+After building a preset, use the matching CTest command. Each run serves its
+built site on a separate local port and tests the Overview in Chromium.
+
+```sh
+ctest --preset web-debug
+ctest --preset web-release
+```
+
+The **Frontend** GitHub Actions workflow builds and tests both presets on
+pushes to `main` and on pull requests. Each successful job uploads its
+generated site as a separate artifact. `tests/backend/` is reserved for
+backend tests.

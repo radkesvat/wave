@@ -1,0 +1,55 @@
+name: Frontend
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  EMSDK_VERSION: '7.0.1'
+
+jobs:
+  frontend:
+    name: ${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [web-debug, web-release]
+    env:
+      WAVE_PRESET: ${{ matrix.preset }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tests/frontend/package-lock.json
+      - name: Install Emscripten
+        run: |
+          sdk_dir="$RUNNER_TEMP/emsdk"
+          git clone --depth 1 --branch "$EMSDK_VERSION" https://github.com/emscripten-core/emsdk.git "$sdk_dir"
+          "$sdk_dir/emsdk" install "$EMSDK_VERSION"
+          "$sdk_dir/emsdk" activate "$EMSDK_VERSION"
+      - name: Build frontend
+        run: |
+          EMSDK_QUIET=1 source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          cmake --preset "$WAVE_PRESET"
+          cmake --build --preset "$WAVE_PRESET"
+      - name: Install browser test dependencies
+        run: |
+          npm ci --prefix tests/frontend
+          npm run --prefix tests/frontend install-browser -- --with-deps
+      - name: Test frontend
+        run: ctest --preset "$WAVE_PRESET"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: frontend-${{ matrix.preset }}
+          path: build/${{ matrix.preset }}/site/
+          if-no-files-found: error

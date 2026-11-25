@@ -32,5 +32,27 @@
       "name": "web-release",
       "configurePreset": "web-release"
     }
+  ],
+  "testPresets": [
+    {
+      "name": "web",
+      "hidden": true,
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "web-debug",
+      "inherits": "web",
+      "configurePreset": "web-debug"
+    },
+    {
+      "name": "web-release",
+      "inherits": "web",
+      "configurePreset": "web-release"
+    }
   ]
 }

@@ -1,13 +1,43 @@
 const assert = require('node:assert/strict');
+const { once } = require('node:events');
+const { readFile } = require('node:fs/promises');
+const { createServer } = require('node:http');
+const { join } = require('node:path');
 const { after, before, test } = require('node:test');
 const { chromium } = require('playwright-core');
 
-const url = 'http://127.0.0.1:8000/';
 const desktop = { width: 1280, height: 800 };
 const portrait = { width: 390, height: 844 };
+let url;
+let server;
 let browser;
 
 before(async () => {
+    const siteDir = process.env.WAVE_SITE_DIR;
+    assert.ok(siteDir, 'Run this test through a Wave CTest preset.');
+
+    const assets = new Map();
+    for (const [path, filename, contentType] of [
+        ['/', 'index.html', 'text/html; charset=utf-8'],
+        ['/index.js', 'index.js', 'text/javascript; charset=utf-8'],
+        ['/index.wasm', 'index.wasm', 'application/wasm'],
+    ]) {
+        const contents = await readFile(join(siteDir, filename));
+        assets.set(path, { contentType, contents });
+    }
+
+    server = createServer((request, response) => {
+        const asset = assets.get(request.url);
+        if (!asset) {
+            response.writeHead(404).end();
+            return;
+        }
+        response.writeHead(200, { 'Content-Type': asset.contentType }).end(asset.contents);
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    url = `http://127.0.0.1:${server.address().port}/`;
+
     browser = await chromium.launch({
         args: ['--enable-unsafe-swiftshader', '--disable-smooth-scrolling'],
     });
@@ -15,7 +45,15 @@ before(async () => {
 });
 
 after(async () => {
-    await browser?.close();
+    try {
+        await browser?.close();
+    } finally {
+        if (server?.listening) {
+            const closed = once(server, 'close');
+            server.close();
+            await closed;
+        }
+    }
 });
 
 async function waitForCanvas(page, viewport, scrolls) {

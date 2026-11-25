@@ -59,3 +59,8 @@ add_custom_command(TARGET wave POST_BUILD
 
 configure_file("${imgui_SOURCE_DIR}/LICENSE.txt" site/licenses/dear-imgui.txt COPYONLY)
 configure_file(doc/licenses/karla.txt site/licenses/karla.txt COPYONLY)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests/frontend)
+endif()
