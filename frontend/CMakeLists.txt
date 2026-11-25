@@ -8,15 +8,19 @@ FetchContent_MakeAvailable(imgui)
 
 add_executable(wave
     browser_ui.cpp
-    entry_view.cpp
-    logs_view.cpp
     main.cpp
-    overview.cpp
     panel.cpp
     preview_session.cpp
-    secondary_views.cpp
+    views/about_view.cpp
+    views/bot_view.cpp
+    views/console_view.cpp
+    views/entry_view.cpp
+    views/logs_view.cpp
+    views/overview.cpp
+    views/server_status_view.cpp
+    views/settings_view.cpp
     views/topology_view.cpp
-    users_view.cpp
+    views/users_view.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp

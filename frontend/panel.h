@@ -1,10 +1,12 @@
 #pragma once
 
-#include "entry_view.h"
-#include "logs_view.h"
-#include "secondary_views.h"
-#include "users_view.h"
+#include "views/bot_view.h"
+#include "views/console_view.h"
+#include "views/entry_view.h"
+#include "views/logs_view.h"
+#include "views/settings_view.h"
 #include "views/topology_view.h"
+#include "views/users_view.h"
 
 #include <string>
 
@@ -22,7 +24,9 @@ struct PanelState {
     UsersViewState users;
     LogsViewState logs;
     TopologyViewState topology;
-    SecondaryViewsState secondary;
+    SettingsViewState settings;
+    ConsoleViewState console;
+    BotViewState bot;
     bool navigation_open = true;
     bool menu_open = false;
     bool tools_open = false;

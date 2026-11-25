@@ -206,8 +206,6 @@ void draw_traffic(ImDrawList& draw, const OverviewLayout& layout, const Overview
     text(draw, {plot_right - text_width(14.0f, end), plot_bottom + 12}, 14.0f, muted, end);
 }
 
-} // namespace
-
 float overview_height(float content_width, bool has_data)
 {
     const OverviewLayout layout(content_width);
@@ -216,8 +214,8 @@ float overview_height(float content_width, bool has_data)
     return bottom + 32.0f;
 }
 
-void render_overview(ImDrawList& draw, float x, float y, float width,
-                     const OverviewData* data, bool loading)
+void draw_overview(ImDrawList& draw, float x, float y, float width,
+                   const OverviewData* data, bool loading)
 {
     const OverviewLayout layout(width, x, y);
     draw_intro(draw, layout);
@@ -238,6 +236,16 @@ void render_overview(ImDrawList& draw, float x, float y, float width,
     draw_metric(draw, layout, Metric::uptime, "Uptime",
                 std::format("{}d {}h {}m", minutes / 1440, minutes / 60 % 24, minutes % 60));
     draw_traffic(draw, layout, *data);
+}
+
+} // namespace
+
+void render_overview(const OverviewData* data, bool loading)
+{
+    const auto pos = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x;
+    draw_overview(*ImGui::GetWindowDrawList(), pos.x, pos.y, width, data, loading);
+    ImGui::Dummy({width, overview_height(width, data != nullptr)});
 }
 
 std::string describe_overview(const OverviewData* data, bool loading)

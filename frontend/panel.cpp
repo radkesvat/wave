@@ -1,8 +1,10 @@
 #include "panel.h"
 
 #include "browser_ui.h"
-#include "overview.h"
 #include "preview_session.h"
+#include "views/about_view.h"
+#include "views/overview.h"
+#include "views/server_status_view.h"
 
 #include <imgui.h>
 
@@ -308,18 +310,7 @@ void render_dialogs(PanelState& state, PreviewSession& session)
 void render_view(PanelState& state, PreviewSession& session, bool narrow,
                  const OverviewData* overview, bool overview_loading)
 {
-    if (state.page == PanelPage::overview) {
-        const auto pos = ImGui::GetCursorScreenPos();
-        const float width = ImGui::GetContentRegionAvail().x;
-        render_overview(*ImGui::GetWindowDrawList(), pos.x, pos.y, width, overview, overview_loading);
-        ImGui::Dummy({width, overview_height(width, overview != nullptr)});
-        return;
-    }
-    if (state.page == PanelPage::about) {
-        render_secondary(state.secondary, SecondaryView::about, session, narrow);
-        return;
-    }
-    if (!session.ready()) {
+    if (!session.ready() && state.page != PanelPage::about && state.page != PanelPage::overview) {
         ImGui::TextUnformatted(panel_page_name(state.page));
         ImGui::Separator();
         if (session.status() == PreviewStatus::loading) {
@@ -334,17 +325,13 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow,
     }
     switch (state.page) {
     case PanelPage::users: render_users(state.users, session, narrow); break;
-    case PanelPage::server: render_secondary(state.secondary, SecondaryView::server, session, narrow); break;
-    case PanelPage::settings: render_secondary(state.secondary, SecondaryView::settings, session, narrow); break;
-    case PanelPage::console: render_secondary(state.secondary, SecondaryView::console, session, narrow); break;
-    case PanelPage::topology:
-        ImGui::PushID("topology");
-        render_topology(state.topology, session.data()["topology"], narrow);
-        ImGui::PopID();
-        break;
-    case PanelPage::bot: render_secondary(state.secondary, SecondaryView::bot, session, narrow); break;
-    case PanelPage::about:
-    case PanelPage::overview: break;
+    case PanelPage::server: render_server_status(session.data()["server"], narrow); break;
+    case PanelPage::settings: render_settings(state.settings, session, narrow); break;
+    case PanelPage::console: render_console(state.console, session, narrow); break;
+    case PanelPage::topology: render_topology(state.topology, session.data()["topology"], narrow); break;
+    case PanelPage::bot: render_bot(state.bot, session, narrow); break;
+    case PanelPage::about: render_about(); break;
+    case PanelPage::overview: render_overview(overview, overview_loading); break;
     }
 }
 
