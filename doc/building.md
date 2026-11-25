@@ -7,7 +7,7 @@ enabled to preview it.
 
 - CMake 3.24 or newer and Ninja on your `PATH`
 - Git and Python 3 for the Emscripten SDK setup
-- Emscripten SDK 4.0.20, the version used to verify this build
+- Emscripten SDK 7.0.1
 - Network access on the first build to fetch Dear ImGui v1.92.5 and the SDK's
   SDL2 port
 
@@ -18,8 +18,8 @@ use to build. [Emscripten SDK setup](https://emscripten.org/docs/getting_started
 ```sh
 git clone https://github.com/emscripten-core/emsdk.git
 cd emsdk
-./emsdk install 4.0.20
-./emsdk activate 4.0.20
+./emsdk install 7.0.1
+./emsdk activate 7.0.1
 source ./emsdk_env.sh
 ```
 
@@ -32,6 +32,9 @@ cmake --preset web-debug
 cmake --build --preset web-debug
 python3 -m http.server 8000 --bind 127.0.0.1 --directory build/web-debug/site
 ```
+
+When switching SDK versions, use `cmake --fresh --preset web-debug` for the
+configure step to reset CMake's cached compiler and toolchain.
 
 Open [the local Wave preview](http://127.0.0.1:8000/) and check that Overview
 opens with the disconnected status, sample metrics, and download chart.

@@ -76,6 +76,9 @@ when authorized.
 
 ## 5. Build, Format, Test, And Validate
 
+- Use the latest stable upstream release when adding or updating a library or
+  toolchain. Record the exact version in the build configuration or setup docs
+  and validate the update with the relevant build and tests.
 - Use the project's build, test, and formatting configuration when available.
   Limit formatting to the affected files or changed ranges.
 - Run focused checks that exercise changed behavior, affected callers, and
