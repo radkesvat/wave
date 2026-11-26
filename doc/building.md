@@ -182,6 +182,12 @@ in place. Swipe the panel to reach Logs. Swiping
 along a pane's right edge scrolls its contents. Drag directly on a topology
 map to pan it, or tap a node or link to inspect it.
 
+Server Status shows CPU and Memory above Server Information and Traffic
+when the work pane can fit two columns. When space is tight, all four cards
+stack in that order. On a phone, swipe through the cards to reach Logs.
+At short desktop heights, scroll inside the work pane to see the rest of
+the grid.
+
 `--site-dir` selects a frontend build directory relative to the current
 working directory or by absolute path. It defaults to `build/web-release/site`
 and must contain `index.html`, `index.js`, and `index.wasm`. `--host` and
@@ -216,10 +222,14 @@ Both Telegram Bot forms use `apply_bot_settings`. Settings sends
 submitted fields so saves from the two forms can arrive in either order.
 
 Other connected browsers receive the shared updates. Overview and Server
-Status use the same server metrics. The Server Status charts show recent
-samples from a rolling history of up to 19 points, sampled about every five
-seconds. Restarting the process restores the sample data. The console,
-credentials, and bot actions run as in-memory demonstrations.
+Status use the same server metrics. Server Status plots CPU on a 0–100%
+scale, memory usage against capacity in GiB, and upload and download
+together in MiB/s. The charts keep up to 19 samples in time order. The
+preview adds a sample about every five seconds and draws the latest one
+at **Now**. Hover over a plot for its sample values. User changes that affect
+traffic can update the latest rates between samples. Restarting the
+process restores the sample data. The console, credentials, and bot actions
+run as in-memory demonstrations.
 
 The standalone `/ws/overview` endpoint sends one JSON text frame and closes
 the connection. Its fixed fixture contains `cpu_percent`, `memory_used_gib`,

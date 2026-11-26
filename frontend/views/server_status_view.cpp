@@ -1,180 +1,353 @@
 #include "server_status_view.h"
 
+#include "server_status_plot.h"
 #include "view_helpers.h"
 
+#include <array>
 #include <format>
-#include <vector>
+#include <span>
+#include <string_view>
+#include <utility>
 
 namespace wave {
-
 namespace {
 
 using namespace view;
 using theme::Color;
 using theme::packed;
 
-struct Series {
-    const Json& samples;
-    const char* name;
+constexpr float gutter = 12;
+constexpr ImVec2 card_padding{10, 8};
+constexpr float minimum_plot_height = 134;
+constexpr float swatch_size = 9;
+constexpr float swatch_gap = 6;
+
+struct Reading {
     Color color;
+    std::string text;
+    std::string_view layout_text{};
 };
 
-void chart(const char* title, const char* unit, double ceiling, float height,
-           std::initializer_list<Series> series)
+using InfoRows = std::array<std::pair<const char*, std::string>, 10>;
+
+double current_sample(const Json& server, std::string_view key, const Json& history)
 {
-    ImGui::SeparatorText(title);
-    for (const auto& line : series) {
-        if (!line.samples.empty()) {
-            ImGui::TextColored(theme::rgba(line.color), "%s  %.1f %s", line.name, number(line.samples.back()),
-                               unit);
-        }
-    }
-
-    const auto pos = ImGui::GetCursorScreenPos();
-    const float width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
-    ImGui::Dummy({width, height});
-    auto& draw = *ImGui::GetWindowDrawList();
-    const ImVec2 corner{std::round(pos.x), std::round(pos.y)};
-    const ImVec2 end{std::round(pos.x + width), std::round(pos.y + height)};
-    const ImU32 grid = packed(Color::plot_grid);
-    const ImU32 label_color = packed(Color::secondary_text);
-    draw.AddRectFilled(corner, end, packed(Color::canvas));
-    draw.AddRect(corner, end, packed(Color::divider), theme::square_radius, theme::border_width);
-    if (width < 92) {
-        return;
-    }
-    const float left = corner.x + 37;
-    const float right = end.x - 10;
-    const float top = corner.y + 13;
-    const float bottom = end.y - 25;
-    ImGui::PushFont(nullptr, theme::secondary_font_size);
-    for (int tick = 0; tick <= 4; ++tick) {
-        const float y = std::round(bottom - (bottom - top) * tick / 4);
-        draw.AddLineH(left, right, y, grid, theme::border_width);
-        const auto label = std::format("{:.0f}", ceiling * tick / 4);
-        draw.AddText({left - ImGui::CalcTextSize(label.c_str()).x - 5, y - theme::secondary_font_size / 2},
-                     label_color, label.c_str());
-    }
-    draw.AddText({left, bottom + 5}, label_color, "Recent samples");
-    draw.AddText({right - ImGui::CalcTextSize("Now").x, bottom + 5}, label_color, "Now");
-    ImGui::PopFont();
-
-    const auto mouse = ImGui::GetIO().MousePos;
-    const bool hovered =
-        ImGui::IsItemHovered() && mouse.x >= left && mouse.x <= right && mouse.y >= top && mouse.y <= bottom;
-    const float fraction = hovered ? (mouse.x - left) / (right - left) : 1;
-    if (hovered) {
-        draw.AddLineV(std::round(mouse.x), top, bottom, label_color, theme::border_width);
-    }
-
-    constexpr std::size_t max_points = 120;
-    for (const auto& line : series) {
-        const auto count = std::min(line.samples.size(), max_points);
-        if (count < 2) {
-            continue;
-        }
-        std::array<ImVec2, max_points> points;
-        const auto first = line.samples.size() - count;
-        for (std::size_t i = 0; i < count; ++i) {
-            const auto rate = std::clamp(number(line.samples[first + i]) / ceiling, 0.0, 1.0);
-            points[i] = {left + (right - left) * i / (count - 1),
-                         bottom - (bottom - top) * static_cast<float>(rate)};
-        }
-        const ImU32 color = packed(line.color);
-        draw.AddPolyline(points.data(), static_cast<int>(count), color, 2);
-        const auto selected = static_cast<std::size_t>(std::lround(fraction * (count - 1)));
-        draw.AddCircleFilled(points[selected], hovered ? 4 : 3, color);
-    }
-    if (hovered && ImGui::BeginTooltip()) {
-        for (const auto& line : series) {
-            if (!line.samples.empty()) {
-                const auto index =
-                    static_cast<std::size_t>(std::lround(fraction * (line.samples.size() - 1)));
-                ImGui::Text("%s %.1f %s", line.name, number(line.samples[index]), unit);
-            }
-        }
-        ImGui::EndTooltip();
-    }
+    return numeric_field(server, key, history.empty() ? 0 : number(history.back()));
 }
 
-double traffic_ceiling(const Json& upload, const Json& download)
-{
-    double peak = 0;
-    for (const auto* samples : {&upload, &download}) {
-        for (const auto& sample : *samples) {
-            peak = std::max(peak, number(sample));
-        }
+struct StatusSamples {
+    const Json& cpu;
+    const Json& memory;
+    const Json& upload;
+    const Json& download;
+    double cpu_now;
+    double memory_now;
+    double memory_capacity;
+    double upload_now;
+    double download_now;
+
+    explicit StatusSamples(const Json& server)
+        : cpu(array_field(server, "cpu_history")), memory(array_field(server, "memory_history")),
+          upload(array_field(server, "upload_history")), download(array_field(server, "download_history")),
+          cpu_now(current_sample(server, "cpu_percent", cpu)),
+          memory_now(current_sample(server, "memory_used_gib", memory)),
+          memory_capacity(numeric_field(server, "memory_total_gib")),
+          upload_now(current_sample(server, "upload_rate", upload)),
+          download_now(current_sample(server, "download_rate", download))
+    {
     }
+
+    std::string cpu_value() const
+    {
+        return std::format("{:.1f}%", cpu_now);
+    }
+    std::string memory_value() const
+    {
+        return memory_capacity > 0 ? std::format("{:.1f} / {:.1f} GiB", memory_now, memory_capacity)
+                                   : std::format("{:.1f} GiB", memory_now);
+    }
+    std::string upload_value() const
+    {
+        return std::format("Upload {:.1f} MiB/s", upload_now);
+    }
+    std::string download_value() const
+    {
+        return std::format("Download {:.1f} MiB/s", download_now);
+    }
+};
+
+double largest_sample(const Json& samples, double peak)
+{
+    const auto first = samples.size() - std::min(samples.size(), status_history_capacity);
+    for (std::size_t i = first; i < samples.size(); ++i) {
+        peak = std::max(peak, number(samples[i]));
+    }
+    return peak;
+}
+
+double traffic_ceiling(const StatusSamples& samples)
+{
+    const double current_peak = std::max(samples.upload_now, samples.download_now);
+    const double peak = largest_sample(samples.download, largest_sample(samples.upload, current_peak));
     return std::max(4.0, 4.0 * std::ceil(peak / 4.0));
 }
 
-void server_info(const Json& server)
+InfoRows server_information(const Json& server, const StatusSamples& samples)
 {
-    ImGui::SeparatorText("Server information");
-    if (ImGui::BeginTable("server-details", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
-        ImGui::TableSetupColumn("Metric", ImGuiTableColumnFlags_WidthStretch, 0.8f);
-        ImGui::TableSetupColumn("Current value", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-        auto row = [](const char* label, std::string_view value) {
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::TextColored(theme::rgba(Color::secondary_text), "%s", label);
-            ImGui::TableNextColumn();
-            wrapped(value);
-        };
-        const int uptime = integer_field(server, "uptime_minutes");
-        row("Name", string_field(server, "name", "Wave sample"));
-        row("Region", string_field(server, "region", "Preview"));
-        row("Platform", string_field(server, "platform", "Demo"));
-        row("Version", string_field(server, "version", "0.1.0"));
-        row("Uptime", std::format("{}d {}h {}m", uptime / 1440, uptime / 60 % 24, uptime % 60));
-        row("CPU", std::format("{} cores at {:.1f}%", integer_field(server, "cpu_cores", 4),
-                               numeric_field(server, "cpu_percent")));
-        row("Memory", std::format("{:.1f} / {:.1f} GiB", numeric_field(server, "memory_used_gib"),
-                                  numeric_field(server, "memory_total_gib")));
-        row("Users",
-            std::format("{} total, {} enabled, {} online", integer_field(server, "users_total"),
-                        integer_field(server, "users_enabled"), integer_field(server, "users_active")));
-        row("Upload total", std::format("{:.1f} GiB", numeric_field(server, "upload_total")));
-        row("Download total", std::format("{:.1f} GiB", numeric_field(server, "download_total")));
-        ImGui::EndTable();
+    const int uptime = integer_field(server, "uptime_minutes");
+    return {
+        {{"Name", std::string(string_field(server, "name", "Wave sample"))},
+         {"Region", std::string(string_field(server, "region", "Preview"))},
+         {"Platform", std::string(string_field(server, "platform", "Demo"))},
+         {"Version", std::string(string_field(server, "version", "0.1.0"))},
+         {"Uptime", std::format("{}d {}h {}m", uptime / 1440, uptime / 60 % 24, uptime % 60)},
+         {"CPU cores", std::to_string(integer_field(server, "cpu_cores", 4))},
+         {"Memory", samples.memory_value()},
+         {"Users", std::format("{} total, {} enabled, {} online", integer_field(server, "users_total"),
+                               integer_field(server, "users_enabled"),
+                               integer_field(server, "users_online", integer_field(server, "users_active")))},
+         {"Total upload", std::format("{:.1f} GiB", numeric_field(server, "upload_total"))},
+         {"Total download", std::format("{:.1f} GiB", numeric_field(server, "download_total"))}}};
+}
+
+float text_width(std::string_view text)
+{
+    return ImGui::CalcTextSize(text.data(), text.data() + text.size()).x;
+}
+
+float wrapped_height(std::string_view text, float width)
+{
+    return ImGui::CalcTextSize(text.data(), text.data() + text.size(), false, width).y;
+}
+
+void draw_text(ImDrawList& draw, ImVec2 pos, Color color, std::string_view text, float wrap_width = 0)
+{
+    draw.AddText(ImGui::GetFont(), ImGui::GetFontSize(), pos, packed(color), text.data(),
+                 text.data() + text.size(), wrap_width);
+}
+
+struct InformationLayout {
+    float label_width;
+    float value_x;
+    float value_width;
+    std::array<float, std::tuple_size_v<InfoRows>> rows;
+    float height = 0;
+
+    InformationLayout(const InfoRows& info, float width)
+    {
+        float labels = 0;
+        for (const auto& [label, value] : info) {
+            labels = std::max(labels, text_width(label));
+        }
+        label_width = std::max(1.0f, std::min(labels + 1, std::floor(width * 0.46f)));
+        value_x = label_width + gutter;
+        value_width = std::max(1.0f, width - value_x);
+        for (std::size_t i = 0; i < info.size(); ++i) {
+            const auto& [label, value] = info[i];
+            rows[i] =
+                std::ceil(std::max(wrapped_height(label, label_width), wrapped_height(value, value_width))) +
+                6;
+            height += rows[i];
+        }
     }
+};
+
+void draw_information(const InfoRows& info, const InformationLayout& layout)
+{
+    auto& draw = *ImGui::GetWindowDrawList();
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    ImGui::Dummy({ImGui::GetContentRegionAvail().x, layout.height});
+    float y = start.y;
+    for (std::size_t i = 0; i < info.size(); ++i) {
+        const auto& [label, value] = info[i];
+        if (i != 0) {
+            draw.AddLineH(start.x, start.x + layout.value_x + layout.value_width, y, packed(Color::divider),
+                          theme::border_width);
+        }
+        draw_text(draw, {start.x, y + 3}, Color::secondary_text, label, layout.label_width);
+        draw_text(draw, {start.x + layout.value_x, y + 3}, Color::primary_text, value, layout.value_width);
+        y += layout.rows[i];
+    }
+}
+
+struct LegendItem {
+    ImVec2 offset;
+    float text_width;
+};
+
+struct LegendLayout {
+    std::array<LegendItem, 2> items{};
+    float height = 0;
+
+    LegendLayout(std::span<const Reading> readings, float width)
+    {
+        constexpr float item_gap = 16;
+        float x = 0;
+        float y = 0;
+        for (std::size_t i = 0; i < readings.size(); ++i) {
+            const auto& reading = readings[i];
+            const std::string_view label = reading.text;
+            const auto layout_text = reading.layout_text.empty() ? label : reading.layout_text;
+            const float item_width =
+                swatch_size + swatch_gap + std::max(text_width(label), text_width(layout_text));
+            if (x > 0 && x + item_width > width) {
+                x = 0;
+                y = height + ImGui::GetStyle().ItemSpacing.y;
+            }
+            const float label_width = std::max(1.0f, width - x - swatch_size - swatch_gap);
+            items[i] = {{x, y}, label_width};
+            const float item_height =
+                std::max(wrapped_height(label, label_width), wrapped_height(layout_text, label_width));
+            height = std::max(height, y + item_height);
+            x += item_width + item_gap;
+        }
+    }
+};
+
+void draw_legend(std::span<const Reading> readings, const LegendLayout& layout)
+{
+    auto& draw = *ImGui::GetWindowDrawList();
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const float swatch_top = std::floor((ImGui::GetFontSize() - swatch_size) * 0.5f);
+    for (std::size_t i = 0; i < readings.size(); ++i) {
+        const ImVec2 pos{start.x + layout.items[i].offset.x, start.y + layout.items[i].offset.y};
+        draw.AddRectFilled({pos.x, pos.y + swatch_top},
+                           {pos.x + swatch_size, pos.y + swatch_top + swatch_size},
+                           packed(readings[i].color));
+        draw_text(draw, {pos.x + swatch_size + swatch_gap, pos.y}, Color::primary_text, readings[i].text,
+                  layout.items[i].text_width);
+    }
+    ImGui::Dummy({ImGui::GetContentRegionAvail().x, layout.height});
+}
+
+float title_band_height()
+{
+    return ImGui::GetFontSize() + 10;
+}
+
+bool begin_card(const char* title, ImVec2 pos, ImVec2 size)
+{
+    ImGui::SetCursorScreenPos(pos);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, card_padding);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, theme::pane_radius);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::rgba(Color::pane));
+    ImGui::PushStyleColor(ImGuiCol_Border, theme::rgba(Color::divider));
+    const bool visible =
+        ImGui::BeginChild(title, size, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(2);
+    if (visible) {
+        auto& draw = *ImGui::GetWindowDrawList();
+        const float band = title_band_height();
+        const auto child = ImGui::GetWindowPos();
+        const float width = ImGui::GetWindowWidth();
+        draw.AddRectFilled({child.x + 1, child.y + 1}, {child.x + width - 1, child.y + band},
+                           packed(Color::raised), theme::pane_radius - 1, ImDrawFlags_RoundCornersTop);
+        draw.AddLineH(child.x + 1, child.x + width - 1, child.y + band, packed(Color::divider),
+                      theme::border_width);
+        draw_text(draw, {child.x + std::floor((width - text_width(title)) * 0.5f), child.y + 5},
+                  Color::primary_text, title);
+        ImGui::SetCursorScreenPos({child.x + card_padding.x, child.y + band + card_padding.y});
+    }
+    return visible;
+}
+
+float chart_minimum_height(const LegendLayout& legend)
+{
+    return title_band_height() + 2 * card_padding.y + legend.height + ImGui::GetStyle().ItemSpacing.y +
+           minimum_plot_height;
+}
+
+void chart_card(const char* title, ImVec2 pos, ImVec2 size, std::span<const Reading> readings,
+                const LegendLayout& legend, const StatusTicks& ticks, float left_gutter, const char* unit,
+                double ceiling, std::initializer_list<StatusSeries> series)
+{
+    if (begin_card(title, pos, size)) {
+        draw_legend(readings, legend);
+        render_status_plot(ticks, left_gutter, unit, ceiling,
+                           std::max(minimum_plot_height, ImGui::GetContentRegionAvail().y), series);
+    }
+    ImGui::EndChild();
 }
 
 } // namespace
 
-void render_server_status(const nlohmann::json& server, bool narrow)
+bool server_status_has_columns(float content_width, float font_size)
 {
-    const bool columns = !narrow && ImGui::GetContentRegionAvail().x >= 580 &&
-                         ImGui::BeginTable("server-plots", 2, ImGuiTableFlags_SizingStretchSame);
-    if (columns) {
-        ImGui::TableNextColumn();
+    return content_width >= 2 * 320 * font_size / theme::secondary_font_size + gutter;
+}
+
+float render_server_status(const Json& server, bool stacked)
+{
+    const StatusSamples samples(server);
+    const double memory_ceiling = samples.memory_capacity > 0
+                                      ? samples.memory_capacity
+                                      : largest_sample(samples.memory, std::max(1.0, samples.memory_now));
+    const double traffic_maximum = traffic_ceiling(samples);
+    const auto cpu_ticks = status_ticks(100);
+    const auto memory_ticks = status_ticks(memory_ceiling);
+    const auto traffic_ticks = status_ticks(traffic_maximum);
+    const float axis_gutter = std::max(
+        {status_axis_gutter(cpu_ticks), status_axis_gutter(memory_ticks), status_axis_gutter(traffic_ticks)});
+    const std::array cpu{Reading{Color::accent, samples.cpu_value()}};
+    const std::array memory{Reading{Color::info, samples.memory_value()}};
+    // Reserve room for three integer digits using the widest digit in Wave's font.
+    const std::array traffic{Reading{Color::info, samples.upload_value(), "Upload 444.4 MiB/s"},
+                             Reading{Color::accent, samples.download_value(), "Download 444.4 MiB/s"}};
+
+    const ImVec2 available = ImGui::GetContentRegionAvail();
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const float left_width = stacked ? available.x : std::floor((available.x - gutter) * 0.5f);
+    const float right_width = stacked ? left_width : available.x - left_width - gutter;
+    const float left_body = std::max(1.0f, left_width - 2 * card_padding.x);
+    const float right_body = std::max(1.0f, right_width - 2 * card_padding.x);
+    const auto info = server_information(server, samples);
+    const InformationLayout information(info, left_body);
+    LegendLayout cpu_legend(cpu, left_body);
+    LegendLayout memory_legend(memory, right_body);
+    const LegendLayout traffic_legend(traffic, right_body);
+    if (!stacked) {
+        cpu_legend.height = memory_legend.height = std::max(cpu_legend.height, memory_legend.height);
     }
-    chart("CPU history", "%", 100, 145, {{array_field(server, "cpu_history"), "CPU", Color::accent}});
-    if (columns) {
-        ImGui::TableNextColumn();
-    }
-    chart("Memory history", "GiB", std::max(1.0, numeric_field(server, "memory_total_gib")), 145,
-          {{array_field(server, "memory_history"), "Memory", Color::info}});
-    if (columns) {
-        ImGui::EndTable();
+    float cpu_height = chart_minimum_height(cpu_legend);
+    float memory_height = chart_minimum_height(memory_legend);
+    float traffic_height = chart_minimum_height(traffic_legend);
+    float info_height = title_band_height() + 2 * card_padding.y + information.height;
+    if (!stacked) {
+        const float top_minimum = std::max(cpu_height, memory_height);
+        const float bottom_minimum = std::max(info_height, traffic_height);
+        const float rows_height = std::max(available.y - gutter, top_minimum + bottom_minimum);
+        cpu_height = memory_height =
+            std::clamp(std::floor(rows_height * 0.5f), top_minimum, rows_height - bottom_minimum);
+        info_height = traffic_height = rows_height - cpu_height;
     }
 
-    const bool traffic_columns = !narrow && ImGui::GetContentRegionAvail().x >= 720 &&
-                                 ImGui::BeginTable("server-summary", 2, ImGuiTableFlags_SizingStretchSame);
-    if (traffic_columns) {
-        ImGui::TableNextColumn();
+    const float right_x = stacked ? start.x : start.x + left_width + gutter;
+    const float memory_y = stacked ? start.y + cpu_height + gutter : start.y;
+    const float info_y = memory_y + memory_height + gutter;
+    const float traffic_y = stacked ? info_y + info_height + gutter : info_y;
+    chart_card("CPU", start, {left_width, cpu_height}, cpu, cpu_legend, cpu_ticks, axis_gutter, "%", 100,
+               {{samples.cpu, "CPU", cpu[0].color}});
+    chart_card("Memory", {right_x, memory_y}, {right_width, memory_height}, memory, memory_legend,
+               memory_ticks, axis_gutter, "GiB", memory_ceiling,
+               {{samples.memory, "Memory", memory[0].color}});
+    if (begin_card("Server Information", {start.x, info_y}, {left_width, info_height})) {
+        draw_information(info, information);
     }
-    server_info(server);
-    if (traffic_columns) {
-        ImGui::TableNextColumn();
-    }
-    const auto& upload = array_field(server, "upload_history");
-    const auto& download = array_field(server, "download_history");
-    chart("Traffic history", "MiB/s", traffic_ceiling(upload, download), 168,
-          {{upload, "Upload", Color::info}, {download, "Download", Color::accent}});
-    if (traffic_columns) {
-        ImGui::EndTable();
-    }
+    ImGui::EndChild();
+    chart_card(
+        "Traffic", {right_x, traffic_y}, {right_width, traffic_height}, traffic, traffic_legend,
+        traffic_ticks, axis_gutter, "MiB/s", traffic_maximum,
+        {{samples.upload, "Upload", traffic[0].color}, {samples.download, "Download", traffic[1].color}});
+    return traffic_y + traffic_height - start.y;
+}
+
+std::string describe_server_status(const Json& server)
+{
+    const StatusSamples samples(server);
+    return std::format("CPU {}. Memory {}. {}. {}.", samples.cpu_value(), samples.memory_value(),
+                       samples.upload_value(), samples.download_value());
 }
 
 } // namespace wave

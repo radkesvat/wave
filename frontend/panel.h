@@ -52,6 +52,7 @@ struct PanelState {
     SettingsViewState settings;
     ConsoleViewState console;
     BotViewState bot;
+    float stacked_server_status_height = 0;
     bool navigation_open = true;
     bool menu_open = false;
     bool tools_open = false;
@@ -64,7 +65,7 @@ struct PanelState {
 
 const char* panel_page_name(PanelPage page);
 std::span<const PanelNavigationItem> panel_navigation();
-float panel_height(float viewport_width, const PanelState& state);
+float panel_height(float viewport_width, float canvas_width, const PanelState& state);
 void render_panel(PanelState& state, PreviewSession& session, const OverviewData* overview,
                   bool overview_loading, float viewport_width, int browser_focus);
 std::string describe_panel(const PanelState& state, const PreviewSession& session,

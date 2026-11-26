@@ -25,6 +25,7 @@ add_executable(wave
     views/entry_view.cpp
     views/logs_view.cpp
     views/overview.cpp
+    views/server_status_plot.cpp
     views/server_status_view.cpp
     views/settings_view.cpp
     views/topology_view.cpp

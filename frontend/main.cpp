@@ -38,8 +38,8 @@ EM_JS(void, register_panel_page, (int page, const char* label), {
     Module['registerPanelPage'](page, UTF8ToString(label));
 });
 
-EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools, bool modal), {
-    Module['updateNavigation'](page, open, menu, tools, modal);
+EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools, bool modal, bool server_status), {
+    Module['updateNavigation'](page, open, menu, tools, modal, server_status);
 });
 
 EM_JS(int, browser_panel_focus, (), { return Module['panelFocus'](); });
@@ -184,7 +184,8 @@ struct Application {
             return false;
         }
 
-        const int required_height = static_cast<int>(std::ceil(wave::panel_height(viewport_width, panel)));
+        const int required_height = static_cast<int>(
+            std::ceil(wave::panel_height(viewport_width, static_cast<float>(css_width), panel)));
         if (minimum_height != required_height) {
             minimum_height = required_height;
             set_panel_height(minimum_height);
@@ -251,9 +252,10 @@ struct Application {
             update_panel_description(description.c_str());
             displayed_description = std::move(description);
         }
-        update_navigation(static_cast<int>(panel.page),
-                          panel.navigation_open && panel.entry.page == wave::EntryPage::workspace,
-                          panel.menu_open, panel.tools_open, wave::dialog_open());
+        const bool in_workspace = panel.entry.page == wave::EntryPage::workspace;
+        update_navigation(static_cast<int>(panel.page), panel.navigation_open && in_workspace,
+                          panel.menu_open, panel.tools_open, wave::dialog_open(),
+                          panel.page == wave::PanelPage::server && in_workspace);
         if (!visible) {
             show_panel();
             visible = true;

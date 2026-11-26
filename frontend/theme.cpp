@@ -87,7 +87,7 @@ void apply(bool high_contrast)
 {
     current = high_contrast ? &stronger : &standard;
     auto& style = ImGui::GetStyle();
-    style.WindowPadding = {11, 9};
+    style.WindowPadding = window_padding;
     style.FramePadding = {8, 5};
     style.ItemSpacing = {7, 7};
     style.CellPadding = {7, 5};
@@ -109,7 +109,7 @@ void apply(bool high_contrast)
     style.TabBarOverlineSize = selection_width;
     style.SeparatorSize = border_width;
     style.SeparatorTextBorderSize = border_width;
-    style.ScrollbarSize = 13;
+    style.ScrollbarSize = scrollbar_size;
     style.DisabledAlpha = high_contrast ? 0.90f : 0.82f;
 
     const auto set = [&style](ImGuiCol slot, Color color) { style.Colors[slot] = rgba(color); };

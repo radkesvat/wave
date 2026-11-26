@@ -14,6 +14,8 @@
         font: 1rem/1.5 system-ui, sans-serif;
       }
 
+      :root.server-status { scrollbar-gutter: stable; }
+
       body { margin: 0; }
 
       #canvas {
@@ -256,7 +258,8 @@
           canvas.setAttribute("aria-label", description);
         }
 
-        function updateNavigation(page, open, menuOpen, toolsOpen, modal) {
+        function updateNavigation(page, open, menuOpen, toolsOpen, modal, serverStatus) {
+          document.documentElement.classList.toggle("server-status", serverStatus);
           const updateExpanded = (element, expanded) => {
             const value = expanded ? "true" : "false";
             if (element.getAttribute("aria-expanded") !== value) element.setAttribute("aria-expanded", value);

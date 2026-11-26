@@ -10,6 +10,8 @@ inline constexpr float workspace_font_size = 23;
 inline constexpr float title_font_size = 26;
 inline constexpr float large_title_font_size = 32;
 inline constexpr int workspace_font_breakpoint = 1600;
+inline constexpr ImVec2 window_padding{11, 9};
+inline constexpr float scrollbar_size = 13;
 
 enum class Color {
     canvas,

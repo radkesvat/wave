@@ -367,6 +367,262 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
     }
 });
 
+const statusTitleColor = [43, 39, 48];
+const statusBodyColor = [31, 27, 34];
+const statusOutlineColor = [61, 58, 67];
+const uploadPlotColor = [81, 165, 246];
+const downloadPlotColor = [243, 129, 74];
+
+function statusFixture() {
+    const data = fixture();
+    data.server = { ...data.server, name: 'Wave preview with an intentionally long server name that wraps '
+        + 'onto multiple rows inside the Server Information card', region: 'Frankfurt, DE',
+        platform: 'Linux x86_64', version: '0.1.0-preview', cpu_cores: 8, cpu_percent: 25,
+        memory_used_gib: 4, memory_total_gib: 16, users_total: 2, users_enabled: 2, users_online: 1,
+        upload_rate: 2, download_rate: 6, upload_total: 12.5, download_total: 55.8,
+        cpu_history: [15, 35, 25], memory_history: [1, 6, 4], upload_history: [1, 2, 2],
+        download_history: [8, 4, 6] };
+    return data;
+}
+
+function pixelMatches(pixels, offset, color) {
+    return color.every((channel, index) => pixels[offset + index] === channel);
+}
+
+function colorRuns(pixels, colors, minimum = 1) {
+    const runs = [];
+    let start = null;
+    for (let position = 0; position <= pixels.length / 4; position++) {
+        const match = colors.some(color => pixelMatches(pixels, position * 4, color));
+        if (match && start === null) start = position;
+        if (!match && start !== null) {
+            if (position - start >= minimum) runs.push([start, position]);
+            start = null;
+        }
+    }
+    return runs;
+}
+
+async function statusCards(page, x, top, bottom) {
+    const { pixels } = await screenshotPixels(page, { x, y: top, width: 1, height: bottom - top });
+    const titles = colorRuns(pixels, [statusTitleColor], 14);
+    const surfaces = colorRuns(pixels, [statusTitleColor, statusBodyColor, statusOutlineColor], 50);
+    return titles.flatMap(([from, to]) => {
+        const surface = surfaces.find(([start, end]) => start <= from && end > to);
+        return surface ? [{ top: from + top, titleEnd: to + top, bottom: surface[1] + top }] : [];
+    });
+}
+
+async function desktopStatusGrid(page, viewport) {
+    const left = viewport.width >= 1600 ? 234 : 188;
+    const bottom = viewport.height - 10 - Math.floor(Math.max(195, Math.min(244, viewport.height * 0.25)));
+    const column = await statusCards(page, left + 18, 58, bottom);
+    assert.equal(column.length, 2, 'The left column has two visible cards.');
+
+    const bands = [];
+    for (const card of column) {
+        const clip = { x: left, y: card.top + 2, width: viewport.width - left - 10, height: 1 };
+        const { pixels } = await screenshotPixels(page, clip);
+        const runs = colorRuns(pixels, [statusTitleColor], 120).map(run => run.map(x => x + left));
+        assert.equal(runs.length, 2, 'Each title band fills a separate column.');
+        assert.ok(Math.abs((runs[0][1] - runs[0][0]) - (runs[1][1] - runs[1][0])) <= 1);
+        assert.ok(runs[1][0] > runs[0][1], 'A gutter separates the two columns.');
+        bands.push(runs);
+    }
+    assert.deepEqual(bands[1], bands[0], 'The second row uses the same column widths and gutter.');
+    const rightColumn = await statusCards(page, bands[0][1][1] - 8, 58, bottom);
+    assert.equal(rightColumn.length, 2, 'The right column has two visible cards.');
+    for (const [row, right] of rightColumn.entries()) {
+        // The strips sample rounded corners at slightly different offsets.
+        assert.ok(Math.abs(right.top - column[row].top) <= 2);
+        assert.equal(right.titleEnd, column[row].titleEnd);
+        assert.ok(Math.abs(right.bottom - column[row].bottom) <= 2);
+    }
+    return { cards: column, columns: bands[0] };
+}
+
+async function plotColors(page, clip) {
+    const { pixels, width } = await screenshotPixels(page, clip);
+    return [uploadPlotColor, downloadPlotColor].map(color => {
+        let right = -1;
+        let y = -1;
+        for (let offset = 0; offset < pixels.length; offset += 4) {
+            const x = (offset / 4) % width;
+            if (x > right && pixelMatches(pixels, offset, color)) {
+                right = x;
+                y = Math.floor(offset / 4 / width);
+            }
+        }
+        return y;
+    });
+}
+
+test('Server Status aligns both grid rows, updates a live plot, and reflows both rows together', async () => {
+    const wide = { width: 1920, height: 960 };
+    const page = await browser.newPage({ viewport: wide });
+    const data = statusFixture();
+    const preview = await mockPreview(page, { data });
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await openView(page, 'Server Status');
+        await page.getByRole('img', {
+            name: /CPU 25\.0%. Memory 4\.0 \/ 16\.0 GiB. Upload 2\.0 MiB\/s. Download 6\.0 MiB\/s\./,
+        }).waitFor();
+        await settleCanvas(page);
+        await desktopStatusGrid(page, wide);
+
+        await page.setViewportSize(desktop);
+        await waitForCanvas(page, desktop, false);
+        await settleCanvas(page);
+        const initial = await desktopStatusGrid(page, desktop);
+        const [cpu, info] = initial.cards;
+        const [cpuColumn, trafficColumn] = initial.columns;
+        const cpuClip = { x: cpuColumn[1] - 120, y: cpu.titleEnd + 35, width: 115,
+            height: cpu.bottom - cpu.titleEnd - 38 };
+        const trafficClip = { x: trafficColumn[0] + 60, y: info.titleEnd + 40, width: 20,
+            height: info.bottom - info.titleEnd - 46 };
+        const [, cpuBefore] = await plotColors(page, cpuClip);
+        assert.ok(cpuBefore >= 0, 'The CPU line is visible near the current sample.');
+        assert.ok((await plotColors(page, trafficClip)).every(y => y >= 0),
+            'Upload and download have distinct lines inside the same plot.');
+
+        data.server.cpu_percent = 75;
+        data.server.cpu_history.push(75);
+        data.logs.push({ ts: '09:41:07', level: 'info', message: 'Received the next metrics sample.' });
+        await preview.broadcast();
+        await page.getByRole('img', { name: /Received the next metrics sample/ }).waitFor();
+        assert.match(await page.getByRole('img').getAttribute('aria-label'), /CPU 75\.0%\./);
+        await settleCanvas(page);
+        const [, cpuAfter] = await plotColors(page, cpuClip);
+        assert.ok(cpuAfter >= 0 && cpuAfter < cpuBefore - 20, 'The latest CPU sample rose in the fixed-scale plot.');
+        assert.deepEqual(await desktopStatusGrid(page, desktop), initial, 'A new sample leaves the grid in place.');
+
+        const twoColumns = { ...desktop, width: 920 };
+        await page.setViewportSize(twoColumns);
+        await waitForCanvas(page, twoColumns, false);
+        await settleCanvas(page);
+        await desktopStatusGrid(page, twoColumns);
+
+        const transition = { ...desktop, width: 892 };
+        const canvasSize = () => page.locator('canvas').evaluate(canvas => [canvas.clientWidth, canvas.clientHeight]);
+        await page.setViewportSize(transition);
+        await settleCanvas(page);
+        const fromWide = await canvasSize();
+
+        const oneColumn = { ...desktop, width: 860 };
+        await page.setViewportSize(oneColumn);
+        await waitForCanvas(page, oneColumn, true);
+        await settleCanvas(page);
+        const upper = await statusCards(page, 206, 58, oneColumn.height);
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await settleCanvas(page);
+        const scroll = await page.evaluate(() => scrollY);
+        const lower = (await statusCards(page, 206, 0, oneColumn.height - 250))
+            .filter(card => card.top > 0).map(card => card.top + scroll);
+        assert.equal(new Set([...upper.map(card => card.top), ...lower]).size, 4,
+            'At the narrower pane width all four cards occupy their own row.');
+
+        await page.setViewportSize(transition);
+        await settleCanvas(page);
+        assert.deepEqual(await canvasSize(), fromWide, 'The same viewport uses the same layout after widening.');
+    } finally {
+        await page.close();
+    }
+});
+
+test('Server Status stacks the four cards in reading order and swipes through to Logs on a phone', async () => {
+    const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
+    const preview = await mockPreview(page, { data: statusFixture() });
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await page.touchscreen.tap(70, 105);
+        await page.getByRole('img', { name: /^Wave Server Status/ }).waitFor();
+        await settleCanvas(page);
+
+        const touch = await page.context().newCDPSession(page);
+        const titles = new Set();
+        for (let swipe = 0; swipe < 5; swipe++) {
+            const { offset, height } = await page.evaluate(() => ({ offset: scrollY, height: document.body.scrollHeight }));
+            const top = Math.max(0, 244 - offset);
+            const bottom = Math.min(portrait.height, height - offset - 250);
+            const cards = await statusCards(page, 28, top, bottom);
+            for (const card of cards) {
+                if (card.top > top) titles.add(card.top + offset);
+            }
+            if (Math.ceil(offset + portrait.height) >= height) break;
+            await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 175, y: 706 }] });
+            for (const y of [570, 420, 267, 173]) {
+                await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 175, y }] });
+            }
+            await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+            await settleCanvas(page);
+        }
+        assert.ok(await page.evaluate(() => Math.ceil(scrollY + innerHeight) >= document.body.scrollHeight));
+        await page.touchscreen.tap(115, portrait.height - 195);
+        assert.deepEqual((await preview.action(0)).request, { action: 'clear_logs' });
+
+        const positions = [...titles].sort((left, right) => left - right);
+        assert.equal(positions.length, 4);
+        const series = [];
+        for (const [index, top] of positions.entries()) {
+            await page.evaluate(y => window.scrollTo(0, y - 36), top);
+            await settleCanvas(page);
+            const relativeTop = top - await page.evaluate(() => scrollY);
+            const next = positions[index + 1] ?? top + 200;
+            const y = relativeTop + 67;
+            const height = Math.min(next - top - 75, portrait.height - y);
+            const colors = await plotColors(page, { x: 192, y, width: 24, height });
+            series.push(colors.map(position => position >= 0));
+        }
+        assert.deepEqual(series, [[false, true], [true, false], [false, false], [true, true]],
+            'CPU, Memory, Server Information, and Traffic appear in order above Logs.');
+    } finally {
+        await page.close();
+    }
+});
+
+test('Server Status keeps the Traffic plot and Logs in place when phone legends update', async () => {
+    const viewport = { ...portrait, width: 350 };
+    const page = await browser.newPage({ viewport, hasTouch: true, isMobile: true });
+    const data = statusFixture();
+    const setRates = (upload, download) => {
+        data.server.upload_rate = upload;
+        data.server.download_rate = download;
+        data.server.upload_history.push(upload);
+        data.server.download_history.push(download);
+    };
+    setRates(31.1, 61.1);
+    const preview = await mockPreview(page, { data });
+    async function trafficLayout() {
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await settleCanvas(page);
+        const { height, offset } = await page.evaluate(() => ({
+            height: document.querySelector('canvas').clientHeight, offset: scrollY,
+        }));
+        const { pixels } = await screenshotPixels(page, { x: 32, y: 0, width: 1, height: viewport.height - 250 });
+        const plot = colorRuns(pixels, [[13, 11, 14]], 80).at(-1);
+        assert.ok(plot, 'The Traffic plot is visible above Logs.');
+        return { height, plotTop: plot[0] + offset };
+    }
+
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await openView(page, 'Server Status');
+        await waitForCanvas(page, viewport, true);
+        const initial = await trafficLayout();
+        setRates(38.8, 68.8);
+        await preview.broadcast();
+        await page.getByRole('img', { name: /Upload 38\.8 MiB\/s\. Download 68\.8 MiB\/s/ }).waitFor();
+        await settleCanvas(page);
+        assert.deepEqual(await trafficLayout(), initial);
+    } finally {
+        await page.close();
+    }
+});
+
 test('pastes into user search and toggles the matching switch without shifting the table header', async () => {
     const page = await browser.newPage({ viewport: desktop });
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: url });

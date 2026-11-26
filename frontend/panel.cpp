@@ -48,6 +48,8 @@ constexpr auto narrow_navigation_rows =
 constexpr float narrow_navigation_height = narrow_navigation_rows * nav_row + 2 * margin;
 constexpr float narrow_work_height = 660;
 constexpr float narrow_logs_height = 232;
+constexpr float desktop_logs_min_height = 195;
+constexpr float server_min_work_height = 120;
 
 struct PanelLayout {
     bool narrow;
@@ -66,6 +68,20 @@ struct PanelLayout {
           workspace{margin + (sidebar && !narrow ? navigation_width : 0),
                     header_height + margin + (sidebar && narrow ? narrow_navigation_height : 0)}
     {
+    }
+
+    float work_width(float canvas_width) const
+    {
+        return std::max(1.0f, canvas_width - workspace.x - margin);
+    }
+
+    bool stack_server_status(const PanelState& state, float canvas_width) const
+    {
+        const float font = wide ? theme::workspace_font_size : theme::secondary_font_size;
+        // Reserve the pane scrollbar when testing fit so short desktops keep the same columns.
+        const float content_width =
+            work_width(canvas_width) - 2 * theme::window_padding.x - theme::scrollbar_size;
+        return state.page == PanelPage::server && !server_status_has_columns(content_width, font);
     }
 };
 
@@ -458,8 +474,8 @@ void render_dialogs(PanelState& state, PreviewSession& session)
     }
 }
 
-void render_view(PanelState& state, PreviewSession& session, bool narrow, const OverviewData* overview,
-                 bool overview_loading)
+void render_view(PanelState& state, PreviewSession& session, bool narrow, bool stacked_status,
+                 const OverviewData* overview, bool overview_loading)
 {
     if (!session.ready() && state.page != PanelPage::about && state.page != PanelPage::overview) {
         ImGui::TextUnformatted(panel_page_name(state.page));
@@ -485,9 +501,13 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, const 
     case PanelPage::users:
         render_users(state.users, session);
         break;
-    case PanelPage::server:
-        render_server_status(session.data()["server"], narrow);
+    case PanelPage::server: {
+        const float height = render_server_status(session.data()["server"], stacked_status);
+        if (stacked_status) {
+            state.stacked_server_status_height = height + 2 * theme::window_padding.y;
+        }
         break;
+    }
     case PanelPage::settings:
         render_settings(state.settings, session, narrow);
         break;
@@ -521,16 +541,22 @@ std::span<const PanelNavigationItem> panel_navigation()
     return navigation;
 }
 
-float panel_height(float viewport_width, const PanelState& state)
+float panel_height(float viewport_width, float canvas_width, const PanelState& state)
 {
     const PanelLayout layout(viewport_width, state);
     if (state.entry.page != EntryPage::workspace) {
         return layout.header_height + welcome_height;
     }
+    if (layout.stack_server_status(state, canvas_width)) {
+        return layout.workspace.y + std::max(narrow_work_height, state.stacked_server_status_height) +
+               narrow_logs_height + 2 * margin;
+    }
     if (layout.narrow) {
         return layout.workspace.y + narrow_work_height + narrow_logs_height + 2 * margin;
     }
-    return 666;
+    return state.page == PanelPage::server
+               ? layout.workspace.y + server_min_work_height + desktop_logs_min_height + 2 * margin
+               : 666;
 }
 
 void render_panel(PanelState& state, PreviewSession& session, const OverviewData* overview,
@@ -569,16 +595,22 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
         render_entry(state.entry, session, top);
     } else {
         render_navigation(state, layout, viewport, browser_focus);
-        const float width = std::max(1.0f, viewport.x - layout.workspace.x - margin);
+        const float width = layout.work_width(viewport.x);
+        const bool stacked_status = layout.stack_server_status(state, viewport.x);
         const float logs_height =
-            layout.narrow ? narrow_logs_height : std::floor(std::clamp(viewport.y * 0.25f, 195.0f, 244.0f));
+            layout.narrow || stacked_status
+                ? narrow_logs_height
+                : std::floor(std::clamp(viewport.y * 0.25f, desktop_logs_min_height, 244.0f));
         const float work_height =
-            layout.narrow ? narrow_work_height
-                          : std::max(1.0f, viewport.y - layout.workspace.y - logs_height - 2 * margin);
+            stacked_status  ? std::max(narrow_work_height, state.stacked_server_status_height)
+            : layout.narrow ? narrow_work_height
+                            : std::max(1.0f, viewport.y - layout.workspace.y - logs_height - 2 * margin);
         ImGui::PushID(static_cast<int>(state.page));
         ImGui::SetCursorScreenPos(layout.workspace);
-        if (begin_pane("View", {width, work_height}, Color::canvas)) {
-            render_view(state, session, layout.narrow, overview, overview_loading);
+        const auto view_flags =
+            stacked_status ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0;
+        if (begin_pane("View", {width, work_height}, Color::canvas, view_flags)) {
+            render_view(state, session, layout.narrow, stacked_status, overview, overview_loading);
         }
         ImGui::EndChild();
         ImGui::PopID();
@@ -624,6 +656,9 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
     if (!session.feedback().empty()) {
         result += " ";
         result += session.feedback();
+    }
+    if (state.page == PanelPage::server) {
+        result += ' ' + describe_server_status(session.data()["server"]);
     }
     return result;
 }
