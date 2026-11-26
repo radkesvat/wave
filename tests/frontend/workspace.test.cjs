@@ -582,17 +582,21 @@ async function desktopStatusGrid(page, viewport) {
     assert.equal(column.length, 2, 'The left column has two visible cards.');
 
     const bands = [];
-    for (const card of column) {
+    for (const [row, card] of column.entries()) {
         const clip = { x: left, y: card.top + 2, width: viewport.width - left - 10, height: 1 };
         const { pixels } = await screenshotPixels(page, clip);
         const runs = colorRuns(pixels, [statusTitleColor], 120).map(run => run.map(x => x + left));
-        assert.equal(runs.length, 2, 'Each title band fills a separate column.');
-        assert.ok(Math.abs((runs[0][1] - runs[0][0]) - (runs[1][1] - runs[1][0])) <= 1);
-        assert.ok(runs[1][0] > runs[0][1], 'A gutter separates the two columns.');
+        assert.equal(runs.length, row === 0 ? 2 : 3, 'Every card has its own title band.');
         bands.push(runs);
     }
-    assert.deepEqual(bands[1], bands[0], 'The second row uses the same column widths and gutter.');
-    const rightColumn = await statusCards(page, bands[0][1][1] - 8, 58, bottom);
+    const [[cpu, memory], [info, controls, traffic]] = bands;
+    assert.ok(Math.abs((cpu[1] - cpu[0]) - (memory[1] - memory[0])) <= 1);
+    assert.ok(memory[0] > cpu[1], 'A gutter separates the two main columns.');
+    assert.deepEqual(traffic, memory, 'Traffic and Memory use the same right column.');
+    assert.deepEqual([info[0], controls[1]], cpu, 'Server Information and Core Controls share the left column.');
+    assert.ok(Math.abs((info[1] - info[0]) - (controls[1] - controls[0])) <= 1);
+    assert.ok(controls[0] > info[1], 'A gutter separates Server Information and Core Controls.');
+    const rightColumn = await statusCards(page, memory[1] - 8, 58, bottom);
     assert.equal(rightColumn.length, 2, 'The right column has two visible cards.');
     for (const [row, right] of rightColumn.entries()) {
         // The strips sample rounded corners at slightly different offsets.
@@ -600,7 +604,12 @@ async function desktopStatusGrid(page, viewport) {
         assert.equal(right.titleEnd, column[row].titleEnd);
         assert.ok(Math.abs(right.bottom - column[row].bottom) <= 2);
     }
-    return { cards: column, columns: bands[0] };
+    const [controlsCard] = await statusCards(page, controls[0] + 6, column[1].top - 5, bottom);
+    assert.ok(controlsCard, 'Core Controls has a separate card surface.');
+    assert.equal(controlsCard.titleEnd, column[1].titleEnd);
+    assert.ok(Math.abs(controlsCard.bottom - column[1].bottom) <= 2,
+        `Core Controls ends at ${controlsCard.bottom} and Server Information ends at ${column[1].bottom}.`);
+    return { cards: column, columns: bands[0], controls: { ...controlsCard, left: controls[0], right: controls[1] } };
 }
 
 async function plotColors(page, clip) {
@@ -618,6 +627,37 @@ async function plotColors(page, clip) {
         return y;
     });
 }
+
+test('Server Status fits the desktop pane and scrolls when the window is shorter', async () => {
+    const wide = { width: 1920, height: 960 };
+    const page = await browser.newPage({ viewport: wide });
+    const data = statusFixture();
+    Object.assign(data.server, { name: 'Wave Preview', users_total: 28, users_enabled: 24, users_online: 18 });
+    await mockPreview(page, { data });
+    async function paneThumb() {
+        const { height } = page.viewportSize();
+        const width = await page.locator('canvas').evaluate(canvas => canvas.clientWidth);
+        const logsHeight = Math.floor(Math.max(195, Math.min(244, height * 0.25)));
+        const { pixels } = await screenshotPixels(page, { x: width - 17, y: 72, width: 1,
+            height: height - logsHeight - 82 });
+        return colorRuns(pixels, [[138, 132, 149]], 30);
+    }
+    try {
+        await page.goto(url);
+        await openView(page, 'Server Status');
+        await page.getByRole('img', { name: /Wave Server Status.*Preview core running/ }).waitFor();
+        await settleCanvas(page);
+        assert.deepEqual(await paneThumb(), [], 'The desktop cards fit without a work-pane scrollbar.');
+
+        const shorter = { ...wide, height: 800 };
+        await page.setViewportSize(shorter);
+        await waitForCanvas(page, shorter, false);
+        await settleCanvas(page);
+        assert.ok((await paneThumb()).length > 0, 'The work pane scrolls when its cards need more room.');
+    } finally {
+        await page.close();
+    }
+});
 
 test('Server Status aligns both grid rows, updates a live plot, and reflows both rows together', async () => {
     const wide = { width: 1920, height: 960 };
@@ -643,15 +683,8 @@ test('Server Status aligns both grid rows, updates a live plot, and reflows both
         await waitForCanvas(page, desktop, false);
         await settleCanvas(page);
         const initial = await desktopStatusGrid(page, desktop);
-        const [cpu, info] = initial.cards;
+        const [cpu] = initial.cards;
         const [cpuColumn] = initial.columns;
-        const center = Math.floor((cpuColumn[0] + cpuColumn[1]) / 2);
-        const divider = await screenshotPixels(page, { x: center - 2, y: info.titleEnd + 12, width: 5, height: 72 });
-        for (let y = 0; y < divider.height; y++) {
-            assert.ok(Array.from({ length: divider.width }, (_, x) => x).some(x =>
-                pixelMatches(divider.pixels, (y * divider.width + x) * 4, statusOutlineColor)),
-            'A vertical divider separates device information and Core Controls.');
-        }
         const cpuClip = { x: cpuColumn[1] - 120, y: cpu.titleEnd + 35, width: 115,
             height: cpu.bottom - cpu.titleEnd - 38 };
         const [, cpuBefore] = await plotColors(page, cpuClip);
@@ -684,14 +717,20 @@ test('Server Status aligns both grid rows, updates a live plot, and reflows both
         await page.setViewportSize(oneColumn);
         await waitForCanvas(page, oneColumn, true);
         await settleCanvas(page);
-        const upper = await statusCards(page, 206, 58, oneColumn.height);
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await settleCanvas(page);
-        const scroll = await page.evaluate(() => scrollY);
-        const lower = (await statusCards(page, 206, 0, oneColumn.height - 250))
-            .filter(card => card.top > 0).map(card => card.top + scroll);
-        assert.equal(new Set([...upper.map(card => card.top), ...lower]).size, 4,
-            'At the narrower pane width all four cards occupy their own row.');
+        const positions = new Set();
+        for (const fraction of [0, 0.5, 1]) {
+            await page.evaluate(fraction => window.scrollTo(0, (document.body.scrollHeight - innerHeight) * fraction),
+                fraction);
+            await settleCanvas(page);
+            const { offset, height } = await page.evaluate(() => ({ offset: scrollY, height: document.body.scrollHeight }));
+            const top = Math.max(0, 58 - offset);
+            const bottom = Math.min(oneColumn.height, height - offset - 250);
+            for (const card of await statusCards(page, 206, top, bottom)) {
+                if (card.top > top) positions.add(card.top + offset);
+            }
+        }
+        assert.equal(positions.size, 5,
+            'At the narrower pane width all five cards occupy their own row.');
 
         await page.setViewportSize(transition);
         await settleCanvas(page);
@@ -701,7 +740,7 @@ test('Server Status aligns both grid rows, updates a live plot, and reflows both
     }
 });
 
-test('Server Status stacks the four cards in reading order and swipes through to Logs on a phone', async () => {
+test('Server Status stacks the five cards in reading order and swipes through to Logs on a phone', async () => {
     const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
     const preview = await mockPreview(page, { data: statusFixture() });
     try {
@@ -719,7 +758,7 @@ test('Server Status stacks the four cards in reading order and swipes through to
 
         const touch = await page.context().newCDPSession(page);
         const titles = new Set();
-        for (let swipe = 0; swipe < 5; swipe++) {
+        for (let swipe = 0; swipe < 6; swipe++) {
             const { offset, height } = await page.evaluate(() => ({ offset: scrollY, height: document.body.scrollHeight }));
             const top = Math.max(0, 210 - offset);
             const bottom = Math.min(portrait.height, height - offset - 250);
@@ -740,7 +779,7 @@ test('Server Status stacks the four cards in reading order and swipes through to
         assert.deepEqual((await preview.action(0)).request, { action: 'clear_logs' });
 
         const positions = [...titles].sort((left, right) => left - right);
-        assert.equal(positions.length, 4);
+        assert.equal(positions.length, 5);
         const series = [];
         for (const [index, top] of positions.entries()) {
             await page.evaluate(y => window.scrollTo(0, y - 36), top);
@@ -752,8 +791,8 @@ test('Server Status stacks the four cards in reading order and swipes through to
             const colors = await plotColors(page, { x: 192, y, width: 24, height });
             series.push(colors.map(position => position >= 0));
         }
-        assert.deepEqual(series, [[false, true], [true, false], [false, false], [true, true]],
-            'CPU, Memory, Server Information, and Traffic appear in order above Logs.');
+        assert.deepEqual(series, [[false, true], [true, false], [false, false], [false, false], [true, true]],
+            'CPU, Memory, Server Information, Core Controls, and Traffic appear in order above Logs.');
     } finally {
         await page.close();
     }
@@ -806,15 +845,17 @@ test('Server Status keeps the Traffic plot and Logs in place when phone legends 
     }
 });
 
-const coreDesktop = { width: 1280, height: 960 };
+const coreDesktop = { width: 1280, height: 1080 };
 
 async function coreDesktopControls(page) {
-    const { cards: [, info], columns: [[left, right]] } = await desktopStatusGrid(page, coreDesktop);
-    const x = Math.floor((left + right) / 2) + 12;
-    const y = info.titleEnd + 74;
+    const { controls } = await desktopStatusGrid(page, coreDesktop);
+    const x = controls.right - 16;
+    const rowPitch = 37;
+    const startY = controls.titleEnd + 47;
+    const targetY = startY + 2 * rowPitch + 51;
     return {
-        start: [x + 22, y], stop: [x + 80, y],
-        target: [x + 30, y + 91], secondVersion: [x + 30, y + 165], update: [x + 42, y + 136],
+        start: [x, startY], stop: [x, startY + rowPitch],
+        target: [x, targetY], secondVersion: [controls.left + 40, targetY + 70], update: [x, targetY + rowPitch],
     };
 }
 
@@ -917,18 +958,31 @@ test('Server Status stacks controls and edits preview configs by touch', async (
         assert.ok(info, 'The information card follows the CPU and Memory charts.');
         await page.evaluate(y => window.scrollTo(0, y - 40), info.top);
         await settleCanvas(page);
-        const y = info.titleEnd - await page.evaluate(() => scrollY) + 10;
-        const { pixels } = await screenshotPixels(page, { x: 35, y, width: 1, height: 650 });
-        const buttons = colorRuns(pixels, [[69, 64, 79], [89, 80, 103]], 20);
-        assert.equal(buttons.length, 1, 'Config creation appears below the disabled Start button.');
-        const configY = y + Math.floor((buttons[0][0] + buttons[0][1]) / 2);
-        const strip = await screenshotPixels(page, { x: 34, y: configY - 239, width: 310, height: 45 });
-        assert.ok(Array.from({ length: strip.height }, (_, row) => row).some(row =>
-            Array.from({ length: strip.width }, (_, x) => x).every(x =>
-                pixelMatches(strip.pixels, (row * strip.width + x) * 4, statusOutlineColor))),
-        'The narrow card separates the information and controls with a horizontal divider.');
+        const offset = await page.evaluate(() => scrollY);
+        const belowInfo = (await statusCards(page, 28, 36, portrait.height))
+            .find(card => card.top > info.bottom - offset);
+        assert.ok(belowInfo, 'Core Controls has its own card below Server Information.');
+        await page.evaluate(y => window.scrollTo(0, y - 40), belowInfo.top + offset);
+        await settleCanvas(page);
+        const [controls] = await statusCards(page, 28, 36, portrait.height);
+        const y = controls.titleEnd + 4;
+        const height = controls.bottom - y;
+        const x = portrait.width - 44;
+        const buttonColors = [[69, 64, 79], [89, 80, 103]];
+        const { pixels } = await screenshotPixels(page, { x: 42, y, width: 1, height });
+        const buttons = colorRuns(pixels, buttonColors, 20);
+        assert.equal(buttons.length, 3, 'Stop, Create config, and Manage configs each occupy a row.');
+        assert.ok(buttons.every(([top, bottom]) => bottom - top >= 36),
+            'The stacked layout keeps taller touch targets.');
+        const { pixels: right } = await screenshotPixels(page, { x, y, width: 1, height });
+        const rows = buttons.map(([top, bottom]) => Math.floor((top + bottom) / 2));
+        for (const row of rows) {
+            assert.ok(buttonColors.some(color => pixelMatches(right, row * 4, color)),
+                'The button fills the row to the right edge.');
+        }
+        const [, createY, manageY] = rows.map(row => row + y);
 
-        await tap(83, configY);
+        await tap(x, createY);
         await status(/Create new config/);
         await footer();
         assert.equal(preview.actions.length, 0, 'A blank form cannot submit.');
@@ -943,7 +997,7 @@ test('Server Status stacks controls and edits preview configs by touch', async (
         core.configs.push(config);
         created.reply({ feedback: 'Created preview config Lab preview (disabled).' });
         await status(/Created preview config Lab preview \(disabled\)/);
-        await tap(200, configY);
+        await tap(x, manageY);
         await status(/Manage configs\. Default enabled, active and protected\. Lab preview disabled/);
         await tap(45, await configRow(0));
         await tap(160, await configRow(0));

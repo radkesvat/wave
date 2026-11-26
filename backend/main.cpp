@@ -103,7 +103,7 @@ std::string make_overview_snapshot()
 
 bool configure_demo_routes(httplib::Server& server, const std::filesystem::path& site_dir)
 {
-    if (!server.set_mount_point("/", site_dir.string())) {
+    if (!server.set_mount_point("/", site_dir.string(), {{"Cache-Control", "no-store"}})) {
         return false;
     }
 

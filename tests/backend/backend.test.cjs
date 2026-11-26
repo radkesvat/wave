@@ -99,10 +99,11 @@ test('startup persists the default listener in new and existing databases beside
     await response.arrayBuffer();
 });
 
-test('serves the site assets and returns 404 for a missing file', async () => {
+test('serves the site assets with caching disabled and returns 404 for a missing file', async () => {
     for (const path of ['/', '/index.html', '/index.js', '/index.wasm']) {
         const response = await fetch(new URL(path, url), { signal: AbortSignal.timeout(timeout) });
         assert.equal(response.status, 200, path);
+        assert.equal(response.headers.get('cache-control'), 'no-store', path);
         assert.deepEqual(Buffer.from(await response.arrayBuffer()), assets[path.slice(1) || 'index.html']);
         if (path === '/index.wasm') {
             assert.equal(response.headers.get('content-type'), 'application/wasm');

@@ -213,10 +213,10 @@ same track, hover, and drag colors in each contrast mode. Classic page
 scrollbars use those colors and rounded ends where browser styling is
 supported. Overlay scrollbars use the browser's native appearance.
 
-Server Status shows CPU and Memory above Server Information and Traffic
-when the work pane can fit two columns. When space is tight, all four cards
-stack in that order. The Server Information card places device details beside
-Core Controls in the grid and above them in the stacked layout.
+Server Status shows CPU and Memory in the top row when the work pane is
+wide enough. Server Information and Core Controls each have their own card
+under CPU, beside Traffic. When space is tight, the five cards stack in order
+from CPU and Memory through Server Information, Core Controls, and Traffic.
 On a phone, swipe through the cards to reach Logs.
 At short desktop heights, scroll inside the work pane to see the rest of
 the grid. Server Status reserves the browser scrollbar gutter on platforms
@@ -230,7 +230,7 @@ and `listen.port` in `wave-db.json` to choose the bind address and port. Use
 `127.0.0.1` for local-only access. For the HTTP preview, port `0` lets the
 operating system choose a free port. The preview prints its address and
 bound port at startup. The `/ws` endpoint echoes text messages over the same
-port.
+port. Preview assets are served with `Cache-Control: no-store`.
 
 The workspace opens `/ws/preview` on the same host and port. A JSON frame with
 `type` set to `snapshot` carries Users, Logs, server metrics, settings,
@@ -284,8 +284,11 @@ machine to reach the preview.
 ### Preview core controls
 
 Server Status reports the preview core's lifecycle and active version separately
-from the Wave version in Server Information. **Start** is available while
-stopped, and **Stop** is available while running. Stop requires confirmation.
+from the Wave version in Server Information. Each button and the target
+version picker fill their own row in Core Controls. The desktop grid uses
+shorter rows, and the stacked layout gives touch controls more height.
+**Start** is available while stopped, and **Stop** is available while running.
+Stop requires confirmation.
 These actions change the simulated lifecycle state in memory. Live WaterWall
 starts its executable with a core JSON input and loads the listed node configs
 during startup. Live start and stop are unimplemented in Wave.

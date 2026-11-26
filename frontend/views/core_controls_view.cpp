@@ -17,7 +17,6 @@ using theme::Color;
 using CoreDialog = CoreControlsState::Dialog;
 
 constexpr char popup_id[] = "###ServerCoreDialog";
-constexpr char heading[] = "Core Controls";
 constexpr char target_label[] = "Target version";
 constexpr char pending_message[] = "Applying to preview…";
 constexpr char disconnected_message[] = "The preview connection closed before confirming the change.";
@@ -128,54 +127,25 @@ void show_result(const CoreControlsState& state, const PreviewSession& session)
     }
 }
 
-float control_height()
+float control_height(float minimum = 40.0f)
 {
-    return std::max(40.0f, ImGui::GetFrameHeight());
-}
-
-bool fits(float width, std::initializer_list<const char*> labels)
-{
-    float needed = (labels.size() - 1) * ImGui::GetStyle().ItemSpacing.x;
-    for (const char* label : labels) {
-        needed += button_width(label);
-    }
-    return width >= needed;
-}
-
-float version_combo_width(const Json& core, float frame_height)
-{
-    float label_width = ImGui::CalcTextSize("Choose version").x;
-    for (const auto& item : array_field(core, "available_versions")) {
-        const auto label = string_value(item);
-        if (!label.empty()) {
-            label_width =
-                std::max(label_width, ImGui::CalcTextSize(label.data(), label.data() + label.size()).x);
-        }
-    }
-    return label_width + frame_height + 2 * ImGui::GetStyle().FramePadding.x;
+    return std::max(minimum, ImGui::GetFrameHeight());
 }
 
 struct ControlsLayout {
     float width;
-    float frame_height = control_height();
+    float frame_height;
     bool has_core;
     bool reconnect;
-    bool stop_inline;
-    bool manage_inline;
-    float combo_width;
-    bool update_inline;
     std::string state_label;
     std::string active_label;
     std::string notice;
     std::string_view result;
 
-    ControlsLayout(const CoreControlsState& state, const PreviewSession& session, float width)
-        : width(width), has_core(core_snapshot(session).is_object()),
+    ControlsLayout(const CoreControlsState& state, const PreviewSession& session, float width, bool compact)
+        : width(width), frame_height(control_height(compact ? 32.0f : 40.0f)),
+          has_core(core_snapshot(session).is_object()),
           reconnect(session.status() == PreviewStatus::unavailable),
-          stop_inline(fits(width, {"Start", "Stop"})),
-          manage_inline(fits(width, {"Create config", "Manage configs"})),
-          combo_width(version_combo_width(core_snapshot(session), frame_height)),
-          update_inline(width >= combo_width + ImGui::GetStyle().ItemSpacing.x + button_width("Update core")),
           state_label(core_state_label(core_snapshot(session))),
           active_label(std::format("Active version {}",
                                    string_field(core_snapshot(session), "active_version", "unavailable"))),
@@ -195,13 +165,11 @@ struct ControlsLayout {
                 height += ImGui::CalcTextSize(text.data(), text.data() + text.size(), false, width).y + gap;
             }
         };
-        line(heading);
         if (has_core) {
             line(state_label);
             line(active_label);
             line(target_label);
-            const int rows = 3 + !stop_inline + !update_inline + !manage_inline;
-            height += rows * (frame_height + gap);
+            height += 6 * (frame_height + gap) + 2 * gap;
         }
         line(notice);
         line(result);
@@ -214,7 +182,7 @@ struct ControlsLayout {
     bool button(const char* label, bool disabled = false) const
     {
         ImGui::BeginDisabled(disabled);
-        const bool pressed = theme::button(label, {std::min(width, button_width(label)), frame_height});
+        const bool pressed = theme::button(label, {width, frame_height});
         ImGui::EndDisabled();
         return pressed;
     }
@@ -229,7 +197,7 @@ void draw_versions(CoreControlsState& state, const Json& core, const ControlsLay
     const auto selected = state.target_version.empty() ? active : std::string_view(state.target_version);
     disabled |= !supports(core, "versions") || versions.empty();
     ImGui::BeginDisabled(disabled);
-    ImGui::SetNextItemWidth(layout.update_inline ? layout.combo_width : layout.width);
+    ImGui::SetNextItemWidth(layout.width);
     const auto padding = ImGui::GetStyle().FramePadding;
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
                         {padding.x, (layout.frame_height - ImGui::GetFontSize()) * 0.5f});
@@ -254,9 +222,6 @@ void draw_versions(CoreControlsState& state, const Json& core, const ControlsLay
     }
     ImGui::PopStyleVar();
     ImGui::EndDisabled();
-    if (layout.update_inline) {
-        ImGui::SameLine();
-    }
     if (layout.button("Update core",
                       disabled || state.target_version.empty() || state.target_version == active)) {
         open_dialog(state, CoreDialog::update);
@@ -436,17 +401,17 @@ void update_core_controls(CoreControlsState& state, PreviewSession& session)
     }
 }
 
-float core_controls_height(const CoreControlsState& state, const PreviewSession& session, float width)
+float core_controls_height(const CoreControlsState& state, const PreviewSession& session, float width,
+                           bool compact)
 {
-    return ControlsLayout(state, session, width).height();
+    return ControlsLayout(state, session, width, compact).height();
 }
 
-void render_core_controls(CoreControlsState& state, PreviewSession& session, float width)
+void render_core_controls(CoreControlsState& state, PreviewSession& session, float width, bool compact)
 {
     const auto& core = core_snapshot(session);
-    const ControlsLayout layout(state, session, width);
+    const ControlsLayout layout(state, session, width, compact);
     ImGui::BeginGroup();
-    wrapped(heading);
     if (layout.has_core) {
         wrapped(layout.state_label);
         const bool disabled = !session.ready() || state.request_id.has_value();
@@ -455,19 +420,15 @@ void render_core_controls(CoreControlsState& state, PreviewSession& session, flo
         if (layout.button("Start", start_disabled)) {
             submit(state, session, {{"action", "start_core"}});
         }
-        if (layout.stop_inline) {
-            ImGui::SameLine();
-        }
         if (layout.button("Stop", disabled || !can_stop(core))) {
             open_dialog(state, CoreDialog::stop);
         }
+        ImGui::Spacing();
         draw_versions(state, core, layout, disabled);
+        ImGui::Spacing();
         if (layout.button("Create config", disabled || !can_edit_configs(core))) {
             state.config_name.fill('\0');
             open_dialog(state, CoreDialog::create);
-        }
-        if (layout.manage_inline) {
-            ImGui::SameLine();
         }
         if (layout.button("Manage configs", disabled || !field(core, "configs").is_array())) {
             open_dialog(state, CoreDialog::manage);

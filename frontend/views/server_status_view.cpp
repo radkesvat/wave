@@ -303,13 +303,14 @@ float render_server_status(const Json& server, CoreControlsState& controls, Prev
     const ImVec2 start = ImGui::GetCursorScreenPos();
     const float left_width = stacked ? available.x : std::floor((available.x - gutter) * 0.5f);
     const float right_width = stacked ? left_width : available.x - left_width - gutter;
+    const float information_width = stacked ? left_width : std::floor((left_width - gutter) * 0.5f);
+    const float controls_width = stacked ? left_width : left_width - information_width - gutter;
     const float left_body = std::max(1.0f, left_width - 2 * card_padding.x);
     const float right_body = std::max(1.0f, right_width - 2 * card_padding.x);
+    const float information_body = std::max(1.0f, information_width - 2 * card_padding.x);
+    const float controls_body = std::max(1.0f, controls_width - 2 * card_padding.x);
     const auto info = server_information(server, samples);
-    const float information_width = stacked ? left_body : std::floor((left_body - 2 * gutter) * 0.5f);
-    const float controls_width = stacked ? left_body : left_body - information_width - 2 * gutter;
-    const InformationLayout information(info, information_width);
-    const float controls_height = core_controls_height(controls, session, controls_width);
+    const InformationLayout information(info, information_body);
     LegendLayout cpu_legend(cpu, left_body);
     LegendLayout memory_legend(memory, right_body);
     const LegendLayout traffic_legend(traffic, right_body);
@@ -319,42 +320,36 @@ float render_server_status(const Json& server, CoreControlsState& controls, Prev
     float cpu_height = chart_minimum_height(cpu_legend);
     float memory_height = chart_minimum_height(memory_legend);
     float traffic_height = chart_minimum_height(traffic_legend);
-    const float info_body_height = stacked ? information.height + 2 * gutter + controls_height
-                                           : std::max(information.height, controls_height);
-    float info_height = title_band_height() + 2 * card_padding.y + info_body_height;
+    const float card_frame_height = title_band_height() + 2 * card_padding.y;
+    float info_height = card_frame_height + information.height;
+    float controls_height =
+        card_frame_height + core_controls_height(controls, session, controls_body, !stacked);
     if (!stacked) {
         const float top_minimum = std::max(cpu_height, memory_height);
-        const float bottom_minimum = std::max(info_height, traffic_height);
+        const float bottom_minimum = std::max({info_height, controls_height, traffic_height});
         const float rows_height = std::max(available.y - gutter, top_minimum + bottom_minimum);
         cpu_height = memory_height =
             std::clamp(std::floor(rows_height * 0.5f), top_minimum, rows_height - bottom_minimum);
-        info_height = traffic_height = rows_height - cpu_height;
+        info_height = controls_height = traffic_height = rows_height - cpu_height;
     }
 
     const float right_x = stacked ? start.x : start.x + left_width + gutter;
     const float memory_y = stacked ? start.y + cpu_height + gutter : start.y;
     const float info_y = memory_y + memory_height + gutter;
-    const float traffic_y = stacked ? info_y + info_height + gutter : info_y;
+    const float controls_x = stacked ? start.x : start.x + information_width + gutter;
+    const float controls_y = stacked ? info_y + info_height + gutter : info_y;
+    const float traffic_y = stacked ? controls_y + controls_height + gutter : info_y;
     chart_card("CPU", start, {left_width, cpu_height}, cpu, cpu_legend, cpu_ticks, axis_gutter, "%", 100,
                {{samples.cpu, "CPU", cpu[0].color}});
     chart_card("Memory", {right_x, memory_y}, {right_width, memory_height}, memory, memory_legend,
                memory_ticks, axis_gutter, "GiB", memory_ceiling,
                {{samples.memory, "Memory", memory[0].color}});
-    if (begin_card("Server Information", {start.x, info_y}, {left_width, info_height})) {
-        const auto body = ImGui::GetCursorScreenPos();
-        auto& draw = *ImGui::GetWindowDrawList();
+    if (begin_card("Server Information", {start.x, info_y}, {information_width, info_height})) {
         draw_information(info, information);
-        if (stacked) {
-            const float divider_y = body.y + information.height + gutter;
-            draw.AddLineH(body.x, body.x + left_body, divider_y, packed(Color::divider), theme::border_width);
-            ImGui::SetCursorScreenPos({body.x, divider_y + gutter});
-        } else {
-            const float divider_x = body.x + information_width + gutter;
-            draw.AddLineV(divider_x, body.y, info_y + info_height - card_padding.y, packed(Color::divider),
-                          theme::border_width);
-            ImGui::SetCursorScreenPos({divider_x + gutter, body.y});
-        }
-        render_core_controls(controls, session, controls_width);
+    }
+    ImGui::EndChild();
+    if (begin_card("Core Controls", {controls_x, controls_y}, {controls_width, controls_height})) {
+        render_core_controls(controls, session, controls_body, !stacked);
     }
     ImGui::EndChild();
     chart_card(

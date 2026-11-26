@@ -30,8 +30,9 @@ struct CoreControlsState {
 };
 
 void update_core_controls(CoreControlsState& state, PreviewSession& session);
-float core_controls_height(const CoreControlsState& state, const PreviewSession& session, float width);
-void render_core_controls(CoreControlsState& state, PreviewSession& session, float width);
+float core_controls_height(const CoreControlsState& state, const PreviewSession& session, float width,
+                           bool compact);
+void render_core_controls(CoreControlsState& state, PreviewSession& session, float width, bool compact);
 void render_core_control_dialog(CoreControlsState& state, PreviewSession& session);
 std::string describe_core_controls(const CoreControlsState& state, const PreviewSession& session);
 
