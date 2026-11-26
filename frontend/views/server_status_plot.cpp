@@ -106,6 +106,23 @@ struct PlotLegend {
 
 } // namespace
 
+std::optional<double> status_metric(const nlohmann::json& value)
+{
+    const auto sample = view::number(value, -1);
+    return sample >= 0 ? std::optional{sample} : std::nullopt;
+}
+
+std::string format_status_reading(double value, std::string_view unit)
+{
+    if (unit == "%") {
+        return std::format("{:.1f}%", value);
+    }
+    if ((unit == "MiB/s" || unit == "KiB/s") && value > 0 && value < 0.1) {
+        return std::format("{:.3g} {}", value, unit);
+    }
+    return std::format("{:.1f} {}", value, unit);
+}
+
 StatusTicks status_ticks(double ceiling)
 {
     StatusTicks ticks;
@@ -128,8 +145,8 @@ float status_axis_gutter(const StatusTicks& ticks)
     return edge_padding + width + tick_gap;
 }
 
-void render_status_plot(const StatusTicks& ticks, float left_gutter, const char* unit, double ceiling,
-                        float height, std::initializer_list<StatusSeries> series)
+void render_status_plot(const StatusTicks& ticks, float left_gutter, StatusScale scale, float height,
+                        std::initializer_list<StatusSeries> series)
 {
     const ImVec2 position = ImGui::GetCursorScreenPos();
     const float width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
@@ -191,31 +208,52 @@ void render_status_plot(const StatusTicks& ticks, float left_gutter, const char*
         draw.AddLineV(std::round(right - step * age), top, bottom, label_color, theme::border_width);
     }
 
-    ceiling = positive_ceiling(ceiling);
+    const double ceiling = positive_ceiling(scale.ceiling);
     for (const auto& line : series) {
         const auto size = sample_count(line);
         std::array<ImVec2, status_history_capacity> points;
-        for (std::size_t index = 0; index < size; ++index) {
-            const auto raw = view::number(line.samples[line.samples.size() - size + index]);
-            const auto ratio = static_cast<float>(std::clamp(raw / ceiling, 0.0, 1.0));
-            points[index] = {right - step * (size - 1 - index), bottom - (bottom - top) * ratio};
-        }
+        std::size_t length = 0;
+        std::optional<ImVec2> marker;
         const auto color = packed(line.color);
-        if (size > 1) {
-            draw.AddPolyline(points.data(), static_cast<int>(size), color, 2);
+        const auto draw_segment = [&] {
+            if (length > 1) {
+                draw.AddPolyline(points.data(), static_cast<int>(length), color, 2);
+            } else if (length == 1) {
+                draw.AddCircleFilled(points.front(), 2, color);
+            }
+            length = 0;
+        };
+        for (std::size_t index = 0; index < size; ++index) {
+            const auto raw = status_metric(line.samples[line.samples.size() - size + index]);
+            if (!raw) {
+                draw_segment();
+                continue;
+            }
+            const auto age_from_end = size - 1 - index;
+            const auto ratio = static_cast<float>(std::clamp(*raw * scale.multiplier / ceiling, 0.0, 1.0));
+            const ImVec2 point{right - step * age_from_end, bottom - (bottom - top) * ratio};
+            points[length++] = point;
+            if (age_from_end == age) {
+                marker = point;
+            }
         }
-        if (age < size) {
-            draw.AddCircleFilled(points[size - 1 - age], hovered ? 4 : 3, color);
+        draw_segment();
+        if (marker) {
+            draw.AddCircleFilled(*marker, hovered ? 4 : 3, color);
         }
     }
     legend.draw(draw, series);
     ImGui::PopFont();
     if (hovered && ImGui::BeginTooltip()) {
-        const char* spacing = std::string_view(unit) == "%" ? "" : " ";
         for (const auto& line : series) {
             if (age < sample_count(line)) {
-                const auto sample = view::number(line.samples[line.samples.size() - 1 - age]);
-                ImGui::Text("%s %.1f%s%s", line.name, sample, spacing, unit);
+                const auto sample = status_metric(line.samples[line.samples.size() - 1 - age]);
+                if (sample) {
+                    const auto formatted = format_status_reading(*sample * scale.multiplier, scale.unit);
+                    ImGui::Text("%s %s", line.name, formatted.c_str());
+                } else {
+                    ImGui::Text("%s unavailable", line.name);
+                }
             }
         }
         ImGui::EndTooltip();

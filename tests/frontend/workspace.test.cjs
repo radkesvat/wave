@@ -13,6 +13,7 @@ const serverSnapshot = {
     memory_used_gib: 4.5,
     memory_total_gib: 16,
     uptime_minutes: 1599,
+    download_rate: 9.6,
     download_history: [2.4, 1.2, 3, 2.8, 5.5, 4.6, 7.9, 6.8, 10.2, 8.3, 8.9, 5.7, 6.2, 9.6],
 };
 const user = { enabled: true, upload_rate: 0.2, download_rate: 0.5, upload_total: 8, download_total: 12,
@@ -520,7 +521,7 @@ const downloadPlotColor = [243, 129, 74];
 function statusFixture() {
     const data = fixture();
     data.server = { ...data.server, name: 'Wave preview with an intentionally long server name that wraps '
-        + 'onto multiple rows inside the Server Information card', region: 'Frankfurt, DE',
+        + 'onto multiple rows inside the Server Information card',
         platform: 'Linux x86_64', version: '0.1.0-preview', cpu_cores: 8, cpu_percent: 25,
         memory_used_gib: 4, memory_total_gib: 16, users_total: 2, users_enabled: 2, users_online: 1,
         upload_rate: 2, download_rate: 6, upload_total: 12.5, download_total: 55.8,
@@ -580,7 +581,7 @@ async function desktopStatusGrid(page, viewport) {
     const [[cpu, memory], [info, controls, traffic]] = bands;
     assert.ok(Math.abs((cpu[1] - cpu[0]) - (memory[1] - memory[0])) <= 1);
     assert.ok(memory[0] > cpu[1], 'A gutter separates the two main columns.');
-    assert.deepEqual(traffic, memory, 'Traffic and Memory use the same right column.');
+    assert.deepEqual(traffic, memory, 'Host Network and Memory use the same right column.');
     assert.deepEqual([info[0], controls[1]], cpu, 'Server Information and Panel Controls share the left column.');
     assert.ok(Math.abs((info[1] - info[0]) - (controls[1] - controls[0])) <= 1);
     assert.ok(controls[0] > info[1], 'A gutter separates Server Information and Panel Controls.');
@@ -681,7 +682,7 @@ test('Server Status aligns both grid rows, updates a live plot, and reflows both
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
         await openView(page, 'Server Status');
         await page.getByRole('img', {
-            name: /CPU 25\.0%. Memory 4\.0 \/ 16\.0 GiB. Upload 2\.0 MiB\/s. Download 6\.0 MiB\/s\./,
+            name: /CPU 25\.0%. Memory 4\.0 \/ 16\.0 GiB. Host network. Upload 2\.0 MiB\/s. Download 6\.0 MiB\/s\./,
         }).waitFor();
         await settleCanvas(page);
         const wideGrid = await desktopStatusGrid(page, wide);
@@ -757,6 +758,60 @@ test('Server Status aligns both grid rows, updates a live plot, and reflows both
     }
 });
 
+test('Server Status leaves gaps for unavailable readings and scales low host network rates', async () => {
+    const wide = { width: 1920, height: 960 };
+    const page = await browser.newPage({ viewport: wide });
+    const data = statusFixture();
+    Object.assign(data.server, {
+        cpu_percent: null, memory_used_gib: null, download_rate: null,
+        cpu_history: [25, null, 25, null], memory_history: [], upload_history: [1], download_history: [],
+    });
+    delete data.server.upload_rate;
+    const preview = await mockPreview(page, { data });
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await openView(page, 'Server Status');
+        await page.getByRole('img', {
+            name: /CPU Unavailable\. Memory Unavailable\. Host network\. Upload unavailable\. Download unavailable\./,
+        }).waitFor();
+        await settleCanvas(page);
+        const grid = await desktopStatusGrid(page, wide);
+        const [cpu] = grid.cards;
+        const [[left, right]] = grid.columns;
+        const gap = { x: Math.floor((left + right) / 2), y: cpu.titleEnd + 46, width: 4,
+            height: cpu.bottom - cpu.titleEnd - 52 };
+        assert.equal((await plotColors(page, gap))[1], -1, 'Unavailable samples break the CPU line.');
+
+        data.server.cpu_percent = 0;
+        data.server.cpu_history.push(0);
+        data.server.upload_rate = 0;
+        data.server.upload_history.push(0);
+        await preview.broadcast();
+        await page.getByRole('img', {
+            name: /CPU 0\.0%\. Memory Unavailable\. Host network\. Upload 0\.0 MiB\/s\. Download unavailable\./,
+        }).waitFor();
+
+        Object.assign(data.server, {
+            upload_rate: 0.5 / 1024, download_rate: 1.5 / 1024,
+            upload_history: [0.25 / 1024, 0.5 / 1024],
+            download_history: [2 / 1024, 1.5 / 1024],
+        });
+        await preview.broadcast();
+        await page.getByRole('img', {
+            name: /Host network\. Upload 0\.5 KiB\/s\. Download 1\.5 KiB\/s\./,
+        }).waitFor();
+        await settleCanvas(page);
+        const network = grid.cards[1];
+        const networkRight = grid.columns[1][1];
+        const upperPlot = { x: networkRight - 150, y: network.titleEnd + 45, width: 130,
+            height: Math.floor((network.bottom - network.titleEnd) / 2) };
+        assert.ok((await plotColors(page, upperPlot))[1] >= 0, 'Low rates fill the graph at their own scale.');
+    } finally {
+        await page.close();
+    }
+});
+
 test('Server Status stacks the five cards in reading order and swipes through to Logs on a phone', async () => {
     const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
     const preview = await mockPreview(page, { data: statusFixture() });
@@ -809,13 +864,13 @@ test('Server Status stacks the five cards in reading order and swipes through to
             series.push(colors.map(position => position >= 0));
         }
         assert.deepEqual(series, [[false, true], [true, false], [false, false], [false, false], [true, true]],
-            'CPU, Memory, Server Information, Panel Controls, and Traffic appear in order above Logs.');
+            'CPU, Memory, Server Information, Panel Controls, and Host Network appear in order above Logs.');
     } finally {
         await page.close();
     }
 });
 
-test('Server Status keeps the Traffic plot and Logs in place when phone legends update', async () => {
+test('Server Status keeps the Host Network plot and Logs in place when phone legends update', async () => {
     const viewport = { ...portrait, width: 350 };
     const page = await browser.newPage({ viewport, hasTouch: true, isMobile: true });
     const data = statusFixture();
@@ -839,10 +894,10 @@ test('Server Status keeps the Traffic plot and Logs in place when phone legends 
         const { height, offset } = await page.evaluate(() => ({
             height: document.querySelector('canvas').clientHeight, offset: scrollY,
         }));
-        assert.ok(Math.ceil(offset + viewport.height) >= height, 'The Traffic plot is sampled at the page end.');
+        assert.ok(Math.ceil(offset + viewport.height) >= height, 'The Host Network plot is sampled at the page end.');
         const { pixels } = await screenshotPixels(page, { x: 32, y: 0, width: 1, height: viewport.height - 250 });
         const plot = colorRuns(pixels, [[13, 11, 14]], 80).at(-1);
-        assert.ok(plot, 'The Traffic plot is visible above Logs.');
+        assert.ok(plot, 'The Host Network plot is visible above Logs.');
         return { height, plotTop: plot[0] + offset };
     }
 

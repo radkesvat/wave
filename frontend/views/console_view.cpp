@@ -54,7 +54,7 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
     const bool running = bool_field(console, "running");
     ImGui::TextColored(rgba(running ? Color::success : Color::warning), "%s",
                        running ? "Bash preview running" : "Bash preview stopped");
-    ImGui::TextWrapped("Try help, uptime, whoami or status for canned responses.");
+    ImGui::TextWrapped("Try help, uptime, whoami, or status.");
 
     if (theme::button("Options")) {
         ImGui::OpenPopup("Console options");

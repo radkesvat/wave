@@ -3,15 +3,23 @@ const { execFile, spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } = require('node:fs/promises');
 const { request: httpRequest } = require('node:http');
-const { tmpdir } = require('node:os');
+const { hostname, tmpdir } = require('node:os');
 const { basename, dirname, join } = require('node:path');
 const { createInterface } = require('node:readline');
 const { after, before, test } = require('node:test');
-const { promisify } = require('node:util');
+const { setTimeout: delay } = require('node:timers/promises');
+const { isDeepStrictEqual, promisify } = require('node:util');
 
 const sourceBackend = process.env.WAVE_BACKEND;
 const run = promisify(execFile);
 const timeout = 5000;
+const historyLimit = 19;
+const metricHistories = [
+    ['cpu_percent', 'cpu_history', 100],
+    ['memory_used_gib', 'memory_history', Infinity],
+    ['upload_rate', 'upload_history', Infinity],
+    ['download_rate', 'download_history', Infinity],
+];
 const siteDir = 'fixture site';
 const assets = {
     'index.html': Buffer.from('<!doctype html><title>Wave fixture</title>'),
@@ -25,6 +33,20 @@ let server;
 let closed;
 let url;
 let cookie;
+let countersAtStartup;
+
+async function readNetworkCounters() {
+    const rows = await readFile('/proc/net/dev', 'utf8');
+    const metrics = new Map();
+    for (const row of rows.trimEnd().split('\n').slice(2)) {
+        const separator = row.lastIndexOf(':');
+        const name = row.slice(0, separator).trim();
+        if (name === 'lo') continue;
+        const columns = row.slice(separator + 1).trim().split(/\s+/);
+        metrics.set(name, [BigInt(columns[0]), BigInt(columns[8])]);
+    }
+    return metrics;
+}
 
 before(async () => {
     assert.ok(sourceBackend, 'Run this test through a Wave backend CTest preset.');
@@ -39,6 +61,7 @@ before(async () => {
         await writeFile(join(cwd, siteDir, name), contents);
     }
 
+    if (process.platform === 'linux') countersAtStartup = await readNetworkCounters();
     server = spawn(backend, ['--site-dir', siteDir], {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -196,33 +219,64 @@ test('echoes WebSocket text and closes the connection cleanly', async t => {
     assert.equal(event.wasClean, true);
 });
 
-test('sends one deterministic Overview snapshot as WebSocket text on each connection', async t => {
-    const expected = {
-        cpu_percent: 28,
-        memory_used_gib: Math.fround(3.2),
-        memory_total_gib: 8,
-        uptime_minutes: 103 * 60 + 23,
-        download_mib_per_second: [2.1, 3.0, 2.8, 5.5, 4.6, 7.9, 6.8, 10.2, 8.3,
-            8.9, 5.7, 6.2, 7.4].map(Math.fround),
-    };
+function assertMetric(value, maximum = Infinity) {
+    assert.ok(value === null || (Number.isFinite(value) && value >= 0 && value <= maximum),
+        'Expected a nonnegative metric or null, got ' + value);
+}
 
+async function assertLinuxMemoryAndUptime(snapshot) {
+    const [memory, uptime] = await Promise.all([
+        readFile('/proc/meminfo', 'utf8'),
+        readFile('/proc/uptime', 'utf8'),
+    ]);
+    const totalKib = Number(/^MemTotal:\s+(\d+) kB$/m.exec(memory)[1]);
+    assert.equal(snapshot.memory_total_gib, totalKib / 2 ** 20);
+    assert.ok(Number.isFinite(snapshot.memory_used_gib));
+    assertMetric(snapshot.memory_used_gib, snapshot.memory_total_gib);
+    const minutes = Math.floor(parseFloat(uptime) / 60);
+    assert.ok(Number.isInteger(snapshot.uptime_minutes) &&
+        snapshot.uptime_minutes >= minutes - 1 && snapshot.uptime_minutes <= minutes);
+}
+
+async function readOverview(t) {
+    const socket = connectSocket('/ws/overview');
+    t.after(() => socket.close());
+    const frames = [];
+    socket.addEventListener('message', event => frames.push(event.data));
+    const [event] = await once(socket, 'close', { signal: AbortSignal.timeout(timeout) });
+
+    assert.equal(event.code, 1000);
+    assert.equal(event.wasClean, true);
+    assert.equal(frames.length, 1);
+    assert.equal(typeof frames[0], 'string');
+    return JSON.parse(frames[0]);
+}
+
+test('sends one Overview snapshot of measured host data per WebSocket connection', async t => {
+    if (process.platform === 'linux') {
+        // Wait through at least two intervals before opening any telemetry socket. A sampler
+        // driven only by connection or request activity cannot build this history.
+        await delay(1500);
+    }
     for (let attempt = 0; attempt < 2; attempt++) {
-        const socket = connectSocket('/ws/overview');
-        t.after(() => socket.close());
-        const frames = [];
-        socket.addEventListener('message', event => frames.push(event.data));
-        const [event] = await once(socket, 'close', { signal: AbortSignal.timeout(timeout) });
-
-        assert.equal(event.code, 1000);
-        assert.equal(event.wasClean, true);
-        assert.equal(frames.length, 1);
-        assert.equal(typeof frames[0], 'string');
-        assert.deepEqual(JSON.parse(frames[0]), expected);
+        const snapshot = await readOverview(t);
+        assert.deepEqual(Object.keys(snapshot).sort(), [
+            'cpu_percent', 'download_mib_per_second', 'memory_total_gib', 'memory_used_gib', 'uptime_minutes',
+        ]);
+        assertMetric(snapshot.cpu_percent, 100);
+        assert.ok(Array.isArray(snapshot.download_mib_per_second) && snapshot.download_mib_per_second.length <= 13);
+        for (const rate of snapshot.download_mib_per_second) assertMetric(rate);
+        if (process.platform === 'linux') {
+            assert.ok(Number.isFinite(snapshot.cpu_percent));
+            assert.ok(snapshot.download_mib_per_second.length >= 2,
+                'The host history grows while no telemetry client is connected.');
+            await assertLinuxMemoryAndUptime(snapshot);
+        }
     }
 });
 
-async function nextPreviewSnapshot(socket, matches = () => true) {
-    const signal = AbortSignal.timeout(timeout);
+async function nextPreviewSnapshot(socket, matches = () => true, wait = timeout) {
+    const signal = AbortSignal.timeout(wait);
     for (;;) {
         const [message] = await once(socket, 'message', { signal });
         assert.equal(typeof message.data, 'string');
@@ -251,6 +305,110 @@ function requestPreview(socket, action, fields = {}) {
     });
 }
 
+function assertHostHistory(server) {
+    for (const [key, historyKey, limit] of metricHistories) {
+        const history = server[historyKey];
+        assert.ok(Array.isArray(history) && history.length <= historyLimit, historyKey);
+        for (const reading of history) assertMetric(reading, limit);
+        assertMetric(server[key], limit);
+        assert.equal(server[key], history.at(-1) ?? null, key);
+    }
+}
+
+async function assertLinuxNetworkTotals(server) {
+    const after = await readNetworkCounters();
+    assert.ok(Number.isFinite(server.download_total));
+    assert.ok(Number.isFinite(server.upload_total));
+    assertMetric(server.download_total);
+    assertMetric(server.upload_total);
+    if (after.size !== countersAtStartup.size) return;
+    for (const [name, start] of countersAtStartup) {
+        const end = after.get(name);
+        // A replaced, new, or reset interface prevents comparing cumulative counters across the interval.
+        if (!end || end.some((value, i) => value < start[i])) return;
+    }
+    const totalGib = (map, index) =>
+        Number([...map.values()].reduce((sum, counters) => sum + counters[index], 0n)) / 2 ** 30;
+    for (const [index, total] of [server.download_total, server.upload_total].entries()) {
+        const minimum = totalGib(countersAtStartup, index);
+        const maximum = totalGib(after, index);
+        const rounding = maximum * Number.EPSILON * after.size;
+        assert.ok(total >= minimum - rounding && total <= maximum + rounding,
+            'Host traffic totals fall between independent Linux reads of the same interface counters.');
+    }
+}
+
+test('streams measured Linux CPU, memory, and network history separately from sample users',
+    { skip: process.platform !== 'linux' }, async t => {
+        const { socket, initial } = await connectPreview(t);
+        const { server } = initial;
+        assertHostHistory(server);
+        await assertLinuxMemoryAndUptime(server);
+        await assertLinuxNetworkTotals(server);
+        const cpuStat = await readFile('/proc/stat', 'utf8');
+        assert.equal(server.cpu_cores, [...cpuStat.matchAll(/^cpu\d+\s/gm)].length);
+        assert.equal(server.name, hostname());
+        assert.match(server.platform, /^Linux(?:\s|$)/);
+        assert.equal(server.region, undefined);
+        assert.ok(server.memory_history.length > 0 && server.memory_history.length < historyLimit,
+            'The history starts with measured samples rather than a filled demo series.');
+
+        const samples = [];
+        for (let sample = 0; sample < 5; sample++) {
+            const { data } = await nextPreviewSnapshot(socket, frame => frame.request_id === undefined, 2000);
+            assertHostHistory(data.server);
+            samples.push({ data, time: performance.now() });
+        }
+        const { data: first, time: start } = samples[0];
+        const { data: last, time: end } = samples.at(-1);
+        // Four sampling intervals take about two seconds. Allow for scheduler and
+        // socket polling jitter while rejecting a one-second or slower cadence.
+        assert.ok(end - start >= 1000 && end - start < 3500, 'Four host intervals took ' + (end - start) + ' ms.');
+        assert.ok(samples.some(({ data }) => Number.isFinite(data.server.cpu_percent) &&
+            Number.isFinite(data.server.upload_rate) && Number.isFinite(data.server.download_rate)));
+        if (last.server.memory_history.length < historyLimit) {
+            assert.ok(last.server.memory_history.length - first.server.memory_history.length >= 4);
+            for (const [, historyKey] of metricHistories) {
+                assert.deepEqual(last.server[historyKey].slice(0, first.server[historyKey].length),
+                    first.server[historyKey]);
+            }
+        }
+
+        const demoChanges = samples.slice(1).filter(({ data }, index) =>
+            !isDeepStrictEqual(samples[index].data.users, data.users));
+        assert.ok(demoChanges.length <= 1, 'Host sampling does not accelerate simulated user traffic.');
+        const next = demoChanges.length ? last : (await nextPreviewSnapshot(socket, frame =>
+            !isDeepStrictEqual(last.users, frame.data.users), 6500)).data;
+        const selected = next.users.find(user => user.enabled && (user.upload_rate > 0 || user.download_rate > 0));
+        assert.ok(selected, 'A sample user is generating simulated traffic.');
+        const disabled = await requestPreview(socket, 'set_user_enabled', { id: selected.id, enabled: false });
+        assert.equal(disabled.ok, true);
+        assert.equal(disabled.data.users.find(user => user.id === selected.id).upload_rate, 0);
+        assert.equal(disabled.data.users.find(user => user.id === selected.id).download_rate, 0);
+        assertHostHistory(disabled.data.server);
+        await assertLinuxNetworkTotals(disabled.data.server);
+        // If both frames came from the same uncapped sample, a user action must
+        // leave every recorded reading and the cumulative counters unchanged.
+        if (next.server.memory_history.length === disabled.data.server.memory_history.length &&
+            next.server.memory_history.length < historyLimit) {
+            for (const [key, historyKey] of metricHistories) {
+                assert.equal(disabled.data.server[key], next.server[key]);
+                assert.deepEqual(disabled.data.server[historyKey], next.server[historyKey]);
+            }
+            assert.equal(disabled.data.server.download_total, next.server.download_total);
+            assert.equal(disabled.data.server.upload_total, next.server.upload_total);
+        }
+
+        const overview = await readOverview(t);
+        const restored = await requestPreview(socket, 'set_user_enabled', { id: selected.id, enabled: true });
+        assert.equal(restored.ok, true);
+        const history = restored.data.server.download_history;
+        const readings = overview.download_mib_per_second;
+        assert.ok(history.some((_, index) =>
+            isDeepStrictEqual(history.slice(index, index + readings.length), readings)),
+            'The Overview download samples are part of the shared host history.');
+    });
+
 test('publishes populated preview data and shares user changes and logs across browsers', async t => {
     const { socket, initial } = await connectPreview(t);
     const observer = await connectPreview(t);
@@ -259,9 +417,7 @@ test('publishes populated preview data and shares user changes and logs across b
     assert.ok(initial.users.some(user => user.upload_rate > 0 && user.download_total > 0));
     assert.equal(initial.server.users_total, initial.users.length);
     assert.equal(initial.server.users_enabled, initial.users.filter(user => user.enabled).length);
-    for (const series of ['cpu', 'memory', 'upload', 'download']) {
-        assert.ok(initial.server[`${series}_history`].length > 10);
-    }
+    assertHostHistory(initial.server);
     assert.ok(initial.logs.some(log => log.message.includes('WaterWall is disconnected')));
     assert.ok(initial.topology.nodes.length > 0 && initial.topology.links.length > 0);
     assert.ok(initial.topology.routes.length > 0);
@@ -382,9 +538,7 @@ test('simulates core lifecycle and panel version changes independently', async t
     const stopped = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'stopped');
     const stop = await change('stop_core', {}, true, 'stopped');
     assert.equal((await stopped).data.server.core.state, 'stopped');
-    for (const series of ['cpu', 'memory', 'upload', 'download']) {
-        assert.equal(stop.data.server[`${series}_history`].length, 19, 'Preview charts still report samples.');
-    }
+    assertHostHistory(stop.data.server);
     for (const action of ['stop_core', 'pause_core', 'resume_core']) {
         await change(action, {}, false, 'stopped');
     }

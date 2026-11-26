@@ -212,8 +212,8 @@ supported. Overlay scrollbars use the browser's native appearance.
 
 Server Status shows CPU and Memory in the top row when the work pane is
 wide enough. Server Information and Panel Controls each have their own card
-under CPU, beside Traffic. When space is tight, the five cards stack in order
-from CPU and Memory through Server Information, Panel Controls, and Traffic.
+under CPU, beside Host Network. When space is tight, the five cards stack in order
+from CPU and Memory through Server Information, Panel Controls, and Host Network.
 Each plot shows current readings in a legend inside its upper-left corner.
 On a phone, swipe through the cards to reach Logs.
 At short desktop heights, scroll inside the work pane to see the rest of
@@ -259,19 +259,29 @@ into `bot`. Requests can update `notifications`, `allow_status`,
 `allow_config`, `notification_rules`, and `permissions` independently of
 `overrides`.
 
-Other connected browsers receive the shared updates. Server Status plots CPU
-on a 0–100% scale, memory usage against capacity in GiB, and upload and download
-together in MiB/s. The charts keep up to 19 samples in time order. The
-preview adds a sample about every five seconds and draws the latest one
-at **Now**. Hover over a plot for its sample values. User changes that affect
-traffic can update the latest rates between samples. Restarting the
-process restores the sample data. The console and bot actions run as
-in-memory demonstrations.
+Other connected browsers receive the shared preview updates. Simulated user
+traffic updates about every five seconds. Bot actions run in memory.
+
+Wave samples Linux CPU, RAM, and network counters twice per second,
+including when browsers are disconnected. CPU shows aggregate busy time
+since the previous reading on a 0–100% scale. Memory shows
+`MemTotal - MemAvailable` against total usable RAM in GiB. Host Network uses
+receive and transmit byte counters from non-loopback interfaces visible to
+Wave. It calculates rates from counter changes on matching interfaces over
+the measured interval and uses KiB/s for small rates. Its sent and received
+totals reflect the current interface counters. Stacked virtual interfaces can
+count traffic on more than one link. [Linux procfs](https://docs.kernel.org/filesystems/proc.html), [Linux interface statistics](https://docs.kernel.org/networking/statistics.html)
+
+CPU and network rates become available after the first sampling interval.
+Unavailable readings appear as gaps after a chart has data. The charts keep
+up to 19 samples in memory and draw the latest one at **Now**. Hover over
+a plot for its sample values. History starts fresh when Wave restarts.
 
 The authenticated `/ws/overview` endpoint sends one JSON text frame and closes
-the connection. Its fixed fixture contains `cpu_percent`, `memory_used_gib`,
-`memory_total_gib`, `uptime_minutes`, and `download_mib_per_second`. The last
-field contains 13 samples taken five minutes apart, oldest first.
+the connection. It reports the same current `cpu_percent`, `memory_used_gib`,
+`memory_total_gib`, and `uptime_minutes` as the workspace. Its
+`download_mib_per_second` array contains up to 13 recent download samples,
+oldest first.
 
 With the default HTTP listener, open `http://<server-ip>:2045/` from another
 machine to reach the sign-in page. [HTTPS configuration](authentication.md#configure-tls)

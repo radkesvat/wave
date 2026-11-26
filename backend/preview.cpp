@@ -2,6 +2,7 @@
 
 #include "auth.h"
 #include "core_config_name.h"
+#include "linux_metrics.h"
 #include "preview_backup.h"
 
 #include <httplib.h>
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <iomanip>
 #include <limits>
@@ -19,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 namespace wave {
@@ -27,7 +30,8 @@ namespace {
 using Json = nlohmann::json;
 using namespace std::chrono_literals;
 
-constexpr auto update_interval = 5s;
+constexpr auto host_sample_interval = 500ms;
+constexpr auto user_update_interval = 5s;
 constexpr std::size_t max_request_bytes = 8192;
 constexpr std::size_t max_users = 128;
 constexpr std::size_t max_topology_nodes = 64;
@@ -101,20 +105,8 @@ Json make_core()
 
 Json make_server()
 {
-    const Json cpu = {21, 24, 23, 30, 28, 37, 31, 44, 42, 35, 33, 46, 37, 30, 34, 39, 35, 32, 28};
-    const Json memory = {2.3, 2.5, 2.7, 2.6, 2.8, 2.9, 2.7, 3.0, 3.2, 3.4, 3.1, 3.2, 3.3, 3.5,
-                         3.4, 3.6, 3.3, 3.3, 3.2};
-    const Json upload = {3.8, 4.1, 5.6, 4.9, 7.2, 8.4, 6.8, 5.2, 7.0, 7.8, 9.9, 8.5, 8.8, 9.1,
-                         7.4, 6.1, 6.4, 7.5, 8.2};
-    const Json download = {11.8, 15.6, 13.5, 14.4, 17.1, 14.8, 22.6, 18.4, 21.9, 16.7, 20.6, 24.3,
-                           18.1, 17.8, 19.9, 20.4, 21.8, 19.5, 18.3};
-    return {{"name", "Wave Preview"}, {"version", "0.1.0-preview"}, {"platform", "Linux x86_64"},
+    return {{"version", "0.1.0-preview"},
             {"available_panel_versions", {"0.1.0-preview", "0.2.0-preview", "0.3.0-preview"}},
-            {"region", "Frankfurt, DE"}, {"cpu_cores", 8}, {"uptime_minutes", 6203},
-            {"memory_total_gib", 8.0}, {"memory_used_gib", memory.back()}, {"cpu_percent", cpu.back()},
-            {"upload_rate", upload.back()}, {"download_rate", download.back()},
-            {"upload_total", 845.2}, {"download_total", 3342.7}, {"cpu_history", cpu},
-            {"memory_history", memory}, {"upload_history", upload}, {"download_history", download},
             {"core", make_core()}};
 }
 
@@ -198,7 +190,7 @@ Json make_data()
 {
     return {{"users", make_users()}, {"users_live", true}, {"logs", Json::array({
                 {{"ts", "09:41:02"}, {"level", "info"}, {"message", "Wave preview started."}},
-                {{"ts", "09:41:03"}, {"level", "success"}, {"message", "Loaded sample users and traffic history."}},
+                {{"ts", "09:41:03"}, {"level", "success"}, {"message", "Loaded sample users."}},
                 {{"ts", "09:41:04"}, {"level", "warning"}, {"message", "WaterWall is disconnected."}},
                 {{"ts", "09:41:06"}, {"level", "info"}, {"message", "Loaded the sample topology and bot settings."}},
                 {{"ts", "09:41:10"}, {"level", "success"}, {"message", "Preview workspace is ready."}},
@@ -371,14 +363,47 @@ class Preview {
 public:
     Preview()
     {
-        sync_server();
+        host_.sample(data_["server"]);
+        sync_user_counts();
+        sampler_ = std::jthread([this](std::stop_token stop) {
+            std::unique_lock lock(mutex_);
+            auto sampled_at = std::chrono::steady_clock::now();
+            auto next_user_update = sampled_at + user_update_interval;
+            while (!stop.stop_requested()) {
+                timer_.wait_until(lock, stop, sampled_at + host_sample_interval, [] { return false; });
+                if (stop.stop_requested()) {
+                    return;
+                }
+                sampled_at = std::chrono::steady_clock::now();
+                host_.sample(data_["server"]);
+                if (sampled_at >= next_user_update) {
+                    update_sample_users();
+                    next_user_update = sampled_at + user_update_interval;
+                }
+                ++revision_;
+            }
+        });
+    }
+
+    std::string overview()
+    {
+        std::lock_guard lock(mutex_);
+        const auto& server = data_["server"];
+        const auto& downloads = server["download_history"];
+        const auto count = std::min<std::size_t>(13, downloads.size());
+        return Json{{"cpu_percent", server["cpu_percent"]},
+                    {"memory_used_gib", server["memory_used_gib"]},
+                    {"memory_total_gib", server["memory_total_gib"]},
+                    {"uptime_minutes", server["uptime_minutes"]},
+                    {"download_mib_per_second", Json(downloads.end() - count, downloads.end())}}
+            .dump();
     }
 
     void serve(httplib::ws::WebSocket& socket, const std::function<bool()>& session)
     {
         // Only this handler writes to its socket. A short read timeout lets it
         // publish shared state changes while the current browser is idle.
-        socket.set_read_timeout(400ms);
+        socket.set_read_timeout(100ms);
         std::uint64_t sent_revision = 0;
         if (!session() || !socket.send(changed_snapshot(sent_revision))) {
             return;
@@ -408,7 +433,6 @@ private:
     std::string changed_snapshot(std::uint64_t& sent_revision)
     {
         std::lock_guard lock(mutex_);
-        tick();
         if (revision_ == sent_revision) {
             return {};
         }
@@ -436,12 +460,11 @@ private:
             : std::string_view{};
 
         std::lock_guard lock(mutex_);
-        tick();
         const auto reply = action.empty()
             ? Reply{false, "Send a JSON preview action."}
             : dispatch(action, request);
         if (reply.changed) {
-            sync_server();
+            sync_user_counts();
             ++revision_;
         }
         auto frame = snapshot();
@@ -473,75 +496,49 @@ private:
         return {true, std::move(feedback), true};
     }
 
-    void sync_server()
+    void sync_user_counts()
     {
         auto& server = data_["server"];
         unsigned enabled = 0;
         unsigned active = 0;
-        double upload_rate = 0.0;
-        double download_rate = 0.0;
-        double upload_total = 0.0;
-        double download_total = 0.0;
         for (const auto& user : data_["users"]) {
             enabled += user["enabled"].get<bool>();
             const auto up = user["upload_rate"].get<double>();
             const auto down = user["download_rate"].get<double>();
             active += up > 0 || down > 0;
-            upload_rate += up;
-            download_rate += down;
-            upload_total += user["upload_total"].get<double>();
-            download_total += user["download_total"].get<double>();
         }
         server["users_total"] = data_["users"].size();
         server["users_enabled"] = enabled;
         server["users_active"] = active;
         server["users_online"] = active;
-        server["upload_total"] = upload_total;
-        server["download_total"] = download_total;
-        server["upload_rate"] = upload_rate;
-        server["download_rate"] = download_rate;
-        server["upload_history"].back() = upload_rate;
-        server["download_history"].back() = download_rate;
     }
 
     void update_rates(Json& user)
     {
-        const auto phase = user["id"].get<unsigned>() + tick_count_;
+        const auto phase = user["id"].get<unsigned>() + user_ticks_;
         const bool active = user["enabled"] == true && user["remaining_minutes"] != 0 && phase % 6 != 0;
         user["upload_rate"] = active ? (phase * 7 % 30 + 1) / 10.0 : 0.0;
         user["download_rate"] = active ? (phase * 13 % 57 + 2) / 10.0 : 0.0;
     }
 
-    void tick()
+    void update_sample_users()
     {
-        const auto now = std::chrono::steady_clock::now();
-        if (now < next_tick_) {
-            return;
-        }
-        next_tick_ = now + update_interval;
-        ++tick_count_;
-        auto& server = data_["server"];
-        server["uptime_minutes"] = 6203 + tick_count_ / 12;
-        server["cpu_percent"] = 22 + tick_count_ * 7 % 33;
-        server["memory_used_gib"] = 2.8 + (tick_count_ * 3 % 11) / 10.0;
-        append_bounded(server["cpu_history"], server["cpu_percent"], 19);
-        append_bounded(server["memory_history"], server["memory_used_gib"], 19);
-        append_bounded(server["upload_history"], server["upload_rate"], 19);
-        append_bounded(server["download_history"], server["download_rate"], 19);
+        ++user_ticks_;
+        constexpr auto ticks_per_minute = 1min / user_update_interval;
+        constexpr double seconds = std::chrono::duration<double>(user_update_interval).count();
         if (data_["users_live"] == true) {
             for (auto& user : data_["users"]) {
-                if (tick_count_ % 12 == 0 && user["remaining_minutes"] > 0) {
+                if (user_ticks_ % ticks_per_minute == 0 && user["remaining_minutes"] > 0) {
                     user["remaining_minutes"] = user["remaining_minutes"].get<int>() - 1;
                 }
                 update_rates(user);
                 user["upload_total"] = user["upload_total"].get<double>() +
-                    user["upload_rate"].get<double>() * 5.0 / 1024.0;
+                    user["upload_rate"].get<double>() * seconds / 1024.0;
                 user["download_total"] = user["download_total"].get<double>() +
-                    user["download_rate"].get<double>() * 5.0 / 1024.0;
+                    user["download_rate"].get<double>() * seconds / 1024.0;
             }
         }
-        sync_server();
-        ++revision_;
+        sync_user_counts();
     }
 
     Json::iterator find_user(const Json& input)
@@ -820,7 +817,9 @@ private:
         } else if (command == "status") {
             output = "Preview process ready. WaterWall is disconnected.";
         } else if (command == "uptime") {
-            output = "Sample uptime: " + std::to_string(data_["server"]["uptime_minutes"].get<unsigned>()) + " minutes.";
+            const auto& uptime = data_["server"]["uptime_minutes"];
+            output = uptime.is_number() ? "Host uptime: " + std::to_string(uptime.get<std::uint64_t>()) + " minutes."
+                                        : "Host uptime is unavailable.";
         } else if (command == "users") {
             output = std::to_string(data_["users"].size()) + " sample users.";
         } else if (command == "whoami") {
@@ -1004,22 +1003,35 @@ private:
     }
 
     std::mutex mutex_;
+    std::condition_variable_any timer_;
+    LinuxMetrics host_;
     Json data_ = make_data();
     int next_user_id_ = static_cast<int>(data_["users"].size()) + 1;
     std::uint64_t next_node_id_ = 1;
     int next_config_id_ = 3;
     std::uint64_t revision_ = 1;
-    std::uint64_t tick_count_ = 0;
+    std::uint64_t user_ticks_ = 0;
     unsigned log_sequence_ = 0;
-    std::chrono::steady_clock::time_point next_tick_ = std::chrono::steady_clock::now() + update_interval;
+    std::jthread sampler_;
 };
 
 } // namespace
 
-void configure_preview_route(httplib::Server& server, std::shared_ptr<AuthStore> store)
+void configure_preview_routes(httplib::Server& server, std::shared_ptr<AuthStore> store)
 {
+    const auto preview = std::make_shared<Preview>();
+    server.WebSocket("/ws/overview", [preview, store](const httplib::Request& req,
+                                                     httplib::ws::WebSocket& socket) {
+        if (!websocket_session(store, req)()) {
+            socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
+            return;
+        }
+        if (socket.send(preview->overview())) {
+            socket.close();
+        }
+    });
     server.WebSocket("/ws/preview",
-                    [preview = std::make_shared<Preview>(), store = std::move(store)](
+                    [preview, store = std::move(store)](
                         const httplib::Request& req, httplib::ws::WebSocket& socket) {
                         preview->serve(socket, websocket_session(store, req));
                     });

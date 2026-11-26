@@ -19,52 +19,43 @@ using theme::packed;
 constexpr float gutter = 12;
 constexpr ImVec2 card_padding{10, 8};
 constexpr float minimum_plot_height = 134;
+constexpr char unavailable[] = "Unavailable";
 
-using InfoRows = std::array<std::pair<const char*, std::string>, 10>;
-
-double current_sample(const Json& server, std::string_view key, const Json& history)
-{
-    return numeric_field(server, key, history.empty() ? 0 : number(history.back()));
-}
+using InfoRows = std::array<std::pair<const char*, std::string>, 9>;
 
 struct StatusSamples {
     const Json& cpu;
     const Json& memory;
     const Json& upload;
     const Json& download;
-    double cpu_now;
-    double memory_now;
-    double memory_capacity;
-    double upload_now;
-    double download_now;
+    std::optional<double> cpu_now;
+    std::optional<double> memory_now;
+    std::optional<double> memory_capacity;
+    std::optional<double> upload_now;
+    std::optional<double> download_now;
 
     explicit StatusSamples(const Json& server)
         : cpu(array_field(server, "cpu_history")), memory(array_field(server, "memory_history")),
           upload(array_field(server, "upload_history")), download(array_field(server, "download_history")),
-          cpu_now(current_sample(server, "cpu_percent", cpu)),
-          memory_now(current_sample(server, "memory_used_gib", memory)),
-          memory_capacity(numeric_field(server, "memory_total_gib")),
-          upload_now(current_sample(server, "upload_rate", upload)),
-          download_now(current_sample(server, "download_rate", download))
+          cpu_now(status_metric(field(server, "cpu_percent"))),
+          memory_now(status_metric(field(server, "memory_used_gib"))),
+          memory_capacity(status_metric(field(server, "memory_total_gib"))),
+          upload_now(status_metric(field(server, "upload_rate"))),
+          download_now(status_metric(field(server, "download_rate")))
     {
     }
 
     std::string cpu_value() const
     {
-        return std::format("{:.1f}%", cpu_now);
+        return cpu_now ? std::format("{:.1f}%", *cpu_now) : unavailable;
     }
     std::string memory_value() const
     {
-        return memory_capacity > 0 ? std::format("{:.1f} / {:.1f} GiB", memory_now, memory_capacity)
-                                   : std::format("{:.1f} GiB", memory_now);
-    }
-    std::string upload_value() const
-    {
-        return std::format("Upload {:.1f} MiB/s", upload_now);
-    }
-    std::string download_value() const
-    {
-        return std::format("Download {:.1f} MiB/s", download_now);
+        if (!memory_now) {
+            return unavailable;
+        }
+        return memory_capacity ? std::format("{:.1f} / {:.1f} GiB", *memory_now, *memory_capacity)
+                               : std::format("{:.1f} GiB", *memory_now);
     }
 };
 
@@ -72,34 +63,54 @@ double largest_sample(const Json& samples, double peak)
 {
     const auto first = samples.size() - std::min(samples.size(), status_history_capacity);
     for (std::size_t i = first; i < samples.size(); ++i) {
-        peak = std::max(peak, number(samples[i]));
+        if (const auto sample = status_metric(samples[i])) {
+            peak = std::max(peak, *sample);
+        }
     }
     return peak;
 }
 
-double traffic_ceiling(const StatusSamples& samples)
+StatusScale traffic_scale(const StatusSamples& samples)
 {
-    const double current_peak = std::max(samples.upload_now, samples.download_now);
+    const double current_peak = std::max(samples.upload_now.value_or(0), samples.download_now.value_or(0));
     const double peak = largest_sample(samples.download, largest_sample(samples.upload, current_peak));
-    return std::max(4.0, 4.0 * std::ceil(peak / 4.0));
+    if (peak == 0) {
+        return {"MiB/s", 0.25};
+    }
+    const bool use_kib = peak < 0.1;
+    const double multiplier = use_kib ? 1024 : 1;
+    const double rate = peak * multiplier;
+    const double increment = rate >= 4 ? 4 : std::pow(10.0, std::floor(std::log10(rate)));
+    return {use_kib ? "KiB/s" : "MiB/s", increment * std::ceil(rate / increment), multiplier};
+}
+
+std::string traffic_reading(std::string_view name, std::optional<double> value, StatusScale scale)
+{
+    const auto reading = value ? format_status_reading(*value * scale.multiplier, scale.unit) : "unavailable";
+    return std::format("{} {}", name, reading);
 }
 
 InfoRows server_information(const Json& server, const StatusSamples& samples)
 {
     const int uptime = integer_field(server, "uptime_minutes");
-    return {
-        {{"Name", std::string(string_field(server, "name", "Wave sample"))},
-         {"Region", std::string(string_field(server, "region", "Preview"))},
-         {"Platform", std::string(string_field(server, "platform", "Demo"))},
-         {"Panel version", std::string(string_field(server, "version", "Unavailable"))},
-         {"Uptime", std::format("{}d {}h {}m", uptime / 1440, uptime / 60 % 24, uptime % 60)},
-         {"CPU cores", std::to_string(integer_field(server, "cpu_cores", 4))},
-         {"Memory", samples.memory_value()},
-         {"Users", std::format("{} total, {} enabled, {} online", integer_field(server, "users_total"),
-                               integer_field(server, "users_enabled"),
-                               integer_field(server, "users_online", integer_field(server, "users_active")))},
-         {"Total upload", std::format("{:.1f} GiB", numeric_field(server, "upload_total"))},
-         {"Total download", std::format("{:.1f} GiB", numeric_field(server, "download_total"))}}};
+    const auto sent = status_metric(field(server, "upload_total"));
+    const auto received = status_metric(field(server, "download_total"));
+    return {{{"Host name", std::string(string_field(server, "name", unavailable))},
+             {"Platform", std::string(string_field(server, "platform", unavailable))},
+             {"Panel version", std::string(string_field(server, "version", unavailable))},
+             {"Uptime", status_metric(field(server, "uptime_minutes"))
+                            ? std::format("{}d {}h {}m", uptime / 1440, uptime / 60 % 24, uptime % 60)
+                            : unavailable},
+             {"Logical CPUs", status_metric(field(server, "cpu_cores"))
+                                  ? std::to_string(integer_field(server, "cpu_cores"))
+                                  : unavailable},
+             {"Memory", samples.memory_value()},
+             {"Sample users",
+              std::format("{} total, {} enabled, {} online", integer_field(server, "users_total"),
+                          integer_field(server, "users_enabled"),
+                          integer_field(server, "users_online", integer_field(server, "users_active")))},
+             {"Host sent", sent ? std::format("{:.1f} GiB", *sent) : unavailable},
+             {"Host received", received ? std::format("{:.1f} GiB", *received) : unavailable}}};
 }
 
 float text_width(std::string_view text)
@@ -196,10 +207,10 @@ bool begin_card(const char* title, ImVec2 pos, ImVec2 size)
 }
 
 void chart_card(const char* title, ImVec2 pos, ImVec2 size, const StatusTicks& ticks, float left_gutter,
-                const char* unit, double ceiling, std::initializer_list<StatusSeries> series)
+                StatusScale scale, std::initializer_list<StatusSeries> series)
 {
     if (begin_card(title, pos, size)) {
-        render_status_plot(ticks, left_gutter, unit, ceiling,
+        render_status_plot(ticks, left_gutter, scale,
                            std::max(minimum_plot_height, ImGui::GetContentRegionAvail().y), series);
     }
     ImGui::EndChild();
@@ -216,13 +227,15 @@ float render_server_status(const Json& server, PanelControlsState& controls, Pre
                            bool stacked)
 {
     const StatusSamples samples(server);
-    const double memory_ceiling = samples.memory_capacity > 0
-                                      ? samples.memory_capacity
-                                      : largest_sample(samples.memory, std::max(1.0, samples.memory_now));
-    const double traffic_maximum = traffic_ceiling(samples);
-    const auto cpu_ticks = status_ticks(100);
-    const auto memory_ticks = status_ticks(memory_ceiling);
-    const auto traffic_ticks = status_ticks(traffic_maximum);
+    constexpr StatusScale cpu_scale{"%", 100};
+    const double capacity = samples.memory_capacity.value_or(0);
+    const StatusScale memory_scale{
+        "GiB", capacity > 0 ? capacity
+                            : largest_sample(samples.memory, std::max(1.0, samples.memory_now.value_or(0)))};
+    const auto network_scale = traffic_scale(samples);
+    const auto cpu_ticks = status_ticks(cpu_scale.ceiling);
+    const auto memory_ticks = status_ticks(memory_scale.ceiling);
+    const auto traffic_ticks = status_ticks(network_scale.ceiling);
     const float axis_gutter = std::max(
         {status_axis_gutter(cpu_ticks), status_axis_gutter(memory_ticks), status_axis_gutter(traffic_ticks)});
     const ImVec2 available = ImGui::GetContentRegionAvail();
@@ -258,10 +271,10 @@ float render_server_status(const Json& server, PanelControlsState& controls, Pre
     const float controls_x = stacked ? start.x : start.x + information_width + gutter;
     const float controls_y = stacked ? info_y + info_height + gutter : info_y;
     const float traffic_y = stacked ? controls_y + controls_height + gutter : info_y;
-    chart_card("CPU", start, {left_width, cpu_height}, cpu_ticks, axis_gutter, "%", 100,
+    chart_card("CPU", start, {left_width, cpu_height}, cpu_ticks, axis_gutter, cpu_scale,
                {{samples.cpu, "CPU", Color::accent, samples.cpu_value()}});
-    chart_card("Memory", {right_x, memory_y}, {right_width, memory_height}, memory_ticks, axis_gutter, "GiB",
-               memory_ceiling, {{samples.memory, "Memory", Color::info, samples.memory_value()}});
+    chart_card("Memory", {right_x, memory_y}, {right_width, memory_height}, memory_ticks, axis_gutter,
+               memory_scale, {{samples.memory, "Memory", Color::info, samples.memory_value()}});
     if (begin_card("Server Information", {start.x, info_y}, {information_width, info_height})) {
         draw_information(info, information);
     }
@@ -270,18 +283,22 @@ float render_server_status(const Json& server, PanelControlsState& controls, Pre
         render_panel_controls(controls, session, controls_body, !stacked);
     }
     ImGui::EndChild();
-    chart_card("Traffic", {right_x, traffic_y}, {right_width, traffic_height}, traffic_ticks, axis_gutter,
-               "MiB/s", traffic_maximum,
-               {{samples.upload, "Upload", Color::info, samples.upload_value()},
-                {samples.download, "Download", Color::accent, samples.download_value()}});
+    chart_card("Host Network", {right_x, traffic_y}, {right_width, traffic_height}, traffic_ticks,
+               axis_gutter, network_scale,
+               {{samples.upload, "Upload", Color::info,
+                 traffic_reading("Upload", samples.upload_now, network_scale)},
+                {samples.download, "Download", Color::accent,
+                 traffic_reading("Download", samples.download_now, network_scale)}});
     return traffic_y + traffic_height - start.y;
 }
 
 std::string describe_server_status(const Json& server)
 {
     const StatusSamples samples(server);
-    return std::format("CPU {}. Memory {}. {}. {}.", samples.cpu_value(), samples.memory_value(),
-                       samples.upload_value(), samples.download_value());
+    const auto network_scale = traffic_scale(samples);
+    return std::format("CPU {}. Memory {}. Host network. {}. {}.", samples.cpu_value(),
+                       samples.memory_value(), traffic_reading("Upload", samples.upload_now, network_scale),
+                       traffic_reading("Download", samples.download_now, network_scale));
 }
 
 } // namespace wave

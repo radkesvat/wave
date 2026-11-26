@@ -1,7 +1,8 @@
 # Authentication and HTTPS
 
 Wave requires an administrator session for the workspace over HTTP and HTTPS.
-The workspace currently uses in-memory sample data.
+Server Status shows Linux host metrics. User records and other preview data
+live in memory.
 
 ## Build
 
