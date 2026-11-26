@@ -1,5 +1,6 @@
 #include "preview.h"
 
+#include "auth.h"
 #include "core_config_name.h"
 #include "preview_backup.h"
 
@@ -119,7 +120,7 @@ Json make_server()
 
 Json make_settings()
 {
-    return {{"name", "Wave Preview"}, {"admin_username", "demo"}, {"domain", "wave.example.invalid"},
+    return {{"domain", "wave.example.invalid"},
             {"certificate_path", "preview/server.crt"}, {"private_key_path", "preview/server.key"}};
 }
 
@@ -373,17 +374,21 @@ public:
         sync_server();
     }
 
-    void serve(httplib::ws::WebSocket& socket)
+    void serve(httplib::ws::WebSocket& socket, const std::function<bool()>& session)
     {
         // Only this handler writes to its socket. A short read timeout lets it
         // publish shared state changes while the current browser is idle.
         socket.set_read_timeout(400ms);
         std::uint64_t sent_revision = 0;
-        if (!socket.send(changed_snapshot(sent_revision))) {
+        if (!session() || !socket.send(changed_snapshot(sent_revision))) {
             return;
         }
         std::string message;
         while (const auto result = socket.read(message)) {
+            if (!session()) {
+                socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
+                return;
+            }
             const auto frame = result == httplib::ws::Timeout
                 ? changed_snapshot(sent_revision)
                 : handle_message(result == httplib::ws::Text ? std::string_view(message) : std::string_view{},
@@ -497,7 +502,6 @@ private:
         server["download_rate"] = download_rate;
         server["upload_history"].back() = upload_rate;
         server["download_history"].back() = download_rate;
-        server["name"] = data_["settings"]["name"];
     }
 
     void update_rates(Json& user)
@@ -831,36 +835,6 @@ private:
         return complete("Processed demo console input.", "info");
     }
 
-    Reply sign_in(const Json& input)
-    {
-        const auto username = input.find("username");
-        const auto password = input.find("password");
-        if (username == input.end() || !text_value(*username, 64, true) ||
-            password == input.end() || !text_value(*password, 96, true) ||
-            *username != data_["settings"]["admin_username"] || *password != demo_password_) {
-            log("warning", "Demo sign-in was unsuccessful.");
-            return {false, "Use the demo sign-in details shown on the form.", true};
-        }
-        return complete("Signed in to the preview.");
-    }
-
-    Reply setup(const Json& input)
-    {
-        const auto name = input.find("name");
-        const auto username = input.find("username");
-        const auto password = input.find("password");
-        if (name == input.end() || !text_value(*name, 80, true) ||
-            username == input.end() || !text_value(*username, 64, true) ||
-            password == input.end() || !text_value(*password, 96, true)) {
-            return {false, "Enter a panel name and valid demo credentials."};
-        }
-        auto& settings = data_["settings"];
-        settings["name"] = *name;
-        settings["admin_username"] = *username;
-        demo_password_ = password->get<std::string>();
-        return complete("Completed first-run preview setup.");
-    }
-
     Reply change_core_state(std::string_view action)
     {
         auto& state = data_["server"]["core"]["state"];
@@ -1023,15 +997,6 @@ private:
         if (action == "bot_action") {
             return bot_action(input);
         }
-        if (action == "sign_in") {
-            return sign_in(input);
-        }
-        if (action == "sign_out") {
-            return complete("Signed out of the preview.", "info");
-        }
-        if (action == "setup") {
-            return setup(input);
-        }
         if (action == "diagnostics") {
             return complete("Preview diagnostics completed. WaterWall is disconnected.", "info");
         }
@@ -1047,17 +1012,17 @@ private:
     std::uint64_t tick_count_ = 0;
     unsigned log_sequence_ = 0;
     std::chrono::steady_clock::time_point next_tick_ = std::chrono::steady_clock::now() + update_interval;
-    std::string demo_password_ = "wave-demo";
 };
 
 } // namespace
 
-void configure_preview_route(httplib::Server& server)
+void configure_preview_route(httplib::Server& server, std::shared_ptr<AuthStore> store)
 {
-    server.WebSocket("/ws/preview", [preview = std::make_shared<Preview>()](const httplib::Request&,
-                                                                            httplib::ws::WebSocket& socket) {
-        preview->serve(socket);
-    });
+    server.WebSocket("/ws/preview",
+                    [preview = std::make_shared<Preview>(), store = std::move(store)](
+                        const httplib::Request& req, httplib::ws::WebSocket& socket) {
+                        preview->serve(socket, websocket_session(store, req));
+                    });
 }
 
 } // namespace wave

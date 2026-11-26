@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { execFile } = require('node:child_process');
-const { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } = require('node:fs/promises');
+const { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { dirname, join, resolve } = require('node:path');
 const { test } = require('node:test');
@@ -14,17 +14,15 @@ async function deployment(t) {
     const cwd = await mkdtemp(join(tmpdir(), 'wave-tls-test-'));
     t.after(() => rm(cwd, { recursive: true, force: true }));
     const backend = await copyBackend(resolve(process.env.WAVE_BACKEND), cwd);
-    const state = join(cwd, 'state');
     const site = join(cwd, 'site');
-    await mkdir(state, { mode: 0o700 });
     await mkdir(site);
     for (const name of ['index.html', 'index.js', 'index.wasm']) await writeFile(join(site, name), '');
     const pair = await tlsFixture(cwd);
     const config = join(dirname(backend), 'wave-db.json');
-    const args = ['--site-dir', site, '--auth-dir', state];
+    const args = ['--site-dir', site];
     const execute = (...extra) => run(backend, [...args, ...extra], { cwd, timeout });
     const writeConfig = (files = pair, domain = hostname) => writeTlsConfig(config, files, { domain });
-    return { cwd, state, site, pair, config, execute, writeConfig };
+    return { cwd, site, pair, config, execute, writeConfig };
 }
 
 async function rejectStartup(command, message, privateValues = []) {
@@ -38,12 +36,12 @@ async function rejectStartup(command, message, privateValues = []) {
 }
 
 test('concurrent starts save listener defaults and TLS validates without binding', async t => {
-    const { pair, config, state, execute, writeConfig } = await deployment(t);
+    const { cwd, pair, config, execute, writeConfig } = await deployment(t);
     await Promise.all(Array.from({ length: 4 }, () =>
-        rejectStartup(execute('--check-tls'), /TLS is disabled in wave-db.json/)));
+        rejectStartup(execute('--check-tls'), /TLS is disabled in wave-db.json|Another Wave process is using wave-db.json/)));
     assert.equal((await stat(config)).mode & 0o777, 0o600);
     const listen = { host: '0.0.0.0', port: 2045 };
-    assert.deepEqual(JSON.parse(await readFile(config, 'utf8')), { listen });
+    assert.deepEqual(JSON.parse(await readFile(config, 'utf8')), { listen, admin: [] });
 
     await writeFile(config, JSON.stringify({ tls: { enabled: false, domain: {}, private_key: 'unused' } }));
     await rejectStartup(execute('--check-tls'), /TLS is disabled in wave-db.json/);
@@ -52,16 +50,14 @@ test('concurrent starts save listener defaults and TLS validates without binding
     assert.deepEqual(saved.tls, {
         enabled: true, domain: hostname, certificate_chain: pair.chainPath, private_key: pair.keyPath,
     });
-    const settings = JSON.stringify({ ...saved, listen, panel_name: 'Fixture panel' }, null, 2);
+    const settings = JSON.stringify({ ...saved, listen, admin: [], panel_name: 'Fixture panel' }, null, 2);
     await writeFile(config, settings);
-    assert.equal((await execute('--check-tls', '--site-dir', join(state, 'no-frontend'))).stdout,
+    assert.equal((await execute('--check-tls', '--site-dir', join(cwd, 'no-frontend'))).stdout,
         'TLS configuration is valid.\n');
-    await rejectStartup(execute(), /First-run setup requires a private bootstrap-token/);
     assert.equal(await readFile(config, 'utf8'), settings);
     await writeFile(config, JSON.stringify({ ...saved, listen: { ...listen, port: 0 } }));
     await rejectStartup(execute(), /Set a fixed listen\.port/);
     await rejectStartup(execute('--configure-tls'), /Unknown option: --configure-tls/);
-    assert.deepEqual(await readdir(state), []);
 });
 
 test('authenticated startup rejects invalid hostnames, certificates, and keys before binding', async t => {
@@ -124,11 +120,8 @@ test('authenticated startup rejects invalid hostnames, certificates, and keys be
 });
 
 test('startup enforces private configuration permissions and locations', async t => {
-    const { cwd, state, site, pair, config, execute, writeConfig } = await deployment(t);
+    const { cwd, site, pair, config, execute, writeConfig } = await deployment(t);
     await writeConfig();
-    await chmod(state, 0o755);
-    await rejectStartup(execute(), /directory must be owned by Wave's user with mode 0700/);
-    await chmod(state, 0o700);
 
     const backup = join(cwd, 'backup.json');
     await rename(config, backup);
@@ -143,7 +136,7 @@ test('startup enforces private configuration permissions and locations', async t
     await mkdir(checkout, { mode: 0o700 });
     await writeFile(join(checkout, '.git'), 'gitdir: fixture\n');
     await writeConfig();
-    await rejectStartup(execute('--auth-dir', checkout), /outside the Git checkout/);
+    await rejectStartup(execute('--auth-dir', checkout), /Unknown option: --auth-dir/);
     const keyInSite = join(site, 'fixture key.pem');
     await symlink(pair.keyPath, keyInSite);
     await writeConfig({ ...pair, keyPath: keyInSite });
@@ -171,8 +164,6 @@ test('TLS can be renewed through local symlinks and is revalidated on startup', 
     await rejectStartup(execute(), /private key does not match/);
     await repoint(keyPath, renewed.keyPath);
     assert.equal((await execute('--check-tls')).stdout, 'TLS configuration is valid.\n');
-    await rejectStartup(execute(), /First-run setup requires a private bootstrap-token/);
-
     await writeConfig(renewed);
     assert.equal((await execute('--check-tls')).stdout, 'TLS configuration is valid.\n');
     assert.deepEqual(JSON.parse(await readFile(config, 'utf8')).tls, {

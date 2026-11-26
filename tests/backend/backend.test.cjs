@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { execFile, spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } = require('node:fs/promises');
+const { request: httpRequest } = require('node:http');
 const { tmpdir } = require('node:os');
 const { basename, dirname, join } = require('node:path');
 const { createInterface } = require('node:readline');
@@ -23,6 +24,7 @@ let database;
 let server;
 let closed;
 let url;
+let cookie;
 
 before(async () => {
     assert.ok(sourceBackend, 'Run this test through a Wave backend CTest preset.');
@@ -75,31 +77,31 @@ test('startup persists the default listener in new and existing databases beside
     const freshBackend = join(cwd, 'fresh', basename(backend));
     const freshDatabase = join(dirname(freshBackend), 'wave-db.json');
     await mkdir(dirname(freshBackend));
-    await copyFile(sourceBackend, freshBackend);
+    await copyFile(backend, freshBackend);
     // Stop these starts before binding so the smoke suite only opens loopback sockets.
     const start = () => expectStartupFailure([], /Cannot access site directory.*web-release/, freshBackend);
     const defaults = { host: '0.0.0.0', port: 2045 };
     await start();
-    assert.deepEqual(JSON.parse(await readFile(freshDatabase, 'utf8')), { listen: defaults });
+    assert.deepEqual(JSON.parse(await readFile(freshDatabase, 'utf8')), { listen: defaults, admin: [] });
     const existing = { tls: { enabled: false }, panel_name: 'Test settings' };
     await writeFile(freshDatabase, JSON.stringify(existing));
     await start();
-    assert.deepEqual(JSON.parse(await readFile(freshDatabase, 'utf8')), { ...existing, listen: defaults });
+    assert.deepEqual(JSON.parse(await readFile(freshDatabase, 'utf8')), { ...existing, listen: defaults, admin: [] });
 
     for (const partial of [{ host: '127.0.0.1' }, { port: 8443 }]) {
         await writeFile(freshDatabase, JSON.stringify({ ...existing, listen: partial }));
         await start();
         assert.deepEqual(JSON.parse(await readFile(freshDatabase, 'utf8')), {
-            ...existing, listen: { ...defaults, ...partial },
+            ...existing, listen: { ...defaults, ...partial }, admin: [],
         });
     }
     await assert.rejects(stat(join(cwd, 'wave-db.json')), { code: 'ENOENT' });
     const response = await fetch(new URL('/wave-db.json', url), { signal: AbortSignal.timeout(timeout) });
-    assert.equal(response.status, 404);
+    assert.equal(response.status, 401);
     await response.arrayBuffer();
 });
 
-test('serves the site assets with caching disabled and returns 404 for a missing file', async () => {
+test('serves public entry assets with caching disabled', async () => {
     for (const path of ['/', '/index.html', '/index.js', '/index.wasm']) {
         const response = await fetch(new URL(path, url), { signal: AbortSignal.timeout(timeout) });
         assert.equal(response.status, 200, path);
@@ -109,33 +111,73 @@ test('serves the site assets with caching disabled and returns 404 for a missing
             assert.equal(response.headers.get('content-type'), 'application/wasm');
         }
     }
-
-    const missing = await fetch(new URL('/missing.js', url), { signal: AbortSignal.timeout(timeout) });
-    assert.equal(missing.status, 404);
-    await missing.arrayBuffer();
 });
 
-test('the HTTP demo serves no authenticated API or session cookie', async () => {
-    for (const action of ['setup', 'sign-in', 'sign-out']) {
-        const response = await fetch(new URL(`/api/auth/${action}`, url), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Wave-CSRF': '1', Origin: url.origin },
-            body: JSON.stringify({ username: 'fixture-user', password: 'fake demo test passphrase' }),
-            signal: AbortSignal.timeout(timeout),
+test('HTTP requires authentication and stores the administrator and JWT session in wave-db.json', async () => {
+    const credentials = { username: 'fixture-user', password: 'fake fixture test passphrase' };
+    const request = (path, options = {}) =>
+        fetch(new URL(path, url), { redirect: 'manual', signal: AbortSignal.timeout(timeout), ...options });
+    const post = (action, fields) => request(`/api/auth/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Wave-CSRF': '1', Origin: url.origin },
+        body: JSON.stringify(fields),
+    });
+    const files = (await readdir(cwd, { recursive: true })).sort();
+    assert.equal((await request('/panel')).headers.get('location'), '/setup');
+    assert.equal((await request('/api/session')).status, 401);
+    for (const path of ['/ws', '/ws/overview', '/ws/preview', '/ws/panel']) {
+        const status = await new Promise((resolve, reject) => {
+            const probe = httpRequest(new URL(path, url), {
+                headers: {
+                    Origin: url.origin, Connection: 'Upgrade', Upgrade: 'websocket',
+                    'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': Buffer.alloc(16).toString('base64'),
+                },
+                signal: AbortSignal.timeout(timeout),
+            });
+            probe.on('response', response => {
+                response.resume();
+                resolve(response.statusCode);
+            });
+            probe.on('upgrade', (_response, socket) => {
+                socket.destroy();
+                resolve(101);
+            });
+            probe.on('error', reject);
+            probe.end();
         });
-        assert.equal(response.status, 404);
-        assert.equal(response.headers.get('set-cookie'), null);
-        await response.arrayBuffer();
+        assert.equal(status, 401, path);
     }
-    const session = await fetch(new URL('/api/session', url), { signal: AbortSignal.timeout(timeout) });
-    assert.equal(session.status, 404);
-    await session.arrayBuffer();
+    assert.equal((await post('setup', credentials)).status, 201);
+    assert.equal((await post('setup', credentials)).status, 409);
+    assert.equal((await request('/panel')).headers.get('location'), '/sign-in');
+    const login = await post('sign-in', credentials);
+    assert.equal(login.status, 204);
+    const [value, ...attributes] = login.headers.get('set-cookie').split('; ');
+    assert.match(value, /^wave_session=[\w-]+\.[\w-]+\.[\w-]+$/);
+    assert.ok(attributes.includes('HttpOnly') && attributes.includes('SameSite=Strict'));
+    assert.ok(!attributes.includes('Secure'));
+    cookie = value;
+    const headers = { Cookie: cookie };
+    assert.equal((await (await request('/api/session', { headers })).json()).username, credentials.username);
+    assert.equal((await request('/missing.js', { headers })).status, 404);
+    assert.equal((await request('/wave-db.json', { headers })).status, 404);
+    const contents = await readFile(database, 'utf8');
+    const { admin, auth } = JSON.parse(contents);
+    assert.deepEqual(admin, [{ username: credentials.username, password: admin[0].password }]);
+    assert.match(admin[0].password, /^\$argon2id\$/);
+    assert.ok(!contents.includes(credentials.password));
+    assert.equal(auth.sessions.length, 1);
+    assert.deepEqual((await readdir(cwd, { recursive: true })).sort(), files);
 });
+
+function connectSocket(path) {
+    const endpoint = new URL(path, url);
+    endpoint.protocol = 'ws:';
+    return new WebSocket(endpoint, { headers: { Cookie: cookie, Origin: url.origin } });
+}
 
 test('echoes WebSocket text and closes the connection cleanly', async t => {
-    const wsUrl = new URL('/ws', url);
-    wsUrl.protocol = 'ws:';
-    const socket = new WebSocket(wsUrl);
+    const socket = connectSocket('/ws');
     t.after(() => socket.close());
     const signal = AbortSignal.timeout(timeout);
     await once(socket, 'open', { signal });
@@ -155,8 +197,6 @@ test('echoes WebSocket text and closes the connection cleanly', async t => {
 });
 
 test('sends one deterministic Overview snapshot as WebSocket text on each connection', async t => {
-    const wsUrl = new URL('/ws/overview', url);
-    wsUrl.protocol = 'ws:';
     const expected = {
         cpu_percent: 28,
         memory_used_gib: Math.fround(3.2),
@@ -167,7 +207,7 @@ test('sends one deterministic Overview snapshot as WebSocket text on each connec
     };
 
     for (let attempt = 0; attempt < 2; attempt++) {
-        const socket = new WebSocket(wsUrl);
+        const socket = connectSocket('/ws/overview');
         t.after(() => socket.close());
         const frames = [];
         socket.addEventListener('message', event => frames.push(event.data));
@@ -193,9 +233,7 @@ async function nextPreviewSnapshot(socket, matches = () => true) {
 }
 
 async function connectPreview(t) {
-    const wsUrl = new URL('/ws/preview', url);
-    wsUrl.protocol = 'ws:';
-    const socket = new WebSocket(wsUrl);
+    const socket = connectSocket('/ws/preview');
     t.after(() => socket.close());
     return { socket, initial: (await nextPreviewSnapshot(socket)).data };
 }
@@ -401,53 +439,19 @@ test('validates in-memory config changes and protects the active config', async 
     assert.deepEqual(await readdir(cwd), files, 'Preview config actions leave the backend working directory intact.');
 });
 
-test('validates preview setup and updates only the panel name and demo credentials', async t => {
+test('preview actions cannot change or expose the administrator credentials', async t => {
     const { socket, initial } = await connectPreview(t);
-    const tls = { domain: 'qa.example.invalid', certificate_path: 'preview/qa.crt', private_key_path: 'preview/qa.key' };
-    const saved = await requestPreview(socket, 'apply_settings', { settings: { ...tls,
-        name: 'Ignored name', admin_username: 'ignored-admin', password: 'ignored-password' } });
-    assert.equal(saved.ok, true, saved.feedback);
-    assert.deepEqual(saved.data.settings, { ...initial.settings, ...tls });
-
-    const setupCredentials = { username: 'preview-admin', password: 'demo-password' };
-    const fields = { name: 'Wave QA', ...setupCredentials };
-    for (const invalidFields of [
-        { name: undefined }, { name: '  ' }, { name: 'x'.repeat(81) },
-        { username: undefined }, { username: 4 }, { username: 'x'.repeat(65) },
-        { password: undefined }, { password: '\t ' }, { password: 'x'.repeat(97) },
-    ]) {
-        const rejected = await requestPreview(socket, 'setup', { ...fields, ...invalidFields });
-        assert.equal(rejected.ok, false, rejected.feedback);
-        assert.match(rejected.feedback, /panel name and valid demo credentials/);
-        assert.deepEqual(rejected.data.settings, saved.data.settings);
+    const saved = await readFile(database, 'utf8');
+    for (const action of ['setup', 'sign_in', 'sign_out']) {
+        const reply = await requestPreview(socket, action, { username: 'legacy-preview', password: 'preview-passphrase' });
+        assert.equal(reply.ok, false, action);
+        assert.deepEqual(reply.data.settings, initial.settings);
     }
-    const preservedSignIn = await requestPreview(socket, 'sign_in', {
-        username: initial.settings.admin_username, password: 'wave-demo',
-    });
-    assert.equal(preservedSignIn.ok, true, preservedSignIn.feedback);
-
-    const closing = once(socket, 'close', { signal: AbortSignal.timeout(timeout) });
-    socket.close(1000);
-    await closing;
-    const retry = await connectPreview(t);
-    assert.deepEqual(retry.initial.settings, saved.data.settings);
-    const setup = await requestPreview(retry.socket, 'setup', fields);
-    assert.equal(setup.ok, true, setup.feedback);
-    assert.match(setup.feedback, /Completed first-run preview setup/);
-    assert.equal(setup.data.server.name, 'Wave QA');
-    const expected = { ...saved.data.settings, name: 'Wave QA', admin_username: 'preview-admin' };
-    assert.deepEqual(setup.data.settings, expected);
-    assert.equal(setup.data.settings.password, undefined);
-    const withLegacyFields = await requestPreview(retry.socket, 'setup', {
-        ...fields, domain: 'ignored.example.invalid', certificate_path: 'ignored.crt', private_key_path: 'ignored.key',
-    });
-    assert.equal(withLegacyFields.ok, true, withLegacyFields.feedback);
-    assert.deepEqual(withLegacyFields.data.settings, expected);
-
-    const signIn = await requestPreview(retry.socket, 'sign_in', setupCredentials);
-    assert.equal(signIn.ok, true, signIn.feedback);
-    const invalid = await requestPreview(retry.socket, 'sign_in', { ...setupCredentials, password: 'wrong' });
-    assert.equal(invalid.ok, false);
+    for (const key of ['admin', 'admin_username', 'password', 'auth']) {
+        assert.equal(initial.settings[key], undefined);
+        assert.equal(initial[key], undefined);
+    }
+    assert.equal(await readFile(database, 'utf8'), saved);
 });
 
 test('validates TLS fields and partially updates the preview settings', async t => {
@@ -465,7 +469,7 @@ test('validates TLS fields and partially updates the preview settings', async t 
     assert.equal((await fetch(new URL('/', url))).status, 200);
 });
 
-test('restores preview backups atomically and preserves the active config and demo account', async t => {
+test('restores preview backups atomically and preserves the active config', async t => {
     const { socket, initial } = await connectPreview(t);
     const observer = await connectPreview(t);
     const files = await readdir(cwd);
@@ -597,23 +601,51 @@ test('rejects invalid command-line options', async () => {
     await expectStartupFailure(['--port', '2045'], /Unknown option.*--port/);
 });
 
-test('rejects invalid database listener values before binding', async t => {
-    const original = await readFile(database);
-    t.after(() => writeFile(database, original));
+async function isolatedBackend(name, settings = {}) {
+    const directory = join(cwd, name);
+    const executable = join(directory, basename(backend));
+    const db = join(directory, 'wave-db.json');
+    await mkdir(directory);
+    await copyFile(backend, executable);
+    await writeFile(db, JSON.stringify(settings), { mode: 0o600 });
+    return { executable, db };
+}
+
+test('rejects invalid database listener values before binding', async () => {
+    const { executable, db } = await isolatedBackend('invalid-listener');
     for (const port of ['2045', -1, 65536, 2 ** 40, 2045.5]) {
-        await writeFile(database, JSON.stringify({ listen: { port } }));
-        await expectStartupFailure(['--site-dir', siteDir], /listen\.port.*integer from 0 to 65535/);
+        await writeFile(db, JSON.stringify({ listen: { port } }));
+        await expectStartupFailure(['--site-dir', siteDir], /listen\.port.*integer from 0 to 65535/, executable);
     }
     for (const host of ['', 'host name', '127.0.0.1\0', null]) {
-        await writeFile(database, JSON.stringify({ listen: { host } }));
-        await expectStartupFailure(['--site-dir', siteDir], /listen\.host.*nonempty address/);
+        await writeFile(db, JSON.stringify({ listen: { host } }));
+        await expectStartupFailure(['--site-dir', siteDir], /listen\.host.*nonempty address/, executable);
     }
-    await writeFile(database, JSON.stringify({ listen: '127.0.0.1:2045' }));
-    await expectStartupFailure(['--site-dir', siteDir], /listen in wave-db.json must be a JSON object/);
+    await writeFile(db, JSON.stringify({ listen: '127.0.0.1:2045' }));
+    await expectStartupFailure(['--site-dir', siteDir], /listen in wave-db.json must be a JSON object/, executable);
+});
+
+test('rejects malformed manually configured Argon2id hashes before binding', async t => {
+    const fixtureHash = `$argon2id$v=19$m=65536,t=3,p=4$${'A'.repeat(22)}$${'A'.repeat(43)}`;
+    const { executable, db } = await isolatedBackend('invalid-admin');
+    for (const [label, password] of [
+        ['leading zero in the memory cost', fixtureHash.replace('$m=', '$m=0')],
+        ['noncanonical base64 padding bits', fixtureHash.slice(0, -1) + 'B'],
+        ['plaintext password', 'fixture plaintext password'],
+    ]) {
+        await t.test(label, async () => {
+            await writeFile(db, JSON.stringify({
+                listen: { host: '127.0.0.1', port: 0 }, admin: [{ username: 'fixture-operator', password }],
+            }));
+            await expectStartupFailure(['--site-dir', siteDir],
+                /administrator in wave-db.json requires a username and an Argon2id password hash/, executable);
+        });
+    }
 });
 
 test('fails before binding when the site or an asset is missing', async () => {
-    await expectStartupFailure([], /Cannot access site directory.*web-release/);
+    const { executable } = await isolatedBackend('missing-assets');
+    await expectStartupFailure([], /Cannot access site directory.*web-release/, executable);
     const incomplete = join(cwd, 'incomplete');
     await mkdir(incomplete);
     await writeFile(join(incomplete, 'index.html'), assets['index.html']);
@@ -621,15 +653,18 @@ test('fails before binding when the site or an asset is missing', async () => {
     await expectStartupFailure(
         ['--site-dir', incomplete],
         /Missing required site asset.*index\.wasm/,
+        executable,
     );
 });
 
-test('fails to bind to the configured port of an already running backend', async t => {
-    const original = await readFile(database);
-    t.after(() => writeFile(database, original));
-    await writeFile(database, JSON.stringify({ listen: { host: url.hostname, port: Number(url.port) } }));
+test('rejects concurrent access to the database or a port already in use', async () => {
+    await expectStartupFailure(['--site-dir', siteDir], /Another Wave process is using wave-db.json/);
+    const { executable } = await isolatedBackend('port-in-use', {
+        listen: { host: url.hostname, port: Number(url.port) },
+    });
     await expectStartupFailure(
         ['--site-dir', siteDir],
         new RegExp(`Could not bind to 127\\.0\\.0\\.1:${url.port}`),
+        executable,
     );
 });

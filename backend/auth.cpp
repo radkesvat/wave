@@ -17,8 +17,22 @@ using httplib::Response;
 using httplib::Server;
 using Decision = Server::HandlerResponse;
 
-constexpr std::string_view cookie_name = "__Host-wave_session=";
 constexpr std::string_view panel_socket = "/ws/panel";
+
+bool secure_transport(const Request& request)
+{
+#ifdef CPPHTTPLIB_SSL_ENABLED
+    return request.ssl != nullptr;
+#else
+    static_cast<void>(request);
+    return false;
+#endif
+}
+
+std::string_view cookie_name(bool secure)
+{
+    return secure ? "__Host-wave_session=" : "wave_session=";
+}
 
 bool exact_header(const Request& request, const char* name, std::string_view value)
 {
@@ -32,6 +46,7 @@ std::string session_cookie(const Request& request)
     }
     const auto header = request.get_header_value("Cookie");
     std::string_view cookies = header;
+    const auto name = cookie_name(secure_transport(request));
     std::string_view token;
     bool found = false;
     while (!cookies.empty()) {
@@ -40,12 +55,12 @@ std::string session_cookie(const Request& request)
         const auto first = cookie.find_first_not_of(" \t");
         if (first != cookie.npos) {
             cookie.remove_prefix(first);
-            if (cookie.starts_with(cookie_name)) {
+            if (cookie.starts_with(name)) {
                 if (found) {
                     return {};
                 }
                 found = true;
-                token = cookie.substr(cookie_name.size());
+                token = cookie.substr(name.size());
             }
         }
         if (delimiter == cookies.npos) {
@@ -56,10 +71,13 @@ std::string session_cookie(const Request& request)
     return token.size() <= 1024 ? std::string(token) : std::string{};
 }
 
-void set_cookie(Response& response, std::string_view token)
+void set_cookie(Response& response, bool secure, std::string_view token)
 {
-    auto value = std::string(cookie_name) + std::string(token) +
-                 "; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=";
+    auto value = std::string(cookie_name(secure)) + std::string(token) + "; Path=/";
+    if (secure) {
+        value += "; Secure";
+    }
+    value += "; HttpOnly; SameSite=Strict; Max-Age=";
     value += token.empty() ? "0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
                            : std::to_string(AuthStore::session_seconds);
     response.set_header("Set-Cookie", value);
@@ -95,11 +113,16 @@ Json session_data(const AuthStore::Session& session)
 
 } // namespace
 
-void configure_authenticated_routes(Server& server, const std::filesystem::path& site_dir,
-                                    const std::filesystem::path& state_dir, const std::string& authority)
+std::function<bool()> websocket_session(const std::shared_ptr<AuthStore>& store,
+                                        const Request& request)
 {
-    const auto origin = "https://" + authority;
-    const auto store = std::make_shared<AuthStore>(state_dir);
+    return [store, token = session_cookie(request)] { return store->session(token).has_value(); };
+}
+
+void configure_authenticated_routes(Server& server, const std::filesystem::path& site_dir,
+                                    std::shared_ptr<AuthStore> store, bool secure,
+                                    const std::string& authority)
+{
     server.set_default_headers({{"Cache-Control", "no-store"},
                                 {"Referrer-Policy", "same-origin"},
                                 {"X-Content-Type-Options", "nosniff"},
@@ -108,11 +131,14 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
 
     // The pre-routing hook also runs before WebSocket upgrades. Only entry resources and
     // the three same-origin auth requests may proceed without an active session.
-    server.set_pre_routing_handler([store, authority, origin](const Request& req, Response& res) {
-        if (!req.ssl || !exact_header(req, "Host", authority)) {
+    server.set_pre_routing_handler([store, secure, authority](const Request& req, Response& res) {
+        const auto host = req.get_header_value("Host");
+        if (secure_transport(req) != secure || req.get_header_value_count("Host") != 1 ||
+            (secure && host != authority)) {
             return reject(res, 403);
         }
-        if (req.path == panel_socket && !exact_header(req, "Origin", origin)) {
+        const auto origin = (secure ? "https://" : "http://") + host;
+        if ((req.path == "/ws" || req.path.starts_with("/ws/")) && !exact_header(req, "Origin", origin)) {
             return reject(res, 403);
         }
         if (req.method != "GET" && req.method != "HEAD") {
@@ -131,12 +157,12 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         return reject(res, 401);
     });
 
-    const auto page = [store, index = (site_dir / "index.html").string()](const Request& req, Response& res) {
+    const auto page = [store, secure, index = (site_dir / "index.html").string()](const Request& req, Response& res) {
         const auto token = session_cookie(req);
         const auto session = store->session(token);
         const auto current = session ? "/panel" : store->installed() ? "/sign-in" : "/setup";
         if (!session && !token.empty()) {
-            set_cookie(res, {});
+            set_cookie(res, secure, {});
         }
         if (req.target != current) {
             res.set_redirect(current, 303);
@@ -169,25 +195,21 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         const auto input = Json::parse(req.body, nullptr, false);
         const auto username = credential(input, "username");
         const auto password = credential(input, "password");
-        if (!AuthStore::valid_username(username) || !AuthStore::valid_password(password) ||
-            !input.contains("acknowledged") || input["acknowledged"] != true) {
+        if (!AuthStore::valid_username(username) || !AuthStore::valid_password(password)) {
             res.status = 400;
             return;
         }
-        switch (store->setup(username, password, credential(input, "bootstrap"))) {
+        switch (store->setup(username, password)) {
         case AuthStore::SetupResult::created:
             res.status = 201;
             break;
         case AuthStore::SetupResult::closed:
             res.status = 409;
             break;
-        case AuthStore::SetupResult::forbidden:
-            res.status = 403;
-            break;
         }
     });
 
-    server.Post("/api/auth/sign-in", [store](const Request& req, Response& res) {
+    server.Post("/api/auth/sign-in", [store, secure](const Request& req, Response& res) {
         const auto input = Json::parse(req.body, nullptr, false);
         const auto username = credential(input, "username");
         const auto password = credential(input, "password");
@@ -198,7 +220,7 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         std::string token;
         switch (store->sign_in(username, password, token)) {
         case AuthStore::SignInResult::accepted:
-            set_cookie(res, token);
+            set_cookie(res, secure, token);
             res.status = 204;
             break;
         case AuthStore::SignInResult::invalid:
@@ -211,10 +233,43 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
     });
 
-    server.Post("/api/auth/sign-out", [store](const Request& req, Response& res) {
+    server.Post("/api/auth/sign-out", [store, secure](const Request& req, Response& res) {
         store->sign_out(session_cookie(req));
-        set_cookie(res, {});
+        set_cookie(res, secure, {});
         res.status = 204;
+    });
+
+    server.Post("/api/auth/admin", [store, secure](const Request& req, Response& res) {
+        const auto input = Json::parse(req.body, nullptr, false);
+        const auto username = credential(input, "username");
+        const auto current_password = credential(input, "current_password");
+        const auto new_password = input.find("password");
+        if (!AuthStore::valid_username(username) || !AuthStore::valid_password(current_password) ||
+            new_password == input.end() || !new_password->is_string()) {
+            res.status = 400;
+            return;
+        }
+        const auto& password = new_password->get_ref<const std::string&>();
+        if (!password.empty() && !AuthStore::valid_password(password)) {
+            res.status = 400;
+            return;
+        }
+        switch (store->update_admin(session_cookie(req), username, current_password, password)) {
+        case AuthStore::UpdateResult::updated:
+            set_cookie(res, secure, {});
+            res.status = 204;
+            break;
+        case AuthStore::UpdateResult::unauthorized:
+            res.status = 401;
+            break;
+        case AuthStore::UpdateResult::invalid:
+            res.status = 403;
+            break;
+        case AuthStore::UpdateResult::busy:
+            res.set_header("Retry-After", "1");
+            res.status = 429;
+            break;
+        }
     });
 
     server.Get("/api/session", [store](const Request& req, Response& res) {
@@ -228,7 +283,11 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
     server.WebSocket(std::string(panel_socket), [store](const Request& req, httplib::ws::WebSocket& socket) {
         const auto token = session_cookie(req);
         const auto session = store->session(token);
-        if (session && !socket.send(session_data(*session).dump())) {
+        if (!session) {
+            socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
+            return;
+        }
+        if (!socket.send(session_data(*session).dump())) {
             return;
         }
         socket.set_read_timeout(1);

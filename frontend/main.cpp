@@ -10,6 +10,7 @@
 #include <imgui.h>
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl2.h>
+#include <imgui_internal.h>
 #include <implot.h>
 
 #include <algorithm>
@@ -20,7 +21,15 @@
 namespace {
 
 std::string clipboard_text;
-std::string credential_paste;
+std::string pending_paste;
+ImGuiID paste_target = 0;
+
+void clear_pending_paste()
+{
+    std::ranges::fill(pending_paste, '\0');
+    pending_paste.clear();
+    paste_target = 0;
+}
 
 // clang-format off
 EM_JS(void, set_panel_height, (int height), {
@@ -170,8 +179,9 @@ struct Application {
         platform.Platform_SetImeDataFn = [](ImGuiContext*, ImGuiViewport*, ImGuiPlatformImeData* data) {
             show_text_input(data->WantTextInput, data->InputPos.x, data->InputPos.y);
         };
-        platform.Platform_GetClipboardTextFn = [](ImGuiContext*) {
-            return credential_paste.empty() ? clipboard_text.c_str() : credential_paste.c_str();
+        platform.Platform_GetClipboardTextFn = [](ImGuiContext* context) {
+            return paste_target && paste_target == context->ActiveId ? pending_paste.c_str()
+                                                                     : clipboard_text.c_str();
         };
         platform.Platform_SetClipboardTextFn = [](ImGuiContext*, const char* text) {
             clipboard_text = text;
@@ -187,12 +197,10 @@ struct Application {
             register_panel_page(static_cast<int>(item.page), item.label);
         }
         panel.auth.start();
-        if (!panel.auth.enabled()) {
-            session.start();
-        } else if (panel.auth.page() != wave::AuthSession::Page::panel) {
-            panel.entry.page = panel.auth.page() == wave::AuthSession::Page::setup ? wave::EntryPage::setup
-                                                                                   : wave::EntryPage::sign_in;
-            panel.entry.username[0] = '\0';
+        if (panel.auth.page() == wave::AuthSession::Page::setup) {
+            panel.entry.page = wave::EntryPage::setup;
+        } else if (panel.auth.page() == wave::AuthSession::Page::sign_in) {
+            panel.entry.page = wave::EntryPage::sign_in;
         }
         return true;
     }
@@ -249,9 +257,27 @@ struct Application {
         return true;
     }
 
+    void update_session()
+    {
+        if (panel.auth.page() == wave::AuthSession::Page::panel) {
+            const bool authenticated = !panel.auth.username().empty();
+            const bool in_workspace = panel.entry.page == wave::EntryPage::workspace;
+            if (authenticated && !in_workspace) {
+                panel.entry.page = wave::EntryPage::workspace;
+                session.start();
+            } else if (!authenticated && in_workspace) {
+                panel.entry.page = wave::EntryPage::checking;
+                panel.settings = {};
+                session.stop();
+            }
+        }
+        session.update();
+    }
+
     void frame()
     {
-        session.update();
+        const auto previous_entry = panel.entry.page;
+        update_session();
         // The responsive layout uses the viewport width even when a document scrollbar is present.
         const int viewport_width = browser_viewport_width();
         if (!fit_canvas(viewport_width)) {
@@ -272,10 +298,12 @@ struct Application {
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
         const auto previous_page = panel.page;
-        const auto previous_entry = panel.entry.page;
         wave::render_panel(panel, session, viewport_width, browser_panel_focus());
-        std::ranges::fill(credential_paste, '\0');
-        credential_paste.clear();
+        // ImGui may spread the paste shortcut across frames to preserve input order.
+        if (paste_target &&
+            (paste_target != ImGui::GetActiveID() || ImGui::GetCurrentContext()->InputEventsQueue.empty())) {
+            clear_pending_paste();
+        }
         if (panel.page != previous_page || panel.entry.page != previous_entry) {
             scroll_to_top();
         }
@@ -297,8 +325,9 @@ struct Application {
             displayed_description = std::move(description);
         }
         const bool in_workspace = panel.entry.page == wave::EntryPage::workspace;
-        update_navigation(static_cast<int>(panel.page), panel.navigation_open && in_workspace,
-                          panel.menu_open, panel.tools_open, wave::dialog_open(),
+        update_navigation(in_workspace ? static_cast<int>(panel.page) : 0,
+                          panel.navigation_open && in_workspace, in_workspace && panel.menu_open,
+                          in_workspace && panel.tools_open, !in_workspace || wave::dialog_open(),
                           panel.page == wave::PanelPage::server && in_workspace);
         if (!visible) {
             show_panel();
@@ -318,7 +347,7 @@ void render_frame(void* context)
 
 extern "C" EMSCRIPTEN_KEEPALIVE void wave_activate_panel_control(int control)
 {
-    if (!wave::dialog_open()) {
+    if (application.panel.entry.page == wave::EntryPage::workspace && !wave::dialog_open()) {
         application.panel.browser_control = control;
     }
 }
@@ -358,12 +387,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wave_input_text(const char* text, bool past
 {
     auto& io = ImGui::GetIO();
     if (paste) {
-        // Use the text widget's paste path so it replaces the selection even while Ctrl is held.
-        if (application.panel.auth.enabled() && application.panel.entry.page != wave::EntryPage::workspace) {
-            credential_paste = text;
-        } else {
-            clipboard_text = text;
+        const auto id = ImGui::GetActiveID();
+        if (!ImGui::GetInputTextState(id)) {
+            return;
         }
+        // Use the text widget's paste path so it replaces the selection even while Ctrl is held.
+        clear_pending_paste();
+        pending_paste = text;
+        paste_target = id;
         io.AddKeyEvent(ImGuiMod_Ctrl, true);
         io.AddKeyEvent(ImGuiKey_V, true);
         io.AddKeyEvent(ImGuiKey_V, false);

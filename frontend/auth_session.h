@@ -9,7 +9,7 @@ namespace wave {
 class AuthSession {
   public:
     enum class Page {
-        demo,
+        checking,
         setup,
         sign_in,
         panel
@@ -17,7 +17,8 @@ class AuthSession {
     enum class Action {
         setup,
         sign_in,
-        sign_out
+        sign_out,
+        update_administrator
     };
 
     void start();
@@ -29,10 +30,6 @@ class AuthSession {
     {
         return page_;
     }
-    bool enabled() const
-    {
-        return page_ != Page::demo;
-    }
     bool pending() const
     {
         return pending_;
@@ -40,6 +37,10 @@ class AuthSession {
     const std::string& error() const
     {
         return error_;
+    }
+    Action action() const
+    {
+        return action_;
     }
     void clear_error()
     {
@@ -51,7 +52,7 @@ class AuthSession {
     }
 
   private:
-    Page page_ = Page::demo;
+    Page page_ = Page::checking;
     Action action_ = Action::sign_in;
     bool pending_ = false;
     std::string error_;

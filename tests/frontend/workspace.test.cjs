@@ -20,6 +20,7 @@ const user = { enabled: true, upload_rate: 0.2, download_rate: 0.5, upload_total
 
 let url;
 let previewUrl;
+let sessionUrl;
 let server;
 let browser;
 
@@ -28,14 +29,18 @@ before(async () => {
     assert.ok(siteDir, 'Run this test through a Wave frontend CTest preset.');
     const assets = new Map();
     for (const [path, filename, contentType] of [
-        ['/', 'index.html', 'text/html; charset=utf-8'],
+        ['/panel', 'index.html', 'text/html; charset=utf-8'],
         ['/index.js', 'index.js', 'text/javascript; charset=utf-8'],
         ['/index.wasm', 'index.wasm', 'application/wasm'],
     ]) {
         assets.set(path, { contentType, contents: await readFile(join(siteDir, filename)) });
     }
     server = createServer((request, response) => {
-        const asset = assets.get(request.url);
+        if (request.url === '/' || request.url === '/index.html') {
+            response.writeHead(303, { Location: '/panel' }).end();
+            return;
+        }
+        const asset = assets.get(request.url === '/sign-in' || request.url === '/setup' ? '/panel' : request.url);
         if (!asset) {
             response.writeHead(404).end();
             return;
@@ -44,7 +49,8 @@ before(async () => {
     });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
-    url = `http://127.0.0.1:${server.address().port}/`;
+    url = `http://127.0.0.1:${server.address().port}/panel`;
+    sessionUrl = `ws://127.0.0.1:${server.address().port}/ws/panel`;
     previewUrl = `ws://127.0.0.1:${server.address().port}/ws/preview`;
     browser = await chromium.launch({
         args: ['--enable-unsafe-swiftshader', '--disable-smooth-scrolling'],
@@ -71,7 +77,7 @@ function fixture() {
         logs: [{ ts: '09:41:02', level: 'info', message: 'Preview fixture is ready.' }],
         server: serverSnapshot,
         settings: {
-            name: 'Wave Preview', admin_username: 'demo', domain: 'wave.example.invalid',
+            name: 'Wave Preview', domain: 'wave.example.invalid',
             certificate_path: 'preview/server.crt', private_key_path: 'preview/server.key',
         },
         topology: {
@@ -91,7 +97,14 @@ function fixture() {
     };
 }
 
+async function mockSession(page) {
+    await page.routeWebSocket(sessionUrl, socket => {
+        socket.send(JSON.stringify({ type: 'session', username: 'fixture-admin', expires_at: Math.floor(Date.now() / 1000) + 86400 }));
+    });
+}
+
 async function mockPreview(page, { data = fixture(), gate = Promise.resolve(), handle } = {}) {
+    await mockSession(page);
     const connected = Promise.withResolvers();
     const events = new EventEmitter();
     const actions = [];
@@ -181,13 +194,6 @@ function assertRequest(request, expected) {
     return id;
 }
 
-async function openSetup(page, click = (x, y) => canvasClick(page, x, y)) {
-    await click(132, 23);
-    await page.waitForFunction(() => document.getElementById('menu').getAttribute('aria-expanded') === 'true');
-    await click(170, 160);
-    await page.getByRole('img', { name: 'Welcome to Wave. Step 1 of 3.' }).waitFor();
-}
-
 // Feedback can resize a centered dialog. Locate its outline before clicking.
 async function dialogFrame(page) {
     await settleCanvas(page);
@@ -202,24 +208,6 @@ async function dialogFrame(page) {
     }
     assert.ok(edge.length >= 2, 'Expected a dialog outline');
     return { top: edge[0], bottom: edge.at(-1) };
-}
-
-async function clickEntryFooter(page, x) {
-    const { bottom } = await dialogFrame(page);
-    await canvasClick(page, x, bottom - 25);
-}
-
-async function openPanelDetails(page) {
-    await openSetup(page);
-    await clickEntryFooter(page, 860);
-    await page.getByRole('img', { name: 'Preview notes. Step 2 of 3.' }).waitFor();
-    await clickEntryFooter(page, 915);
-    await page.getByRole('img', { name: 'Panel details. Step 3 of 3.' }).waitFor();
-}
-
-async function useExampleCredentials(page) {
-    const { top } = await dialogFrame(page);
-    await canvasClick(page, 460, top + 149);
 }
 
 for (const scale of [1, 2]) {
@@ -516,7 +504,7 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
         await assertPage('Server Status');
         await page.getByRole('img', { name: /Wave Server Status.*CPU 63\.0%.*Memory 4\.5 \/ 16\.0 GiB.*Download 9\.6 MiB\/s/ }).waitFor();
         assert.deepEqual(errors, []);
-        assert.deepEqual(requests, new Set([url, `${url}index.js`, `${url}index.wasm`]));
+        assert.deepEqual(requests, new Set([url, new URL('index.js', url).href, new URL('index.wasm', url).href]));
     } finally {
         releaseSnapshot();
         await page.close();
@@ -1077,7 +1065,7 @@ test('top-bar Menu opens preview config dialogs from Users by touch', async () =
     try {
         await page.goto(url);
         await status(/Wave Users.*Sample data/);
-        await openConfigMenuItem(213);
+        await openConfigMenuItem(167);
         await status(/^Wave Users.*Create new config/);
         await footer();
         assert.equal(preview.actions.length, 0, 'A blank form cannot submit.');
@@ -1092,7 +1080,7 @@ test('top-bar Menu opens preview config dialogs from Users by touch', async () =
         core.configs.push(config);
         created.reply({ feedback: 'Created preview config Lab preview (disabled).' });
         await status(/Created preview config Lab preview \(disabled\)/);
-        await openConfigMenuItem(237);
+        await openConfigMenuItem(191);
         await status(/^Wave Users.*Manage configs\. Default enabled, active and protected\. Lab preview disabled/);
         await tap(45, await configRow(0));
         await tap(160, await configRow(0));
@@ -1544,285 +1532,6 @@ test('Tools opens and closes both upstream demo windows on a phone', async () =>
     }
 });
 
-test('first-run setup validates input, preserves the draft, and completes through the preview socket', async () => {
-    const page = await browser.newPage({ viewport: desktop });
-    const preview = await mockPreview(page, { handle(_data, _action, reply) {
-        reply({ feedback: 'Applied demo setup.' });
-    } });
-
-    try {
-        await page.goto(url);
-        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
-        await openPanelDetails(page);
-        const { top } = await dialogFrame(page);
-        await replaceText(page, 700, top + 49, '');
-        await clickEntryFooter(page, 830);
-        await page.getByRole('img', { name: /Enter a panel name/ }).waitFor();
-        await replaceText(page, 700, (await dialogFrame(page)).top + 49, 'Demo Control Panel');
-        await clickEntryFooter(page, 830);
-        await page.getByRole('img', { name: /Enter a demo username and password/ }).waitFor();
-        assert.equal(preview.actions.length, 0);
-        await useExampleCredentials(page);
-        await clickEntryFooter(page, 700);
-        await page.getByRole('img', { name: 'Preview notes. Step 2 of 3.' }).waitFor();
-        await clickEntryFooter(page, 915);
-        await page.getByRole('img', { name: 'Panel details. Step 3 of 3.' }).waitFor();
-        await clickEntryFooter(page, 830);
-        await page.getByRole('img', { name: 'Setup complete. Applied demo setup.' }).waitFor();
-        assert.equal(preview.actions.length, 1);
-        assertRequest(preview.actions[0].request, {
-            action: 'setup', name: 'Demo Control Panel', username: 'demo', password: 'wave-demo',
-        });
-        await clickEntryFooter(page, 734);
-        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
-    } finally {
-        await page.close();
-    }
-});
-
-for (const acknowledged of [false, true]) {
-    const order = acknowledged ? 'after' : 'before';
-    test(`setup reports the result when the socket closes ${order} acknowledgement`, async () => {
-        const page = await browser.newPage({ viewport: desktop });
-        await page.clock.install({ time: 0 });
-        const preview = await mockPreview(page, { handle() {} });
-        try {
-            await page.goto(url);
-            await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
-            await openPanelDetails(page);
-            await useExampleCredentials(page);
-            await clickEntryFooter(page, 830);
-            const { reply } = await preview.action(0);
-
-            // Hold rendering so both socket events can precede the form's next frame.
-            await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 500);
-            if (acknowledged) reply({ feedback: 'Applied demo setup.' });
-            await preview.close();
-            await page.clock.resume();
-            await settleCanvas(page);
-
-            const expected = acknowledged ? 'Setup complete. Applied demo setup.'
-                : 'Panel details. Step 3 of 3. The preview connection closed. Try again after reconnecting.';
-            const description = await page.getByRole('img').getAttribute('aria-label');
-            assert.equal(description, expected);
-        } finally {
-            await page.close();
-        }
-    });
-}
-
-test('a reopened setup waits for its own reply and retries an active rejection', async () => {
-    const page = await browser.newPage({ viewport: desktop });
-    const preview = await mockPreview(page, { handle() {} });
-    await page.addInitScript(() => {
-        const NativeWebSocket = window.WebSocket;
-        window.WebSocket = class extends NativeWebSocket {
-            constructor(...args) {
-                super(...args);
-                this.addEventListener('message', ({ data }) => {
-                    window.lastPreviewRequestId = JSON.parse(data).request_id;
-                });
-            }
-        };
-    });
-    const pending = 'Panel details. Step 3 of 3. Applying demo setup…';
-    const description = name => page.getByRole('img', { name });
-    async function submit(index) {
-        await clickEntryFooter(page, 830);
-        await description(pending).waitFor();
-        return preview.action(index);
-    }
-
-    try {
-        await page.goto(url);
-        await description(/Wave Users.*2 users/).waitFor();
-        await openPanelDetails(page);
-        await useExampleCredentials(page);
-        const first = await submit(0);
-        await clickEntryFooter(page, 830);
-        assert.equal(preview.actions.length, 1);
-        await clickEntryFooter(page, 540);
-        await description(/Wave Users.*2 users/).waitFor();
-
-        await openPanelDetails(page);
-        await clickEntryFooter(page, 830);
-        await description(/Enter a demo username and password/).waitFor();
-        await useExampleCredentials(page);
-        const second = await submit(1);
-        first.reply({ feedback: 'The first setup completed.' });
-        await page.waitForFunction(id => window.lastPreviewRequestId === id, first.request.request_id);
-        await settleCanvas(page);
-        assert.equal(await description(pending).count(), 1);
-        second.reply({ ok: false, feedback: 'The active setup was rejected.' });
-        await description(/The active setup was rejected/).waitFor();
-        const retry = await submit(2);
-        retry.reply({ feedback: 'The setup retry completed.' });
-        await description('Setup complete. The setup retry completed.').waitFor();
-
-        const ids = [first, second, retry].map(({ request }) => assertRequest(request, {
-            action: 'setup', name: 'Wave Preview', username: 'demo', password: 'wave-demo',
-        }));
-        assert.equal(new Set(ids).size, ids.length);
-    } finally {
-        await page.close();
-    }
-});
-
-test('a timed-out setup keeps the draft available for retry', async () => {
-    const page = await browser.newPage({ viewport: desktop });
-    await page.clock.install({ time: 0 });
-    const preview = await mockPreview(page, { handle() {} });
-    try {
-        await page.goto(url);
-        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
-        await openPanelDetails(page);
-        await useExampleCredentials(page);
-        await clickEntryFooter(page, 830);
-        const first = await preview.action(0);
-        await page.clock.fastForward(5100);
-        await page.getByRole('img', { name: 'Panel details. Step 3 of 3. The preview server did not reply. Try again.' }).waitFor();
-
-        await clickEntryFooter(page, 830);
-        const retry = await preview.action(1);
-        assert.notEqual(first.request.request_id, retry.request.request_id);
-        assertRequest(retry.request, { action: 'setup', name: 'Wave Preview', username: 'demo', password: 'wave-demo' });
-        retry.reply({ feedback: 'Applied demo setup.' });
-        await page.getByRole('img', { name: 'Setup complete. Applied demo setup.' }).waitFor();
-    } finally {
-        await page.close();
-    }
-});
-
-test('setup fits a narrow phone and supports touch and keyboard form navigation', async () => {
-    const phone = { width: 320, height: 568 };
-    const page = await browser.newPage({ viewport: phone, isMobile: true, hasTouch: true });
-    const preview = await mockPreview(page, { handle() {} });
-    async function tap(x, y) {
-        await page.touchscreen.tap(x, y);
-        await settleCanvas(page);
-    }
-    async function next() {
-        const { bottom } = await dialogFrame(page);
-        await tap(248, bottom - 29);
-    }
-    async function expectFeedbackColor(red, green, blue) {
-        const { top, bottom } = await dialogFrame(page);
-        const start = top + 26;
-        const { pixels } = await screenshotPixels(page,
-            { x: 24, y: start, width: 272, height: bottom - start - 91 });
-        assert.ok(pixels.some((value, i) => i % 4 === 0 && value === red &&
-            pixels[i + 1] === green && pixels[i + 2] === blue), 'Expected feedback inside the visible dialog body');
-    }
-
-    try {
-        await page.goto(url);
-        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
-        await openSetup(page, tap);
-        const welcome = await dialogFrame(page);
-        assert.ok(Math.abs((welcome.top + welcome.bottom) / 2 - (phone.height + 107) / 2) <= 2);
-        await next();
-        await page.getByRole('img', { name: 'Preview notes. Step 2 of 3.' }).waitFor();
-        await next();
-        await page.getByRole('img', { name: 'Panel details. Step 3 of 3.' }).waitFor();
-
-        const details = await dialogFrame(page);
-        assert.ok(details.bottom < phone.height - 12, 'Wrapped footer stays inside the viewport');
-        await tap(90, details.top + 72);
-        const input = page.locator('#wave-text-input');
-        await input.waitFor({ state: 'visible' });
-        for (let i = 0; i < 2; i++) {
-            const before = await input.evaluate(element => parseFloat(element.style.top));
-            await page.keyboard.press('Tab');
-            await page.waitForFunction(previous => {
-                const field = document.getElementById('wave-text-input');
-                return field === document.activeElement && parseFloat(field.style.top) > previous + 40;
-            }, before);
-        }
-        await page.keyboard.insertText('phone-demo-pass');
-        await settleCanvas(page);
-        await page.setViewportSize({ width: phone.width, height: 360 });
-        await next();
-        const { request, reply } = await preview.action(0);
-        const expected = { action: 'setup', name: 'Wave Preview', username: 'demo', password: 'phone-demo-pass' };
-        assertRequest(request, expected);
-        await page.getByRole('img', { name: /Applying demo setup/ }).waitFor();
-        await expectFeedbackColor(81, 165, 246);
-        reply({ ok: false, feedback: 'The preview declined the request.' });
-        await page.getByRole('img', { name: /The preview declined the request/ }).waitFor();
-        await expectFeedbackColor(241, 127, 111);
-        await next();
-        const retry = await preview.action(1);
-        assertRequest(retry.request, expected);
-        retry.reply({ feedback: 'Applied demo setup.' });
-        await page.getByRole('img', { name: 'Setup complete. Applied demo setup.' }).waitFor();
-    } finally {
-        await page.close();
-    }
-});
-
-test('setup fields and actions are reachable at 320 × 256', async () => {
-    const page = await browser.newPage({ viewport: { width: 320, height: 256 }, isMobile: true, hasTouch: true });
-    const preview = await mockPreview(page, { handle() {} });
-    const description = name => page.getByRole('img', { name });
-    const touch = await page.context().newCDPSession(page);
-    async function tap(x, y) {
-        await page.touchscreen.tap(x, y);
-        await settleCanvas(page);
-    }
-    async function tapFooter(x) {
-        const { top, bottom } = await dialogFrame(page);
-        for (let swipe = 0; swipe < 4; swipe++) {
-            await touch.send('Input.dispatchTouchEvent', {
-                type: 'touchStart', touchPoints: [{ x: 160, y: bottom - 20 }],
-            });
-            for (const y of [bottom - 40, top + 50, top + 39]) {
-                await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 160, y }] });
-                await settleCanvas(page);
-            }
-            await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-        }
-        await tap(x, bottom - 29);
-    }
-
-    try {
-        await page.goto(url);
-        await description(/Wave Users.*2 users/).waitFor();
-        await openSetup(page, tap);
-        for (const title of ['Preview notes. Step 2 of 3.', 'Panel details. Step 3 of 3.']) {
-            await tapFooter(248);
-            await description(title).waitFor();
-        }
-
-        const { top } = await dialogFrame(page);
-        await tap(90, top + 72);
-        const input = page.locator('#wave-text-input');
-        await input.waitFor({ state: 'visible', timeout: 5000 });
-        const expected = { action: 'setup', name: 'Compact Wave', username: 'compact-admin', password: 'compact-demo' };
-        for (const [index, value] of [expected.name, expected.username, expected.password].entries()) {
-            if (index > 0) {
-                await page.keyboard.press('Tab');
-                await settleCanvas(page);
-            }
-            await page.keyboard.press('Control+a');
-            await settleCanvas(page);
-            await page.keyboard.insertText(value);
-            await settleCanvas(page);
-        }
-
-        await tapFooter(145);
-        await description('Preview notes. Step 2 of 3.').waitFor();
-        await tapFooter(248);
-        await description('Panel details. Step 3 of 3.').waitFor();
-        await tapFooter(248);
-        const { request, reply } = await preview.action(0);
-        assertRequest(request, expected);
-        reply({ feedback: 'Applied demo setup.' });
-        await description('Setup complete. Applied demo setup.').waitFor();
-    } finally {
-        await page.close();
-    }
-});
-
 async function applyPreviewTlsSettings(page) {
     await canvasClick(page, 245, 249);
     const { bottom } = await dialogFrame(page);
@@ -2114,6 +1823,7 @@ test('Server Status shows loading and unavailable data, and About opens without 
     const page = await browser.newPage({ viewport: desktop });
     const gate = Promise.withResolvers();
     await page.addInitScript(() => { window.open = url => { window.openedUrl = url; }; });
+    await mockSession(page);
     await page.routeWebSocket(previewUrl, async socket => {
         await gate.promise;
         socket.send('{"type":"snapshot","data":{}}');
@@ -2170,12 +1880,21 @@ test('shows startup feedback and reports a missing Wasm asset', async () => {
     }
 });
 
-test('cancels the demo sign-out by keyboard and opens sign-in on confirmation', async () => {
+test('cancels sign-out by keyboard and opens the sign-in form on confirmation', async () => {
     const page = await browser.newPage({ viewport: desktop });
-    const preview = await mockPreview(page);
+    await mockPreview(page);
+    let signedOut = false;
+    await page.route('**/api/auth/sign-out', async route => {
+        assert.equal(route.request().method(), 'POST');
+        assert.equal(route.request().headers()['x-wave-csrf'], '1');
+        signedOut = true;
+        await route.fulfill({ status: 204 });
+    });
+    await page.route(new URL('/', url).href, route =>
+        route.fulfill({ status: 303, headers: { location: '/sign-in' } }));
     const openConfirmation = async () => {
         await canvasClick(page, 134, 23);
-        await canvasClick(page, 172, 185);
+        await canvasClick(page, 172, 135);
         await page.waitForFunction(() => document.getElementById('panel-controls').inert);
     };
     try {
@@ -2186,12 +1905,12 @@ test('cancels the demo sign-out by keyboard and opens sign-in on confirmation', 
         await settleCanvas(page);
         await page.keyboard.press('Space');
         await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
-        assert.equal(preview.actions.length, 0);
+        assert.equal(signedOut, false);
 
         await openConfirmation();
         await canvasClick(page, 757, 426);
-        assert.deepEqual((await preview.action(0)).request, { action: 'sign_out' });
-        await page.getByRole('img', { name: 'Demo sign-in.' }).waitFor();
+        await page.getByRole('img', { name: 'Sign in to Wave.' }).waitFor();
+        assert.equal(signedOut, true);
     } finally {
         await page.close();
     }

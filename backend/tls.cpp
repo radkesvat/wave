@@ -1,7 +1,5 @@
 #include "tls.h"
 
-#include "auth.h"
-
 #include <httplib.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -251,23 +249,12 @@ void check_tls(const TlsSettings& settings, const fs::path& site_dir)
     make_https_server(settings, site_dir);
 }
 
-std::unique_ptr<httplib::Server> make_authenticated_server(const fs::path& state_dir, const fs::path& site_dir,
-    int port, const TlsSettings& settings)
+std::unique_ptr<httplib::Server> make_tls_server(const TlsSettings& settings, const fs::path& site_dir, int port)
 {
-    if (!state_dir.is_absolute()) {
-        throw std::runtime_error("Use an absolute path for --auth-dir.");
-    }
-    require_private_location(state_dir, site_dir);
     if (port == 0) {
         throw std::runtime_error("Set a fixed listen.port in wave-db.json for HTTPS.");
     }
-    auto authority = settings.domain;
-    if (port != 443) {
-        authority += ':' + std::to_string(port);
-    }
-    auto server = make_https_server(settings, site_dir);
-    configure_authenticated_routes(*server, site_dir, state_dir, authority);
-    return server;
+    return make_https_server(settings, site_dir);
 }
 
 } // namespace wave

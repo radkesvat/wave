@@ -67,7 +67,7 @@ target_include_directories(wave PRIVATE
 target_link_libraries(wave PRIVATE nlohmann_json::nlohmann_json)
 include(qr_code.cmake)
 # The WebGL renderer needs 32-bit indices for large meshes in the ImPlot demo.
-target_compile_definitions(wave PRIVATE IMGUI_IMPL_OPENGL_ES3 "ImDrawIdx=unsigned int")
+target_compile_definitions(wave PRIVATE IMGUI_IMPL_OPENGL_ES3 IMGUI_USE_WCHAR32 "ImDrawIdx=unsigned int")
 target_compile_options(wave PRIVATE
     -sUSE_SDL=2
     "$<$<CONFIG:Release>:-flto>"

@@ -2,3 +2,4 @@
 /local/
 /tests/frontend/node_modules/
 wave-db.json
+.wave-db-*

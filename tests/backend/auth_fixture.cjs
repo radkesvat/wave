@@ -1,6 +1,5 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
-const { randomBytes } = require('node:crypto');
 const { once } = require('node:events');
 const { mkdir, mkdtemp, rm, writeFile } = require('node:fs/promises');
 const { createServer } = require('node:net');
@@ -20,8 +19,8 @@ async function loopbackPort() {
     return port;
 }
 
-async function authFixture(t, webSite) {
-    assert.ok(process.env.WAVE_BACKEND, 'Set WAVE_BACKEND to a Wave build with WAVE_ENABLE_AUTH=ON.');
+async function authFixture(t, webSite, { encrypted = true } = {}) {
+    assert.ok(process.env.WAVE_BACKEND, 'Set WAVE_BACKEND to a native Wave build.');
     const cwd = await mkdtemp(join(tmpdir(), 'wave-auth-test-'));
     let server;
     let closed;
@@ -51,18 +50,17 @@ async function authFixture(t, webSite) {
         await writeFile(join(siteDir, 'index.js'), '');
         await writeFile(join(siteDir, 'index.wasm'), '');
     }
-    const stateDir = join(cwd, 'state');
-    const stateFile = join(stateDir, 'admin.json');
-    const bootstrapFile = join(stateDir, 'bootstrap-token');
-    const bootstrap = randomBytes(32).toString('hex');
-    await mkdir(stateDir, { mode: 0o700 });
-    await writeFile(bootstrapFile, `${bootstrap}\n`, { mode: 0o600 });
-
-    const tls = await tlsFixture(cwd);
     const port = await loopbackPort();
-    await writeTlsConfig(join(dirname(backend), 'wave-db.json'), tls, { listen: { host: bindHost, port } });
-    const origin = `https://${hostname}:${port}`;
-    const args = ['--site-dir', siteDir, '--auth-dir', stateDir];
+    const database = join(dirname(backend), 'wave-db.json');
+    const listen = { host: bindHost, port };
+    const tls = encrypted ? await tlsFixture(cwd) : undefined;
+    if (tls) {
+        await writeTlsConfig(database, tls, { listen });
+    } else {
+        await writeFile(database, JSON.stringify({ listen }), { mode: 0o600 });
+    }
+    const origin = encrypted ? `https://${hostname}:${port}` : `http://${bindHost}:${port}`;
+    const args = ['--site-dir', siteDir];
 
     function lookup(_name, options, callback) {
         if (options.all) {
@@ -83,14 +81,15 @@ async function authFixture(t, webSite) {
                 once(lines, 'line', { signal: AbortSignal.timeout(timeout) }),
                 closed.then(([code, signal]) => { throw new Error(`Fixture stopped (${signal ?? code}). ${errors}`); }),
             ]);
-            assert.equal(line, `Authenticated HTTPS listening on port ${port}`);
+            assert.equal(line, encrypted ? `Authenticated HTTPS listening on port ${port}`
+                : `Listening on ${origin}/`);
         } finally {
             lines.close();
         }
     }
 
-    return { cwd, backend, args, ca: tls.ca, rootPath: tls.rootPath, hostname, bindHost, lookup, origin,
-        index, stateFile, bootstrapFile, bootstrap, start, stop };
+    return { cwd, backend, ca: tls?.ca, rootPath: tls?.rootPath, hostname, bindHost, lookup, origin,
+        index, database, start, stop };
 }
 
 module.exports = { authFixture, timeout };

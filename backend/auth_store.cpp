@@ -1,19 +1,17 @@
 #include "auth_store.h"
 
+#include "panel_settings.h"
+
+#include <argon2.h>
 #include <nlohmann/json.hpp>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 
-#include <fcntl.h>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
-#include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <mutex>
 #include <stdexcept>
@@ -26,33 +24,9 @@ namespace {
 using Json = nlohmann::json;
 using namespace std::chrono_literals;
 
-constexpr char state_file[] = "admin.json";
-constexpr char bootstrap_file[] = "bootstrap-token";
 constexpr std::size_t max_sessions = 16;
 constexpr std::size_t secret_size = 64;
 constexpr std::size_t session_id_size = 32;
-
-class File {
-  public:
-    explicit File(int fd) : fd_(fd)
-    {
-    }
-    ~File()
-    {
-        if (fd_ >= 0) {
-            close(fd_);
-        }
-    }
-    File(const File&) = delete;
-    File& operator=(const File&) = delete;
-    int get() const
-    {
-        return fd_;
-    }
-
-  private:
-    int fd_;
-};
 
 std::string hex(const unsigned char* data, std::size_t size)
 {
@@ -85,104 +59,6 @@ bool secret_equal(std::string_view left, std::string_view right)
     return left.size() == right.size() && CRYPTO_memcmp(left.data(), right.data(), left.size()) == 0;
 }
 
-class PrivateDirectory {
-  public:
-    explicit PrivateDirectory(const std::filesystem::path& path)
-        : directory_(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC))
-    {
-        struct stat info{};
-        if (directory_.get() < 0 || fstat(directory_.get(), &info) != 0 || info.st_uid != geteuid() ||
-            (info.st_mode & 07777) != 0700) {
-            throw std::runtime_error(
-                "The authentication directory must be owned by Wave's user with mode 0700.");
-        }
-    }
-
-    void lock_authentication_state() const
-    {
-        if (flock(directory_.get(), LOCK_EX | LOCK_NB) != 0) {
-            throw std::runtime_error("Cannot lock the authentication directory for exclusive use.");
-        }
-    }
-
-    std::optional<std::string> read_file(const char* name, std::size_t limit) const
-    {
-        const File file(openat(directory_.get(), name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
-        if (file.get() < 0 && errno == ENOENT) {
-            return std::nullopt;
-        }
-        struct stat info{};
-        if (file.get() < 0 || fstat(file.get(), &info) != 0 || !S_ISREG(info.st_mode) ||
-            info.st_uid != geteuid() || (info.st_mode & 07777) != 0600 || info.st_nlink != 1) {
-            throw std::runtime_error(
-                "Authentication files must be regular files owned by Wave's user with mode 0600.");
-        }
-
-        std::string contents;
-        char buffer[4096];
-        for (;;) {
-            const auto count = read(file.get(), buffer, sizeof(buffer));
-            if (count < 0 && errno == EINTR) {
-                continue;
-            }
-            if (count < 0 || contents.size() + static_cast<std::size_t>(count) > limit) {
-                throw std::runtime_error("Cannot read authentication state.");
-            }
-            if (count == 0) {
-                return contents;
-            }
-            contents.append(buffer, static_cast<std::size_t>(count));
-        }
-    }
-
-    void replace_file(const char* name, const char* temporary_prefix, std::string_view contents) const
-    {
-        const int dir = directory_.get();
-        const auto temporary = temporary_prefix + random_hex(16);
-        const File file(openat(dir, temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
-        if (file.get() < 0) {
-            throw std::runtime_error("Cannot create private authentication state.");
-        }
-        try {
-            if (fchmod(file.get(), 0600) != 0) {
-                throw std::runtime_error("Cannot set authentication state permissions.");
-            }
-            while (!contents.empty()) {
-                const auto count = write(file.get(), contents.data(), contents.size());
-                if (count < 0 && errno == EINTR) {
-                    continue;
-                }
-                if (count <= 0) {
-                    throw std::runtime_error("Cannot write authentication state.");
-                }
-                contents.remove_prefix(static_cast<std::size_t>(count));
-            }
-            if (fsync(file.get()) != 0 || renameat(dir, temporary.c_str(), dir, name) != 0 ||
-                fsync(dir) != 0) {
-                throw std::runtime_error("Cannot commit authentication state.");
-            }
-        } catch (...) {
-            unlinkat(dir, temporary.c_str(), 0);
-            throw;
-        }
-    }
-
-    void retire_bootstrap() const
-    {
-        if (unlinkat(directory_.get(), bootstrap_file, 0) == 0) {
-            if (fsync(directory_.get()) == 0) {
-                return;
-            }
-        } else if (errno == ENOENT) {
-            return;
-        }
-        throw std::runtime_error("Cannot retire the bootstrap-token file.");
-    }
-
-  private:
-    File directory_;
-};
-
 std::int64_t unix_time()
 {
     return std::chrono::duration_cast<std::chrono::seconds>(
@@ -190,16 +66,80 @@ std::int64_t unix_time()
         .count();
 }
 
-std::string hash_password(std::string_view password, std::string_view salt)
+std::string hash_password(std::string_view password)
 {
-    constexpr std::uint64_t cost = 1 << 17;
-    constexpr std::uint64_t memory_limit = 160 * 1024 * 1024;
-    std::array<unsigned char, 32> hash{};
-    if (EVP_PBE_scrypt(password.data(), password.size(), reinterpret_cast<const unsigned char*>(salt.data()),
-                       salt.size(), cost, 8, 1, memory_limit, hash.data(), hash.size()) != 1) {
-        throw std::runtime_error("Password hashing failed.");
+    constexpr std::uint32_t memory_kib = 64 * 1024;
+    constexpr std::uint32_t passes = 3;
+    constexpr std::uint32_t lanes = 4;
+    constexpr std::uint32_t hash_bytes = 32;
+    std::array<unsigned char, 16> salt{};
+    if (RAND_bytes(salt.data(), salt.size()) != 1) {
+        throw std::runtime_error("Cannot generate a password salt.");
     }
-    return hex(hash.data(), hash.size());
+    std::string encoded(argon2_encodedlen(passes, memory_kib, lanes, salt.size(), hash_bytes, Argon2_id),
+                        '\0');
+    if (argon2id_hash_encoded(passes, memory_kib, lanes, password.data(), password.size(), salt.data(),
+                              salt.size(), hash_bytes, encoded.data(), encoded.size()) != ARGON2_OK) {
+        throw std::runtime_error("Cannot hash the administrator password.");
+    }
+    encoded.resize(encoded.find('\0'));
+    return encoded;
+}
+
+bool valid_password_hash(std::string_view encoded)
+{
+    constexpr std::string_view prefix = "$argon2id$v=19$m=";
+    if (!encoded.starts_with(prefix)) {
+        return false;
+    }
+    encoded.remove_prefix(prefix.size());
+    const auto read_parameter = [&](std::string_view delimiter) {
+        const auto separator = encoded.find(delimiter);
+        if (separator == encoded.npos || separator == 0 || encoded.front() == '0') {
+            return 0u;
+        }
+        unsigned int value = 0;
+        const auto end = encoded.data() + separator;
+        const auto parsed = std::from_chars(encoded.data(), end, value);
+        encoded.remove_prefix(separator + delimiter.size());
+        return parsed.ec == std::errc{} && parsed.ptr == end ? value : 0u;
+    };
+    const auto memory = read_parameter(",t=");
+    const auto passes = read_parameter(",p=");
+    const auto lanes = read_parameter("$");
+    if (lanes == 0 || lanes > 16 || memory < 8 * lanes || memory > 256 * 1024 || passes == 0 || passes > 10) {
+        return false;
+    }
+    const auto separator = encoded.find('$');
+    if (separator == encoded.npos) {
+        return false;
+    }
+    const auto salt = encoded.substr(0, separator);
+    const auto digest = encoded.substr(separator + 1);
+    const auto base64 = [](std::string_view value, std::size_t minimum) {
+        constexpr std::string_view alphabet =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        if (value.size() < minimum || value.size() > 86 || value.find_first_not_of(alphabet) != value.npos) {
+            return false;
+        }
+        const auto tail = alphabet.find(value.back());
+        switch (value.size() % 4) {
+        case 1:
+            return false;
+        case 2:
+            return tail % 16 == 0;
+        case 3:
+            return tail % 4 == 0;
+        default:
+            return true;
+        }
+    };
+    return base64(salt, 11) && base64(digest, 22);
+}
+
+bool verify_password(std::string_view password, const std::string& hash)
+{
+    return argon2id_verify(hash.c_str(), password.data(), password.size()) == ARGON2_OK;
 }
 
 std::string base64url(std::string_view value)
@@ -250,10 +190,8 @@ struct SessionRecord {
 
 struct Admin {
     std::string username;
-    std::string salt;
     std::string password_hash;
     std::string jwt_key;
-    std::int64_t acknowledged_at;
     std::vector<SessionRecord> sessions;
 
     SessionRecord record(std::string id, std::int64_t expiry) const
@@ -265,54 +203,55 @@ struct Admin {
     auto find_session(std::string_view token) const
     {
         const auto now = unix_time();
-        // Accept only an exact match to a JWT signed from a persisted, unexpired session record.
+        // Accept only an exact match to a JWT signed from a persisted, unexpired
+        // session record.
         return std::ranges::find_if(sessions, [&](const auto& record) {
             return record.expires_at > now && secret_equal(record.token, token);
         });
     }
 
-    std::string dump() const
+    Json credential() const
+    {
+        return {{"username", username}, {"password", password_hash}};
+    }
+
+    Json state() const
     {
         auto records = Json::array();
         for (const auto& entry : sessions) {
             records.push_back({{"id", entry.id}, {"expires_at", entry.expires_at}});
         }
-        return Json{{"version", 1},
-                    {"username", username},
-                    {"password", {{"algorithm", "scrypt"}, {"salt", salt}, {"hash", password_hash}}},
-                    {"acknowledgments", {{"version", 1}, {"accepted_at", acknowledged_at}}},
-                    {"jwt_key", jwt_key},
-                    {"sessions", std::move(records)}}
-            .dump();
+        return {{"jwt_key", jwt_key}, {"sessions", std::move(records)}};
     }
 };
 
-Admin load_admin(std::string_view contents)
+std::optional<Admin> load_admin(const Json& database)
 {
-    const auto state = Json::parse(contents, nullptr, false);
-    const auto invalid = [] { throw std::runtime_error("Stored authentication state is invalid."); };
-    if (number(state, "version") != 1 || !state.contains("password") || !state.contains("acknowledgments") ||
-        !state.contains("sessions")) {
+    const auto& admins = database.at("admin");
+    if (admins.empty()) {
+        return std::nullopt;
+    }
+    const auto& entry = admins.front();
+    Admin admin{text(entry, "username"), text(entry, "password"), {}, {}};
+    if (!AuthStore::valid_username(admin.username) || !valid_password_hash(admin.password_hash)) {
+        throw std::runtime_error("An administrator in wave-db.json requires a "
+                                 "username and an Argon2id password hash.");
+    }
+    const auto state = database.find("auth");
+    if (state == database.end()) {
+        admin.jwt_key = random_hex(32);
+        return admin;
+    }
+    const auto invalid = [] { throw std::runtime_error("Authentication state in wave-db.json is invalid."); };
+    const auto sessions = state->find("sessions");
+    admin.jwt_key = text(*state, "jwt_key");
+    if (!is_hex(admin.jwt_key, secret_size) || sessions == state->end() || !sessions->is_array() ||
+        sessions->size() > max_sessions) {
         invalid();
     }
-    const auto& password = state["password"];
-    const auto& acknowledgments = state["acknowledgments"];
-    const auto& sessions = state["sessions"];
-    Admin admin{text(state, "username"),
-                text(password, "salt"),
-                text(password, "hash"),
-                text(state, "jwt_key"),
-                number(acknowledgments, "accepted_at"),
-                {}};
-    if (!AuthStore::valid_username(admin.username) || text(password, "algorithm") != "scrypt" ||
-        !is_hex(admin.salt, secret_size) || !is_hex(admin.password_hash, secret_size) ||
-        !is_hex(admin.jwt_key, secret_size) || number(acknowledgments, "version") != 1 ||
-        admin.acknowledged_at <= 0 || !sessions.is_array() || sessions.size() > max_sessions) {
-        invalid();
-    }
-    for (const auto& entry : sessions) {
-        auto id = text(entry, "id");
-        const auto expiry = number(entry, "expires_at");
+    for (const auto& record : *sessions) {
+        auto id = text(record, "id");
+        const auto expiry = number(record, "expires_at");
         if (!is_hex(id, session_id_size) || expiry <= 0 ||
             std::ranges::find(admin.sessions, id, &SessionRecord::id) != admin.sessions.end()) {
             invalid();
@@ -325,23 +264,9 @@ Admin load_admin(std::string_view contents)
 } // namespace
 
 struct AuthStore::Impl {
-    explicit Impl(const std::filesystem::path& path) : directory(path)
+    explicit Impl(std::shared_ptr<PanelDatabase> input)
+        : database(std::move(input)), admin(load_admin(database->initial_contents()))
     {
-        directory.lock_authentication_state();
-        if (const auto existing = directory.read_file(state_file, 16 * 1024)) {
-            admin.emplace(load_admin(*existing));
-            directory.retire_bootstrap();
-            return;
-        }
-        auto token = directory.read_file(bootstrap_file, secret_size + 1);
-        if (token && token->ends_with('\n')) {
-            token->pop_back();
-        }
-        if (!token || !is_hex(*token, secret_size)) {
-            throw std::runtime_error(
-                "First-run setup requires a private bootstrap-token file with 64 lowercase hex digits.");
-        }
-        bootstrap.swap(*token);
     }
 
     void check_available() const
@@ -354,7 +279,7 @@ struct AuthStore::Impl {
     void commit(Admin next)
     {
         try {
-            directory.replace_file(state_file, ".admin-", next.dump());
+            database->save_auth(Json::array({next.credential()}), next.state());
         } catch (...) {
             storage_failed = true;
             throw;
@@ -362,16 +287,16 @@ struct AuthStore::Impl {
         admin = std::move(next);
     }
 
-    PrivateDirectory directory;
+    std::shared_ptr<PanelDatabase> database;
     mutable std::mutex mutex;
     bool storage_failed = false;
     std::optional<Admin> admin;
-    std::string bootstrap;
     std::mutex sign_in_mutex;
     std::chrono::steady_clock::time_point retry_after{};
 };
 
-AuthStore::AuthStore(const std::filesystem::path& directory) : impl_(std::make_unique<Impl>(directory))
+AuthStore::AuthStore(std::shared_ptr<PanelDatabase> database)
+    : impl_(std::make_unique<Impl>(std::move(database)))
 {
 }
 
@@ -387,8 +312,8 @@ bool AuthStore::installed() const
 bool AuthStore::valid_username(std::string_view username)
 {
     return !username.empty() && username.size() <= 64 &&
-           username.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") ==
-               username.npos;
+           username.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP"
+                                      "QRSTUVWXYZ0123456789._-") == username.npos;
 }
 
 bool AuthStore::valid_password(std::string_view password)
@@ -402,37 +327,27 @@ bool AuthStore::valid_password(std::string_view password)
     return std::ranges::count_if(password, [](unsigned char byte) { return (byte & 0xc0) != 0x80; }) >= 15;
 }
 
-AuthStore::SetupResult AuthStore::setup(std::string_view username, std::string_view password,
-                                        std::string_view bootstrap)
+AuthStore::SetupResult AuthStore::setup(std::string_view username, std::string_view password)
 {
     std::lock_guard lock(impl_->mutex);
     impl_->check_available();
     if (impl_->admin) {
         return SetupResult::closed;
     }
-    if (!secret_equal(impl_->bootstrap, bootstrap)) {
-        return SetupResult::forbidden;
-    }
-    auto salt = random_hex(32);
-    auto hash = hash_password(password, salt);
-    impl_->commit(
-        Admin{std::string(username), std::move(salt), std::move(hash), random_hex(32), unix_time(), {}});
-    OPENSSL_cleanse(impl_->bootstrap.data(), impl_->bootstrap.size());
-    impl_->bootstrap.clear();
-    impl_->directory.retire_bootstrap();
+    impl_->commit(Admin{std::string(username), hash_password(password), random_hex(32), {}});
     return SetupResult::created;
 }
 
 AuthStore::SignInResult AuthStore::sign_in(std::string_view username, std::string_view password,
                                            std::string& token)
 {
-    // Allow one memory-hard password check at a time and back off after a failed attempt.
+    // Allow one memory-hard password check at a time and back off after a failed
+    // attempt.
     std::unique_lock attempt(impl_->sign_in_mutex, std::try_to_lock);
     if (!attempt || std::chrono::steady_clock::now() < impl_->retry_after) {
         return SignInResult::busy;
     }
     std::string stored_username;
-    std::string salt;
     std::string stored_hash;
     {
         std::lock_guard lock(impl_->mutex);
@@ -441,10 +356,9 @@ AuthStore::SignInResult AuthStore::sign_in(std::string_view username, std::strin
             return SignInResult::invalid;
         }
         stored_username = impl_->admin->username;
-        salt = impl_->admin->salt;
         stored_hash = impl_->admin->password_hash;
     }
-    if (!secret_equal(hash_password(password, salt), stored_hash) || username != stored_username) {
+    if (!verify_password(password, stored_hash) || username != stored_username) {
         impl_->retry_after = std::chrono::steady_clock::now() + 1s;
         return SignInResult::invalid;
     }
@@ -458,8 +372,8 @@ AuthStore::SignInResult AuthStore::sign_in(std::string_view username, std::strin
         next.sessions.erase(next.sessions.begin());
     }
     next.sessions.push_back(next.record(random_hex(16), now + session_seconds));
-    token = next.sessions.back().token;
     impl_->commit(std::move(next));
+    token = impl_->admin->sessions.back().token;
     return SignInResult::accepted;
 }
 
@@ -492,6 +406,37 @@ void AuthStore::sign_out(std::string_view token)
         next.sessions.erase(next.sessions.begin() + (match - impl_->admin->sessions.begin()));
         impl_->commit(std::move(next));
     }
+}
+
+AuthStore::UpdateResult AuthStore::update_admin(std::string_view token, std::string_view username,
+                                                std::string_view current_password,
+                                                std::string_view new_password)
+{
+    std::unique_lock attempt(impl_->sign_in_mutex, std::try_to_lock);
+    if (!attempt || std::chrono::steady_clock::now() < impl_->retry_after) {
+        return UpdateResult::busy;
+    }
+    std::string stored_hash;
+    {
+        std::lock_guard lock(impl_->mutex);
+        impl_->check_available();
+        if (!impl_->admin || impl_->admin->find_session(token) == impl_->admin->sessions.end()) {
+            return UpdateResult::unauthorized;
+        }
+        stored_hash = impl_->admin->password_hash;
+    }
+    if (!verify_password(current_password, stored_hash)) {
+        impl_->retry_after = std::chrono::steady_clock::now() + 1s;
+        return UpdateResult::invalid;
+    }
+    auto next_hash = new_password.empty() ? std::move(stored_hash) : hash_password(new_password);
+    std::lock_guard lock(impl_->mutex);
+    impl_->check_available();
+    if (impl_->admin->find_session(token) == impl_->admin->sessions.end()) {
+        return UpdateResult::unauthorized;
+    }
+    impl_->commit(Admin{std::string(username), std::move(next_hash), random_hex(32), {}});
+    return UpdateResult::updated;
 }
 
 } // namespace wave

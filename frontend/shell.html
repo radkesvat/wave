@@ -303,8 +303,8 @@
           if (page !== activePage) {
             pageLinks.get(activePage)?.removeAttribute("aria-current");
             const link = pageLinks.get(page);
-            link.setAttribute("aria-current", "page");
-            document.title = link.textContent + " · Wave";
+            link?.setAttribute("aria-current", "page");
+            document.title = link ? link.textContent + " · Wave" : "Wave";
             activePage = page;
           }
         }

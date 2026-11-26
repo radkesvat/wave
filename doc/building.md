@@ -1,8 +1,8 @@
 # Build and preview Wave
 
 Wave builds a WebAssembly panel and a native server that supplies its preview
-data. Use a browser with WebGL 2 enabled. The workspace starts on Users and
-shows WaterWall as disconnected.
+data. Use a browser with WebGL 2 enabled. After sign-in, the workspace starts
+on Users and shows WaterWall as disconnected.
 
 ## Prerequisites
 
@@ -34,7 +34,6 @@ Run the build commands from the Wave root after activating the SDK.
 ```sh
 cmake --preset web-debug
 cmake --build --preset web-debug
-python3 -m http.server 8000 --bind 127.0.0.1 --directory build/web-debug/site
 ```
 
 ### Release
@@ -42,15 +41,14 @@ python3 -m http.server 8000 --bind 127.0.0.1 --directory build/web-debug/site
 ```sh
 cmake --preset web-release
 cmake --build --preset web-release
-python3 -m http.server 8000 --bind 127.0.0.1 --directory build/web-release/site
 ```
 
 The release preset uses `-O3 -DNDEBUG` and enables link-time optimization
 with `-flto` during compilation and linking. It generates a browser-only
 JavaScript loader. [Emscripten optimization guide](https://emscripten.org/docs/optimizing/Optimizing-Code.html#lto)
 
-The static preview shows the workspace and its unavailable-data state. Use
-the native preview below for populated views and demo actions. [Static preview](http://127.0.0.1:8000/)
+Run the native backend to serve either frontend build. Pass
+`--site-dir build/web-debug/site` to use the debug build. [Native backend](#native-backend)
 
 Each preset writes `index.html`, `index.js`, `index.wasm`, and third-party
 license notices to its own `site/` directory. Add `--verbose` to a build command
@@ -122,12 +120,13 @@ Replace `--dry-run --Werror` with `-i` to apply the format.
 
 ## Native backend
 
-The backend needs CMake 3.24 or newer, Ninja, and a host C++20 compiler. The
-first configure downloads cpp-httplib v0.67.0 and nlohmann/json v3.12.0 and
-verifies their pinned archive checksums. [cpp-httplib release](https://github.com/yhirose/cpp-httplib/releases/tag/v0.67.0), [nlohmann/json release](https://github.com/nlohmann/json/releases/tag/v3.12.0)
+The backend needs CMake 3.24 or newer, Ninja, host C and C++20 compilers, and
+the OpenSSL 3 development package. The first configure downloads cpp-httplib
+v0.67.0, nlohmann/json v3.12.0, and the Argon2 reference implementation release
+`20190702` and verifies their pinned archive checksums. [cpp-httplib release](https://github.com/yhirose/cpp-httplib/releases/tag/v0.67.0), [nlohmann/json release](https://github.com/nlohmann/json/releases/tag/v3.12.0)
 
-Linux builds include TLS by default and require the system OpenSSL 3
-development package. Use `-DWAVE_ENABLE_AUTH=OFF` for a demo-only build.
+Linux builds include HTTPS support by default. Use `-DWAVE_ENABLE_AUTH=OFF`
+to build without HTTPS support. HTTP still requires administrator sign-in.
 
 Run these commands from the Wave root with the native compiler on `PATH`.
 Use `backend-debug` in both commands for a debug build.
@@ -147,8 +146,10 @@ The executable is `build/backend-release/wave-backend` or
 
 Wave creates `wave-db.json` beside its executable on first launch and fills
 in any missing listener settings. The default is `0.0.0.0:2045`, which binds
-to all IPv4 interfaces. Wave starts the HTTP preview with demo credentials
-until you configure [authenticated HTTPS mode](authentication.md).
+to all IPv4 interfaces. Before starting with an empty administrator list,
+restrict network access to the intended administrator or set `listen.host`
+to `127.0.0.1`. Wave uses HTTP when TLS is disabled in the database.
+[Authentication and HTTPS configuration](authentication.md)
 
 ```sh
 ./build/backend-release/wave-backend
@@ -158,9 +159,9 @@ Use Users to search, sort, and create sample records or pause live data.
 Open a row's **Options** to edit the user, read notes, share a configuration
 by QR code, reset traffic totals, or delete the user. The Logs pane records
 demo changes and provides search, auto-scroll, copy, and clear controls.
-Menu opens version information, demo sign-in, first-run setup, and demo
-sign-out. Tools opens diagnostics and input helpers. **ImGui Demo** and
-**ImPlot Demo** toggle the libraries' interactive example windows.
+Menu opens version information and signs you out. Tools opens diagnostics
+and input helpers. **ImGui Demo** and **ImPlot Demo** toggle the libraries'
+interactive example windows.
 
 Preview dialogs share a square-cornered frame, a dark title strip, and a
 right-aligned action row below the body. Workspace dialogs center in the
@@ -171,22 +172,16 @@ stay visible while a long body scrolls. Action rows wrap on narrow screens.
 
 ### First-run setup
 
-Wave opens Users on a normal page load. Choose **Menu → First-run setup**
-to start with a fresh draft and see the Welcome strip beneath the header.
-Continue from **Welcome to Wave** through **Preview notes**, then enter a
-panel name, demo administrator name, and masked demo password in **Panel
-details**. **Use example** fills the initial demo credentials, `demo` and
-`wave-demo`. Select **Back** to review a step without losing the draft, or
-**Back to workspace** to leave the walkthrough.
+An empty `admin` array in the database opens **Set up administrator**. Enter
+the username and password, then select **Create administrator**. Sign in
+with those credentials to open the workspace. A browser with a valid
+session opens the workspace directly.
 
-**Finish setup** saves the panel name and demo credentials for the current
-preview process. The dialog shows the request status and keeps the draft
-available after a rejection, timeout, or disconnect. When the server
-confirms, select **Open workspace**. Use your saved credentials from
-**Menu → Demo sign-in**. **Panel Settings** shows the preview domain,
-certificate chain path, and private key path. **Apply changes** saves those
-sample values for the current preview process. Configure deployment TLS in
-`wave-db.json`. [Authenticated HTTPS installation](authentication.md)
+Use **Panel Settings → Administrator** to change the username or password.
+Saving changes signs out every active session. **Panel Settings** also shows
+the sample domain, certificate chain path, and private key path.
+**Apply changes** keeps those sample values for the current preview process.
+Configure deployment TLS in `wave-db.json`. [Administrator setup](authentication.md#set-up-the-administrator)
 
 ### Preview controls and server options
 
@@ -230,13 +225,13 @@ starts or stops scrolling.
 working directory or by absolute path. It defaults to `build/web-release/site`
 and must contain `index.html`, `index.js`, and `index.wasm`. Set `listen.host`
 and `listen.port` in `wave-db.json` to choose the bind address and port. Use
-`127.0.0.1` for local-only access. For the HTTP preview, port `0` lets the
-operating system choose a free port. The preview prints its address and
+`127.0.0.1` for local-only access. For an HTTP listener, port `0` lets the
+operating system choose a free port. The backend prints its address and
 bound port at startup. The `/ws` endpoint echoes text messages over the same
-port. Preview assets are served with `Cache-Control: no-store`.
+port after authentication. Panel assets are served with `Cache-Control: no-store`.
 
-The workspace opens `/ws/preview` on the same host and port. A JSON frame with
-`type` set to `snapshot` carries Users, Logs, server metrics, settings,
+The signed-in workspace opens `/ws/preview` on the same host and port. A JSON
+frame with `type` set to `snapshot` carries Users, Logs, server metrics, settings,
 topology, bot status, and console data in `data`. Requests specify an `action`
 and its fields. The server replies with a snapshot and action feedback.
 Forms that wait for confirmation send a unique numeric `request_id`. The
@@ -245,12 +240,6 @@ from the reply carrying its ID. Browsers still apply valid snapshot data
 when a reply arrives after the form has been closed or replaced. If the
 socket closes between render frames, the form can still read a reply it
 already received. A form still waiting for its reply reports the disconnect.
-
-First-run setup sends `action: "setup"` with `request_id`, `name`, `username`,
-and `password`. The server validates the name and both credentials before
-updating the panel name and the in-memory demo account. Existing domain,
-certificate, and private key settings are preserved. The preview snapshots
-omit the password.
 
 Send one or more of `domain`, `certificate_path`, and `private_key_path`
 in the `settings` object of an `apply_settings` request.
@@ -276,16 +265,16 @@ together in MiB/s. The charts keep up to 19 samples in time order. The
 preview adds a sample about every five seconds and draws the latest one
 at **Now**. Hover over a plot for its sample values. User changes that affect
 traffic can update the latest rates between samples. Restarting the
-process restores the sample data. The console, credentials, and bot actions
-run as in-memory demonstrations.
+process restores the sample data. The console and bot actions run as
+in-memory demonstrations.
 
-The standalone `/ws/overview` endpoint sends one JSON text frame and closes
+The authenticated `/ws/overview` endpoint sends one JSON text frame and closes
 the connection. Its fixed fixture contains `cpu_percent`, `memory_used_gib`,
 `memory_total_gib`, `uptime_minutes`, and `download_mib_per_second`. The last
 field contains 13 samples taken five minutes apart, oldest first.
 
-With the default listener, open `http://<server-ip>:2045/` from another
-machine to reach the preview.
+With the default HTTP listener, open `http://<server-ip>:2045/` from another
+machine to reach the sign-in page. [HTTPS configuration](authentication.md#configure-tls)
 
 ### Panel Controls and versioning
 
@@ -323,7 +312,7 @@ that file and asks for confirmation before replacing those settings and entries
 for all connected preview browsers. The active config stays protected. The
 file contains config names and enabled flags, and restoration affects only
 in-memory preview data. For deployment settings, see
-[Authenticated HTTPS mode](authentication.md).
+[Authentication and HTTPS](authentication.md).
 
 The preview snapshot reports the current panel version in `server.version`
 and the panel catalog in `server.available_panel_versions`. The `server.core`

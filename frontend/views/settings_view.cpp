@@ -1,5 +1,6 @@
 #include "settings_view.h"
 
+#include "auth_session.h"
 #include "dialog.h"
 #include "view_helpers.h"
 
@@ -118,6 +119,45 @@ void render_settings_dialogs(SettingsViewState& state, PreviewSession& session)
             ImGui::CloseCurrentPopup();
         } else if (action == 1) {
             submit_settings(state, session);
+        }
+    }
+}
+
+void render_administrator_settings(SettingsViewState& state, AuthSession& auth)
+{
+    if (state.administrator != auth.username()) {
+        state.administrator = auth.username();
+        fill(state.admin_username, state.administrator);
+        state.current_password.fill('\0');
+        state.new_password.fill('\0');
+    }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Administrator");
+    ImGui::BeginDisabled(auth.pending());
+    edit("Username", state.admin_username);
+    edit("Current password", state.current_password, "", ImGuiInputTextFlags_Password);
+    edit("New password", state.new_password, "Optional, at least 15 characters",
+         ImGuiInputTextFlags_Password);
+
+    const bool changed = state.admin_username.data() != state.administrator || state.new_password.front();
+    ImGui::BeginDisabled(!state.admin_username.front() || !state.current_password.front() || !changed);
+    if (theme::button("Save administrator")) {
+        auth.submit(AuthSession::Action::update_administrator,
+                    {{"username", state.admin_username.data()},
+                     {"current_password", state.current_password.data()},
+                     {"password", state.new_password.data()}});
+        state.current_password.fill('\0');
+        state.new_password.fill('\0');
+    }
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    wrapped("Saving changes signs you out.", Color::secondary_text);
+    if (auth.action() == AuthSession::Action::update_administrator) {
+        if (auth.pending()) {
+            wrapped("Saving the administrator…", Color::info);
+        } else if (!auth.error().empty()) {
+            wrapped(auth.error(), Color::error);
         }
     }
 }

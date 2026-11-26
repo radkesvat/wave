@@ -3,8 +3,9 @@ set(wave_auth_default OFF)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(wave_auth_default ON)
 endif()
-option(WAVE_ENABLE_AUTH "Build the HTTPS authenticated mode on Linux" ${wave_auth_default})
-# Demo-only builds need neither system TLS nor compression libraries.
+option(WAVE_ENABLE_AUTH "Enable native HTTPS support" ${wave_auth_default})
+# Authentication uses OpenSSL Crypto on both HTTP and HTTPS builds.
+find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF)
 set(HTTPLIB_REQUIRE_OPENSSL ${WAVE_ENABLE_AUTH})
 set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF)
@@ -17,7 +18,26 @@ FetchContent_Declare(httplib
 )
 FetchContent_MakeAvailable(httplib)
 
-add_executable(wave-backend main.cpp panel_settings.cpp preview.cpp)
+enable_language(C)
+# Argon2 reference implementation, release 20190702.
+FetchContent_Declare(argon2
+    URL https://codeload.github.com/P-H-C/phc-winner-argon2/tar.gz/refs/tags/20190702
+    URL_HASH SHA256=daf972a89577f8772602bf2eb38b6a3dd3d922bf5724d45e7f9589b5e830442c
+)
+FetchContent_MakeAvailable(argon2)
+find_package(Threads REQUIRED)
+add_library(wave-argon2 STATIC
+    ${argon2_SOURCE_DIR}/src/argon2.c
+    ${argon2_SOURCE_DIR}/src/core.c
+    ${argon2_SOURCE_DIR}/src/encoding.c
+    ${argon2_SOURCE_DIR}/src/ref.c
+    ${argon2_SOURCE_DIR}/src/thread.c
+    ${argon2_SOURCE_DIR}/src/blake2/blake2b.c
+)
+target_include_directories(wave-argon2 PUBLIC "${argon2_SOURCE_DIR}/include")
+target_link_libraries(wave-argon2 PRIVATE Threads::Threads)
+
+add_executable(wave-backend main.cpp panel_settings.cpp preview.cpp auth.cpp auth_store.cpp)
 set_target_properties(wave-backend PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
@@ -25,12 +45,15 @@ set_target_properties(wave-backend PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 target_include_directories(wave-backend PRIVATE "${PROJECT_SOURCE_DIR}/common")
-target_link_libraries(wave-backend PRIVATE httplib::httplib nlohmann_json::nlohmann_json)
+target_link_libraries(wave-backend PRIVATE httplib::httplib nlohmann_json::nlohmann_json OpenSSL::Crypto wave-argon2)
+if(WIN32)
+    target_link_libraries(wave-backend PRIVATE advapi32)
+endif()
 
 if(WAVE_ENABLE_AUTH)
-    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        message(FATAL_ERROR "Wave authenticated mode requires Linux private state storage")
+    if(NOT UNIX)
+        message(FATAL_ERROR "Wave native HTTPS support requires POSIX PEM file handling")
     endif()
-    target_sources(wave-backend PRIVATE auth.cpp auth_store.cpp tls.cpp)
+    target_sources(wave-backend PRIVATE tls.cpp)
     target_compile_definitions(wave-backend PRIVATE WAVE_ENABLE_AUTH)
 endif()

@@ -4,6 +4,6 @@
 
 namespace wave {
 
-void render_about(bool authenticated, std::string_view version);
+void render_about(std::string_view version);
 
 } // namespace wave
