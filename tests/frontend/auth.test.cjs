@@ -106,7 +106,7 @@ test('authenticates an administrator and closes the terminal on sign-out', async
         await page.keyboard.press('Enter');
         await page.getByRole('button', { name: 'Open terminal', exact: true }).click({ timeout });
         const terminal = page.locator('#wave-console-terminal');
-        await page.locator('#wave-console-status').getByText('Connected', { exact: true }).waitFor({ timeout });
+        await page.locator('#wave-console-status').getByText(/Connected to host shell/).waitFor({ timeout });
         await terminal.locator('textarea').focus();
         await page.evaluate(() => navigator.clipboard.writeText(
             'if [ -t 0 ] && [ -t 1 ]; then printf "PTY_%s:%s\\n" OK "$$"; fi'
@@ -114,7 +114,7 @@ test('authenticates an administrator and closes the terminal on sign-out', async
         await page.keyboard.press('Control+Shift+v');
         await settleCanvas(page);
         await page.keyboard.press('Enter');
-        const pidLine = terminal.getByText(/^PTY_OK:\d+$/);
+        const pidLine = terminal.locator('.xterm-rows').getByText(/^PTY_OK:\d+$/);
         await pidLine.waitFor({ timeout });
         shellPid = Number((await pidLine.textContent()).split(':')[1]);
         assert.ok(Number.isSafeInteger(shellPid) && shellPid > 0);

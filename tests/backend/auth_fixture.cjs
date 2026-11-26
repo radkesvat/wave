@@ -76,6 +76,8 @@ async function authFixture(t, webSite, { encrypted = true, prepareCore = true } 
         }
     });
 
+    const home = join(cwd, 'home');
+    await mkdir(home);
     const backend = await copyBackend(resolve(process.env.WAVE_BACKEND), cwd);
     if (prepareCore) await seedCore(backend);
     const siteDir = webSite ? resolve(webSite) : join(cwd, 'site');
@@ -108,7 +110,14 @@ async function authFixture(t, webSite, { encrypted = true, prepareCore = true } 
         }
     }
 
-    async function start(env = process.env) {
+    async function start(overrides = {}) {
+        // Give interactive shells a clean startup environment and private history.
+        const env = {
+            PATH: process.env.PATH,
+            ...overrides,
+            HOME: home,
+            HISTFILE: join(home, '.bash_history'),
+        };
         server = spawn(backend, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
         closed = once(server, 'close');
         let errors = '';

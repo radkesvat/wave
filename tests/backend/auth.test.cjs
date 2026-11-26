@@ -1,7 +1,9 @@
 const assert = require('node:assert/strict');
 const { createHmac, randomBytes } = require('node:crypto');
+const { once } = require('node:events');
 const { readFile, writeFile } = require('node:fs/promises');
 const https = require('node:https');
+const { join } = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
 const { test } = require('node:test');
 const { authFixture, timeout } = require('./auth_fixture.cjs');
@@ -97,6 +99,11 @@ function clientFrame(opcode, data) {
     return Buffer.concat([Buffer.from([0x80 | opcode, 0x80 | payload.length]), mask, maskedPayload]);
 }
 
+function assertTerminalStatus(frame, type) {
+    assert.equal(frame.opcode, 1);
+    assert.equal(JSON.parse(frame.payload).type, type);
+}
+
 function assertCookie(response, maxAge) {
     assert.equal(response.status, 204);
     assert.equal(response.headers['set-cookie']?.length, 1);
@@ -173,15 +180,16 @@ test('HTTPS verifies trust and enforces durable JWT sessions on HTTP and WebSock
         assert.equal((await ws.frame()).opcode, 1);
         if (terminal) {
             assert.equal(terminal.status, 101);
-            terminal.socket.write(Buffer.concat([
-                clientFrame(1, JSON.stringify({ type: 'resize', cols: 80, rows: 24 })),
-                clientFrame(2, "unset HISTFILE; printf 'WAVE-WSS-%s\\n' READY\r"),
-            ]));
-            const ready = await terminal.frame();
-            assert.equal(ready.opcode, 1);
-            assert.equal(JSON.parse(ready.payload).type, 'ready');
+            terminal.socket.write(clientFrame(1, JSON.stringify({ type: 'resize', cols: 80, rows: 24 })));
+            assertTerminalStatus(await terminal.frame(), 'ready');
+            const paste = clientFrame(2, "printf 'WAVE-WSS-%s\\n' \"$HOME\" \"$HISTFILE\"\r");
+            terminal.socket.write(paste.subarray(0, 12));
+            await delay(600);
+            terminal.socket.write(paste.subarray(12));
+            const home = join(fixture.cwd, 'home');
+            const expected = `WAVE-WSS-${home}\r\nWAVE-WSS-${join(home, '.bash_history')}\r\n`;
             let output = '';
-            while (!output.includes('WAVE-WSS-READY\r\n')) {
+            while (!output.includes(expected)) {
                 const frame = await terminal.frame();
                 assert.equal(frame.opcode, 2);
                 output += frame.payload.toString('utf8');
@@ -212,6 +220,46 @@ test('HTTPS verifies trust and enforces durable JWT sessions on HTTP and WebSock
     assert.equal((await post('sign-in', { ...credentials, password: 'wrong fixture passphrase' })).status, 401);
     assert.equal((await post('sign-in', credentials)).status, 429);
 });
+
+test('closes the TLS terminal when the shell exits during a final keystroke',
+    { skip: process.platform !== 'linux' }, async t => {
+        const fixture = await authFixture(t);
+        const { post, upgrade } = client(fixture);
+        const credentials = { username: 'fixture-admin', password: 'fixture terminal passphrase' };
+        await fixture.start();
+        assert.equal((await post('setup', credentials)).status, 201);
+        const cookie = assertCookie(await post('sign-in', credentials), expirySeconds);
+        const terminal = await upgrade({ Cookie: cookie, Origin: fixture.origin }, '/ws/console');
+        assert.equal(terminal.status, 101);
+        t.after(() => terminal.socket.destroy());
+        terminal.socket.write(clientFrame(1, JSON.stringify({ type: 'resize', cols: 80, rows: 24 })));
+        assertTerminalStatus(await terminal.frame(), 'ready');
+
+        // The last key spans two TLS writes while a shell command finishes.
+        const key = clientFrame(2, 'x');
+        terminal.socket.write(Buffer.concat([clientFrame(2, 'sleep 0.3; exit\r'), key.subarray(0, -1)]));
+        let lastByteSent = false;
+        const sendLastByte = setTimeout(() => {
+            lastByteSent = true;
+            terminal.socket.write(key.subarray(-1));
+        }, 5000);
+        t.after(() => clearTimeout(sendLastByte));
+
+        let frame;
+        do {
+            frame = await terminal.frame();
+        } while (frame.opcode === 2);
+        assertTerminalStatus(frame, 'exit');
+        const close = await terminal.frame();
+        assert.equal(close.opcode, 8);
+        assert.equal(close.payload.readUInt16BE(), 1000);
+        if (!terminal.socket.readableEnded) {
+            const ended = once(terminal.socket, 'end', { signal: AbortSignal.timeout(timeout) });
+            terminal.socket.resume();
+            await ended;
+        }
+        assert.equal(lastByteSent, false, 'Shell exit must release the connection while the key is in flight.');
+    });
 
 test('administrator changes require the current password and revoke all sessions', async t => {
     const fixture = await authFixture(t);

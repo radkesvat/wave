@@ -3,12 +3,24 @@
 #include <algorithm>
 #include <limits>
 
+#include <fcntl.h>
 #include <linux/close_range.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
 namespace wave {
+
+// Takes ownership of fd and keeps it clear of stdio redirection in the child.
+inline int above_stdio(int fd)
+{
+    if (fd < 0 || fd > STDERR_FILENO) {
+        return fd;
+    }
+    const int moved = ::fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+    ::close(fd);
+    return moved;
+}
 
 inline rlim_t open_file_limit()
 {

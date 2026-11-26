@@ -11,7 +11,6 @@
 #include "child_process.h"
 
 #include <array>
-#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
@@ -43,9 +42,8 @@ using httplib::ws::WebSocket;
 
 void console_error(WebSocket& socket, const char* message, CloseStatus status)
 {
-    if (socket.send(Json{{"type", "error"}, {"message", message}}.dump())) {
-        socket.close(status, message);
-    }
+    socket.send(Json{{"type", "error"}, {"message", message}}.dump());
+    socket.close(status, message);
 }
 
 #ifdef __linux__
@@ -53,7 +51,9 @@ using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 
 constexpr auto session_check_interval = 250ms;
+constexpr auto transport_timeout = 10s;
 constexpr std::size_t max_input = 64 * 1024;
+constexpr std::size_t input_window = 1024 * 1024;
 constexpr int max_dimension = 1000;
 // Each terminal occupies an HTTP worker even while idle. The default pool starts with at least eight.
 constexpr int max_consoles = 4;
@@ -94,16 +94,6 @@ class Descriptor {
   private:
     int fd_;
 };
-
-int above_stdio(int fd)
-{
-    if (fd < 0 || fd > STDERR_FILENO) {
-        return fd;
-    }
-    const int moved = ::fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
-    ::close(fd);
-    return moved;
-}
 
 class Pseudoterminal {
   public:
@@ -213,20 +203,17 @@ class Pseudoterminal {
             return;
         }
         const auto foreground = ::tcgetpgrp(master_);
-        if (foreground > 0 && foreground != pid_) {
-            ::kill(-foreground, SIGHUP);
-            ::kill(-foreground, SIGCONT);
-        }
+        signal_foreground(foreground, SIGHUP);
         ::kill(pid_, SIGHUP);
         ::kill(pid_, SIGCONT);
         const auto deadline = Clock::now() + 150ms;
-        while (!exited() && Clock::now() < deadline) {
+        while (Clock::now() < deadline &&
+               (!exited() || (foreground > 0 && foreground != pid_ && ::kill(-foreground, 0) == 0))) {
             std::this_thread::sleep_for(10ms);
         }
-        if (foreground > 0 && foreground != pid_ && ::getsid(foreground) == pid_) {
-            ::kill(-foreground, SIGKILL);
-        }
-        if (!exited()) {
+        signal_foreground(foreground, SIGKILL);
+        // The unreaped child reserves its PID and thus its shell process group.
+        if (foreground == pid_ || !exited()) {
             ::kill(-pid_, SIGKILL);
             ::kill(pid_, SIGKILL);
         }
@@ -236,13 +223,50 @@ class Pseudoterminal {
     }
 
   private:
+    void signal_foreground(pid_t foreground, int signal) const
+    {
+        if (foreground <= 0 || foreground == pid_) {
+            return;
+        }
+        // A pipeline can outlive its group leader. Verify each member against the
+        // unreaped shell's session and signal its process descriptor, immune to PID reuse.
+        std::error_code error;
+        std::filesystem::directory_iterator it("/proc", error), end;
+        for (; !error && it != end; it.increment(error)) {
+            const auto& path = it->path();
+            const pid_t member = std::atoi(path.filename().c_str());
+            if (member <= 0 || ::getpgid(member) != foreground) {
+                continue;
+            }
+            Descriptor process(::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+            if (process.get() < 0 || ::getsid(member) != pid_ || ::getpgid(member) != foreground) {
+                continue;
+            }
+            if (::syscall(SYS_pidfd_send_signal, process.get(), signal, nullptr, 0) < 0 && errno == ENOSYS) {
+                // Older kernels can deliver an interrupt directly to the tty's current job.
+                if (signal == SIGHUP && ::tcgetpgrp(master_) == foreground) {
+                    ::ioctl(master_, TIOCSIG, SIGINT);
+                }
+                break;
+            }
+            if (signal == SIGHUP) {
+                ::syscall(SYS_pidfd_send_signal, process.get(), SIGCONT, nullptr, 0);
+            }
+        }
+    }
+
     int master_ = -1;
     pid_t pid_ = -1;
     std::mutex finish_mutex_;
     bool reaped_ = false;
 };
 
-std::optional<winsize> console_size(const std::string& message)
+struct ConsoleSize {
+    winsize window;
+    bool input_ack;
+};
+
+std::optional<ConsoleSize> console_size(const std::string& message)
 {
     if (message.size() > 256) {
         return {};
@@ -264,18 +288,76 @@ std::optional<winsize> console_size(const std::string& message)
     if (!rows || !cols) {
         return {};
     }
-    return winsize{.ws_row = rows, .ws_col = cols, .ws_xpixel = 0, .ws_ypixel = 0};
+    const auto ack = input.find("input_ack");
+    return ConsoleSize{{.ws_row = rows, .ws_col = cols, .ws_xpixel = 0, .ws_ypixel = 0},
+                       ack != input.end() && *ack == true};
 }
 
-enum class End { active, disconnected, revoked, exited, io_error };
+enum class End { active, disconnected, revoked, exited, io_error, input_full };
 
-End stream_output(std::stop_token stop, const Pseudoterminal& terminal, WebSocket& socket,
-                  const std::function<bool()>& session)
+// Both the socket reader and the PTY poller can flush pending input. The reader stays
+// available for resize and close frames even when the foreground job stops reading.
+class TerminalInput {
+  public:
+    TerminalInput(int master, bool acknowledge) : master_(master), acknowledge_(acknowledge) {}
+
+    bool pending() const
+    {
+        const std::lock_guard lock(mutex_);
+        return !bytes_.empty();
+    }
+
+    End forward(WebSocket& socket, std::string_view input = {})
+    {
+        ssize_t count;
+        {
+            const std::lock_guard lock(mutex_);
+            if (input.size() > input_window - (bytes_.size() - offset_)) {
+                return End::input_full;
+            }
+            if (bytes_.size() + input.size() > input_window) {
+                bytes_.erase(0, offset_);
+                offset_ = 0;
+            }
+            bytes_.append(input);
+            if (bytes_.empty()) {
+                return End::active;
+            }
+            count = ::write(master_, bytes_.data() + offset_, bytes_.size() - offset_);
+            if (count < 0 && (errno == EAGAIN || errno == EINTR)) {
+                return End::active;
+            }
+            if (count <= 0) {
+                return End::io_error;
+            }
+            offset_ += static_cast<std::size_t>(count);
+            if (offset_ == bytes_.size()) {
+                bytes_.clear();
+                offset_ = 0;
+            }
+        }
+        if (acknowledge_ && !socket.send(Json{{"type", "input_ack"}, {"bytes", count}}.dump())) {
+            return End::disconnected;
+        }
+        return End::active;
+    }
+
+  private:
+    int master_;
+    bool acknowledge_;
+    mutable std::mutex mutex_;
+    std::string bytes_;
+    std::size_t offset_ = 0;
+};
+
+End stream_terminal(std::stop_token stop, const Pseudoterminal& terminal, WebSocket& socket,
+                    TerminalInput& input, const std::function<bool()>& session)
 {
     std::array<char, 16384> buffer;
     pollfd master{terminal.master(), POLLIN, 0};
     int exit_reads = 16;
     while (!stop.stop_requested() && socket.is_open()) {
+        master.events = input.pending() ? POLLIN | POLLOUT : POLLIN;
         const int ready = ::poll(&master, 1, session_check_interval.count());
         if (ready < 0 && errno != EINTR) {
             return End::io_error;
@@ -286,7 +368,12 @@ End stream_output(std::stop_token stop, const Pseudoterminal& terminal, WebSocke
         if (!session()) {
             return End::revoked;
         }
-        if (ready > 0) {
+        if (ready > 0 && (master.revents & POLLOUT)) {
+            if (const auto end = input.forward(socket); end != End::active) {
+                return end;
+            }
+        }
+        if (ready > 0 && (master.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) {
             const auto count = ::read(master.fd, buffer.data(), buffer.size());
             if (count > 0) {
                 if (!socket.send(buffer.data(), static_cast<std::size_t>(count))) {
@@ -314,63 +401,62 @@ End stream_output(std::stop_token stop, const Pseudoterminal& terminal, WebSocke
     return End::disconnected;
 }
 
-bool write_input(const Pseudoterminal& terminal, std::string_view bytes, const std::function<bool()>& session,
-                 const std::atomic<End>& output_end)
+void close_terminal(WebSocket& socket, End end)
 {
-    // A stopped or busy foreground job can fill the PTY input queue.
-    const auto deadline = Clock::now() + 2s;
-    while (!bytes.empty() && output_end.load() == End::active && session() && Clock::now() < deadline) {
-        const auto count = ::write(terminal.master(), bytes.data(), bytes.size());
-        if (count > 0) {
-            bytes.remove_prefix(static_cast<std::size_t>(count));
-        } else if (count < 0 && errno == EAGAIN) {
-            pollfd master{terminal.master(), POLLOUT, 0};
-            const auto ready = ::poll(&master, 1, session_check_interval.count());
-            if ((ready < 0 && errno != EINTR) || (ready > 0 && (master.revents & (POLLERR | POLLHUP | POLLNVAL)))) {
-                return false;
-            }
-        } else if (count >= 0 || errno != EINTR) {
-            return false;
-        }
+    switch (end) {
+    case End::revoked:
+        socket.close(CloseStatus::PolicyViolation, "Session ended.");
+        break;
+    case End::exited:
+        socket.send(Json{{"type", "exit"}, {"message", "Console exited."}}.dump());
+        socket.close();
+        break;
+    case End::input_full:
+        console_error(socket, "Terminal input queue is full.", CloseStatus::PolicyViolation);
+        break;
+    case End::io_error:
+        console_error(socket, "Terminal I/O failed.", CloseStatus::InternalError);
+        break;
+    default:
+        socket.close();
+        break;
     }
-    return bytes.empty();
 }
 
-void run_console(Pseudoterminal& terminal, WebSocket& socket, const std::function<bool()>& session)
+void run_console(Pseudoterminal& terminal, WebSocket& socket, const std::function<bool()>& session,
+                 bool acknowledge_input)
 {
     if (!session()) {
         terminal.finish();
-        socket.close(CloseStatus::PolicyViolation, "Session ended.");
+        close_terminal(socket, End::revoked);
         return;
     }
-    if (!socket.send(Json{{"type", "ready"}}.dump())) {
+    Json ready{{"type", "ready"}};
+    if (acknowledge_input) {
+        ready["input_window"] = input_window;
+    }
+    if (!socket.send(ready.dump())) {
         return;
     }
 
-    std::atomic<End> output_end = End::active;
+    TerminalInput input(terminal.master(), acknowledge_input);
     std::jthread output([&](std::stop_token stop) {
-        const auto end = stream_output(stop, terminal, socket, session);
-        output_end = end;
-        // The input handler can be busy assembling a WebSocket message when the terminal ends.
-        terminal.finish();
-        if (end == End::revoked) {
-            socket.close(CloseStatus::PolicyViolation, "Session ended.");
+        const auto end = stream_terminal(stop, terminal, socket, input, session);
+        if (!stop.stop_requested()) {
+            terminal.finish();
+            close_terminal(socket, session() ? end : End::revoked);
         }
     });
     std::string message;
     auto end = End::active;
     const char* input_error = nullptr;
-    while ((end = output_end.load()) == End::active) {
+    while (socket.is_open()) {
         const auto result = socket.read(message);
+        if (result == httplib::ws::Fail) {
+            break;
+        }
         if (!session()) {
             end = End::revoked;
-            break;
-        }
-        if ((end = output_end.load()) != End::active) {
-            break;
-        }
-        if (result == httplib::ws::Fail) {
-            end = End::disconnected;
             break;
         }
         if (result == httplib::ws::Text) {
@@ -379,7 +465,7 @@ void run_console(Pseudoterminal& terminal, WebSocket& socket, const std::functio
                 input_error = "Invalid terminal dimensions.";
                 break;
             }
-            if (!terminal.resize(*size)) {
+            if (!terminal.resize(size->window)) {
                 end = End::io_error;
                 break;
             }
@@ -388,11 +474,8 @@ void run_console(Pseudoterminal& terminal, WebSocket& socket, const std::functio
                 input_error = "Terminal input message is too large.";
                 break;
             }
-            if (!write_input(terminal, message, session, output_end)) {
-                end = output_end.load();
-                if (end == End::active) {
-                    end = End::io_error;
-                }
+            end = input.forward(socket, message);
+            if (end != End::active) {
                 break;
             }
         }
@@ -401,15 +484,55 @@ void run_console(Pseudoterminal& terminal, WebSocket& socket, const std::functio
     output.request_stop();
     terminal.finish();
     output.join();
-    if (end == End::revoked || !session()) {
-        socket.close(CloseStatus::PolicyViolation, "Session ended.");
-    } else if (input_error) {
-        console_error(socket, input_error, CloseStatus::InvalidPayload);
-    } else if (end == End::io_error) {
-        console_error(socket, "Terminal I/O failed.", CloseStatus::InternalError);
-    } else if (end == End::exited && socket.send(Json{{"type", "exit"}, {"message", "Console exited."}}.dump())) {
-        socket.close();
+    if (socket.is_open()) {
+        if (!session()) {
+            close_terminal(socket, End::revoked);
+        } else if (input_error) {
+            console_error(socket, input_error, CloseStatus::InvalidPayload);
+        } else {
+            close_terminal(socket, end);
+        }
     }
+}
+
+std::optional<ConsoleSize> read_initial_size(WebSocket& socket, const std::function<bool()>& session)
+{
+    // read() can be assembling a frame when the opening deadline or the login expires.
+    std::binary_semaphore received{0};
+    std::jthread watchdog([&](std::stop_token stop) {
+        const auto deadline = Clock::now() + 10s;
+        while (!received.try_acquire_for(session_check_interval) && !stop.stop_requested()) {
+            if (!session()) {
+                close_terminal(socket, End::revoked);
+                return;
+            }
+            if (Clock::now() >= deadline) {
+                console_error(socket, "Timed out waiting for terminal dimensions.", CloseStatus::PolicyViolation);
+                return;
+            }
+        }
+    });
+
+    std::string message;
+    const auto result = socket.read(message);
+    received.release();
+    watchdog.join();
+    if (!socket.is_open() || result == httplib::ws::Fail) {
+        return {};
+    }
+    if (!session()) {
+        close_terminal(socket, End::revoked);
+        return {};
+    }
+    if (result == httplib::ws::Timeout) {
+        console_error(socket, "Timed out waiting for terminal dimensions.", CloseStatus::PolicyViolation);
+        return {};
+    }
+    const auto size = result == httplib::ws::Text ? console_size(message) : std::nullopt;
+    if (!size) {
+        console_error(socket, "Send initial terminal dimensions before input.", CloseStatus::InvalidPayload);
+    }
+    return size;
 }
 
 void serve_console(WebSocket& socket, const std::function<bool()>& session, const std::filesystem::path& directory)
@@ -419,41 +542,23 @@ void serve_console(WebSocket& socket, const std::function<bool()>& session, cons
         console_error(socket, "All console sessions are in use.", CloseStatus::PolicyViolation);
         return;
     }
-    socket.set_read_timeout(session_check_interval);
-    std::string message;
-    const auto deadline = Clock::now() + 10s;
-    while (Clock::now() < deadline) {
-        const auto result = socket.read(message);
-        if (!session()) {
-            socket.close(CloseStatus::PolicyViolation, "Session ended.");
-            return;
-        }
-        if (result == httplib::ws::Timeout) {
-            continue;
-        }
-        if (result == httplib::ws::Fail) {
-            return;
-        }
-        const auto size = result == httplib::ws::Text ? console_size(message) : std::nullopt;
+    socket.set_read_timeout(transport_timeout);
+    Pseudoterminal terminal;
+    try {
+        const auto size = read_initial_size(socket, session);
         if (!size) {
-            console_error(socket, "Send initial terminal dimensions before input.", CloseStatus::InvalidPayload);
             return;
         }
-        Pseudoterminal terminal;
-        if (!terminal.start(directory, *size)) {
+        if (!terminal.start(directory, size->window)) {
             terminal.finish();
             console_error(socket, "Cannot start the terminal shell.", CloseStatus::InternalError);
             return;
         }
-        try {
-            run_console(terminal, socket, session);
-        } catch (const std::system_error&) {
-            terminal.finish();
-            console_error(socket, "Cannot run the terminal session.", CloseStatus::InternalError);
-        }
-        return;
+        run_console(terminal, socket, session, size->input_ack);
+    } catch (const std::system_error&) {
+        terminal.finish();
+        console_error(socket, "Cannot run the terminal session.", CloseStatus::InternalError);
     }
-    console_error(socket, "Timed out waiting for terminal dimensions.", CloseStatus::PolicyViolation);
 }
 #endif
 

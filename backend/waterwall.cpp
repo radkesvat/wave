@@ -38,18 +38,9 @@ bool prepare_directory(const fs::path& path)
 
 int core_input(std::string_view json)
 {
-    int fd = ::memfd_create("core.json", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    const int fd = above_stdio(::memfd_create("core.json", MFD_CLOEXEC | MFD_ALLOW_SEALING));
     if (fd < 0) {
         return -1;
-    }
-    // Keep the temporary descriptor separate from stdin, even if Wave started with it closed.
-    if (fd <= STDERR_FILENO) {
-        const int input = ::fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
-        ::close(fd);
-        if (input < 0) {
-            return -1;
-        }
-        fd = input;
     }
     while (!json.empty()) {
         const auto written = ::write(fd, json.data(), json.size());
@@ -78,15 +69,11 @@ pid_t launch(const fs::path& executable, const fs::path& directory, int input)
         ::close(input);
         return -1;
     }
-    if (result_pipe[1] <= STDERR_FILENO) {
-        const int writer = ::fcntl(result_pipe[1], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
-        ::close(result_pipe[1]);
-        if (writer < 0) {
-            ::close(result_pipe[0]);
-            ::close(input);
-            return -1;
-        }
-        result_pipe[1] = writer;
+    result_pipe[1] = above_stdio(result_pipe[1]);
+    if (result_pipe[1] < 0) {
+        ::close(result_pipe[0]);
+        ::close(input);
+        return -1;
     }
     const auto descriptor_limit = open_file_limit();
     const auto parent = ::getpid();

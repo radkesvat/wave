@@ -449,7 +449,6 @@ test('attempts first-run installation once and lets an authenticated administrat
             '',
         ].join('\n'), { mode: 0o700 });
         const env = {
-            ...process.env,
             PATH: tools + delimiter + process.env.PATH,
             WAVE_CORE_TEST_CALLS: calls,
             WAVE_CORE_TEST_RELEASE: released,

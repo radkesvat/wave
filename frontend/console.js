@@ -2,7 +2,7 @@ const maxDimension = 1000;
 const frameSize = 16 * 1024;
 const maxInputQueue = 1024 * 1024;
 const idleMessage = "Shell runs as the Wave service account.";
-const inputQueueMessage = "Terminal input queue is full. Try again in a moment.";
+const connectedMessage = "Connected to host shell. Press Ctrl+Shift+Space to focus Close terminal.";
 
 function loadStylesheet() {
     return new Promise((resolve, reject) => {
@@ -21,6 +21,7 @@ export function createConsole(panel, copyText) {
     const toggle = panel.querySelector("#wave-console-toggle");
     const ctrl = panel.querySelector("#wave-console-ctrl");
     const esc = panel.querySelector("#wave-console-esc");
+    const screenReader = panel.querySelector("#wave-console-screen-reader");
     const encoder = new TextEncoder();
     let assets;
     let session;
@@ -62,14 +63,22 @@ export function createConsole(panel, copyText) {
     function sendInput(bytes) {
         const socket = session?.socket;
         if (!session?.ready || socket?.readyState !== WebSocket.OPEN) return;
-        if (socket.bufferedAmount + bytes.length > maxInputQueue) {
-            status.textContent = inputQueueMessage;
+        const capacity = session.inputWindow ?? maxInputQueue;
+        if (bytes.length > capacity) {
+            const limit = capacity === maxInputQueue ? "1 MiB" : `${capacity}-byte`;
+            status.textContent = `Paste is too large. Split it into pieces within the ${limit} input limit.`;
+            return;
+        }
+        const pending = session.inputWindow ? session.unacknowledged : socket.bufferedAmount;
+        if (pending + bytes.length > capacity) {
+            status.textContent = "Terminal input queue is full. Try again in a moment.";
             return;
         }
         for (let offset = 0; offset < bytes.length; offset += frameSize) {
             socket.send(bytes.subarray(offset, offset + frameSize));
         }
-        if (status.textContent === inputQueueMessage) status.textContent = "Connected";
+        if (session.inputWindow) session.unacknowledged += bytes.length;
+        if (status.textContent !== connectedMessage) status.textContent = connectedMessage;
     }
 
     function sendText(data) {
@@ -90,7 +99,9 @@ export function createConsole(panel, copyText) {
         if (connection.socket.readyState !== WebSocket.OPEN) return;
         const { cols, rows } = terminal;
         if (connection.cols === cols && connection.rows === rows) return;
-        connection.socket.send(JSON.stringify({ type: "resize", cols, rows }));
+        const resize = { type: "resize", cols, rows };
+        if (connection.cols === undefined) resize.input_ack = true;
+        connection.socket.send(JSON.stringify(resize));
         connection.cols = cols;
         connection.rows = rows;
     }
@@ -114,9 +125,26 @@ export function createConsole(panel, copyText) {
             return;
         }
         if (reply?.type === "ready") {
+            const windowSize = reply.input_window;
+            if (connection.ready ||
+                (windowSize !== undefined && (!Number.isSafeInteger(windowSize) || windowSize <= 0))) {
+                finish(connection, "Unexpected terminal response.");
+                return;
+            }
+            if (windowSize !== undefined) {
+                connection.inputWindow = Math.min(windowSize, maxInputQueue);
+                connection.unacknowledged = 0;
+            }
             connection.ready = true;
             terminal.options.disableStdin = false;
-            updateControls("Connected");
+            updateControls(connectedMessage);
+        } else if (reply?.type === "input_ack") {
+            if (!connection.inputWindow || !Number.isSafeInteger(reply.bytes) ||
+                reply.bytes <= 0 || reply.bytes > connection.unacknowledged) {
+                finish(connection, "Invalid terminal input acknowledgement.");
+                return;
+            }
+            connection.unacknowledged -= reply.bytes;
         } else if (reply?.type === "exit" || reply?.type === "error") {
             finish(connection, typeof reply.message === "string" ? reply.message : "Terminal ended.");
         }
@@ -170,6 +198,7 @@ export function createConsole(panel, copyText) {
                 fontFamily: 'ui-monospace, "Cascadia Mono", "Liberation Mono", monospace',
                 fontSize: 14,
                 minimumContrastRatio: panel.hasAttribute("data-high-contrast") ? 7 : 4.5,
+                screenReaderMode: screenReader.checked,
                 scrollback: 5000,
                 theme: { background: "#050506", foreground: "#eaebff", cursor: "#f3814a" }
             });
@@ -179,6 +208,12 @@ export function createConsole(panel, copyText) {
             terminal.onData(sendText);
             terminal.onBinary(data => sendInput(Uint8Array.from(data, char => char.charCodeAt(0))));
             terminal.attachCustomKeyEventHandler(event => {
+                if (event.type === "keydown" && event.ctrlKey && event.shiftKey && event.code === "Space" &&
+                    !event.altKey && !event.metaKey) {
+                    event.preventDefault();
+                    toggle.focus();
+                    return false;
+                }
                 if (event.type === "keydown" && event.ctrlKey && event.shiftKey && event.code === "KeyC" &&
                     terminal.hasSelection()) {
                     event.preventDefault();
@@ -209,6 +244,9 @@ export function createConsole(panel, copyText) {
     toggle.addEventListener("click", () => {
         if (session) disconnect();
         else open();
+    });
+    screenReader.addEventListener("change", () => {
+        if (terminal) terminal.options.screenReaderMode = screenReader.checked;
     });
     toggle.disabled = false;
     new ResizeObserver(fit).observe(mount);

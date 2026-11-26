@@ -375,6 +375,8 @@ test('renders a full-screen terminal, forwards keystrokes and resize, and closes
         await waitForUsers(page);
         await openView(page, 'Console');
         assert.equal(connections, 0, 'Opening Console does not start a shell on its own.');
+        const screenReader = page.getByRole('checkbox', { name: 'Screen reader output' });
+        await screenReader.check();
         await page.getByRole('button', { name: 'Open terminal', exact: true }).click({ timeout });
         const initial = resize(await waitForFrame(resize));
         assert.ok(initial.cols >= 80 && initial.rows >= 24);
@@ -385,12 +387,31 @@ test('renders a full-screen terminal, forwards keystrokes and resize, and closes
         const terminal = page.locator('#wave-console-terminal');
         const bounds = await terminal.boundingBox();
         assert.ok(bounds && bounds.height >= 400 && bounds.width >= 800, 'The terminal fills the work pane.');
-        await terminal.getByText('Fixture screen 雪', { exact: true }).waitFor({ timeout });
-        await terminal.locator('textarea').focus();
+        const renderedText = 'Fixture screen 雪';
+        await terminal.locator('.xterm-rows').getByText(renderedText, { exact: true }).waitFor({ timeout });
+        await terminal.getByRole('listitem').filter({ hasText: renderedText }).waitFor({ timeout });
+        const input = terminal.locator('textarea');
+        assert.ok(await input.evaluate(element => element === document.activeElement));
         await page.keyboard.press('ArrowUp');
         await page.keyboard.press('Control+c');
         await waitForFrame(frame => Buffer.isBuffer(frame) && frame.equals(Buffer.from('\x1b[A')));
         await waitForFrame(frame => Buffer.isBuffer(frame) && frame.equals(Buffer.from('\x03')));
+
+        await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+        await page.evaluate(() => navigator.clipboard.writeText('x'.repeat(1024 * 1024 + 1)));
+        const sentInputs = () => frames.filter(Buffer.isBuffer);
+        const beforePaste = sentInputs().length;
+        await page.keyboard.press('Control+Shift+v');
+        const status = page.locator('#wave-console-status');
+        await status.getByText(/Split it into pieces/).waitFor({ timeout });
+        await page.keyboard.press('Tab');
+        await waitForFrame(frame => Buffer.isBuffer(frame) && frame.equals(Buffer.from('\t')));
+        assert.equal(sentInputs().length, beforePaste + 1, 'Oversized paste sends no partial input.');
+        await status.getByText(/Ctrl\+Shift\+Space/).waitFor({ timeout });
+        await page.keyboard.press('Control+Shift+Space');
+        const close = page.getByRole('button', { name: 'Close terminal', exact: true });
+        assert.ok(await close.evaluate(element => element === document.activeElement));
+        assert.equal(closed, false);
 
         await page.setViewportSize({ width: 1280, height: 840 });
         await waitForFrame(frame => resize(frame)?.cols < initial.cols);
@@ -406,6 +427,57 @@ test('renders a full-screen terminal, forwards keystrokes and resize, and closes
 function waitForUsers(page) {
     return status(page, /Wave Users.*2 users/);
 }
+
+test('reserves space for a whole paste until the terminal acknowledges input bytes', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    try {
+        await mockPreview(page, fixture());
+        const inputs = [];
+        let initialResize;
+        let socket;
+        await page.routeWebSocket(consoleUrl, route => {
+            socket = route;
+            route.onMessage(frame => {
+                if (typeof frame === 'string') {
+                    if (!initialResize) {
+                        initialResize = JSON.parse(frame);
+                        route.send(JSON.stringify({ type: 'ready', input_window: 5 }));
+                    }
+                } else {
+                    inputs.push(frame.toString());
+                    route.send(Buffer.from(`Received ${inputs.length}\r\n`));
+                }
+            });
+        });
+        await page.goto(url);
+        await waitForUsers(page);
+        await openView(page, 'Console');
+        await page.getByRole('button', { name: 'Open terminal', exact: true }).click({ timeout });
+        const status = page.locator('#wave-console-status');
+        await status.getByText(/Connected to host shell/).waitFor({ timeout });
+        assert.equal(initialResize.input_ack, true);
+        await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+        await page.evaluate(() => navigator.clipboard.writeText('雪'));
+        const output = page.locator('#wave-console-terminal');
+        await page.keyboard.press('Control+Shift+v');
+        await output.getByText('Received 1', { exact: true }).waitFor({ timeout });
+        await page.keyboard.press('Control+Shift+v');
+        await status.getByText(/queue is full/).waitFor({ timeout });
+
+        socket.send(JSON.stringify({ type: 'input_ack', bytes: 1 }));
+        socket.send(Buffer.from('One byte consumed\r\n'));
+        await output.getByText('One byte consumed', { exact: true }).waitFor({ timeout });
+        await page.keyboard.press('Control+Shift+v');
+        await output.getByText('Received 2', { exact: true }).waitFor({ timeout });
+        assert.deepEqual(inputs, ['雪', '雪']);
+        await status.getByText(/Connected to host shell/).waitFor({ timeout });
+        socket.send(JSON.stringify({ type: 'input_ack', bytes: 6 }));
+        await status.getByText(/Invalid terminal input acknowledgement/).waitFor({ timeout });
+        await page.getByRole('button', { name: 'Open terminal', exact: true }).waitFor({ timeout });
+    } finally {
+        await page.close();
+    }
+});
 
 test('creates and enables a config from the top-bar menu on touch', async () => {
     const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });

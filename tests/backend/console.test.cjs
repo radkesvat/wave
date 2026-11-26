@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
-const { randomBytes } = require('node:crypto');
+const { createHash, randomBytes } = require('node:crypto');
 const { once } = require('node:events');
+const { readFileSync } = require('node:fs');
 const { writeFile } = require('node:fs/promises');
 const { request } = require('node:http');
 const { dirname, join } = require('node:path');
@@ -93,14 +94,23 @@ async function consoleTerminal(t, { origin, cookie }, cols, rows) {
     }
 
     await once(socket, 'open', { signal: AbortSignal.timeout(timeout) });
-    resize(cols, rows);
+    socket.send(JSON.stringify({ type: 'resize', cols, rows, input_ack: true }));
     const expectStatus = type => until(() => statuses.find(status => status.type === type),
         () => `Expected terminal status ${type}, got ${JSON.stringify(statuses)}`);
-    await expectStatus('ready');
-    const send = data => socket.send(Buffer.from(data));
-    send('unset HISTFILE\r');
+    assert.equal((await expectStatus('ready')).input_window, 1024 * 1024);
+    let sent = 0;
+    function send(data) {
+        const bytes = Buffer.from(data);
+        socket.send(bytes);
+        sent += bytes.length;
+    }
+    function waitForInput() {
+        const acknowledged = () => statuses.filter(status => status.type === 'input_ack')
+            .reduce((sum, status) => sum + status.bytes, 0);
+        return until(() => acknowledged() === sent, () => `Expected acknowledgements for all ${sent} input bytes`);
+    }
     return {
-        resize, expectOutput, send, expectStatus,
+        resize, expectOutput, send, expectStatus, waitForInput,
         close: () => socket.close(),
         closed: () => until(() => closeEvent, () => 'Expected the terminal socket to close'),
     };
@@ -171,4 +181,51 @@ test('streams an interactive PTY, resizes foreground apps, and reaps closed sess
         assert.equal((await first.closed()).code, 1008);
         await reaped(Number(firstPid));
         assert.equal(await upgradeStatus(fixture.origin, { Cookie: fixture.cookie, Origin: fixture.origin }), 401);
+    });
+
+test('retains a paste until a busy foreground program reads it', { skip: process.platform !== 'linux' }, async t => {
+    const fixture = await administrator(t);
+    const terminal = await consoleTerminal(t, fixture, 80, 24);
+    const paste = randomBytes(48 * 1024);
+    const digest = createHash('sha256').update(paste).digest('hex');
+    terminal.send("stty raw -echo; printf 'WAVE-PASTE-%s\\n' READY; sleep 3; " +
+        `head -c ${paste.length} | sha256sum; stty sane; printf 'WAVE-PASTE-%s\\n' DONE\r`);
+    await terminal.expectOutput(/WAVE-PASTE-READY\n/);
+    for (let offset = 0; offset < paste.length; offset += 16 * 1024) {
+        terminal.send(paste.subarray(offset, offset + 16 * 1024));
+    }
+    await terminal.expectOutput(new RegExp(digest));
+    await terminal.expectOutput(/WAVE-PASTE-DONE\r\n/);
+    await terminal.waitForInput();
+
+    terminal.send("stty raw -echo; printf 'WAVE-BUSY:%s\\n' \"$$\"; sleep 30\r");
+    const [, shellPid] = await terminal.expectOutput(/WAVE-BUSY:(\d+)\n/);
+    terminal.send(paste);
+    terminal.close();
+    await terminal.closed();
+    await reaped(Number(shellPid));
+});
+
+test('stops the remaining foreground pipeline stage when its group leader has been reaped',
+    { skip: process.platform !== 'linux' }, async t => {
+        const fixture = await administrator(t);
+        const terminal = await consoleTerminal(t, fixture, 80, 24);
+        terminal.send("sh -c 'echo $$' | sh -c 'read leader; trap \"\" HUP; " +
+            "printf \"WAVE-PIPE:%s:%s\\n\" \"$leader\" \"$$\"; exec sleep 30'\r");
+        const [, leader, member] = await terminal.expectOutput(/WAVE-PIPE:(\d+):(\d+)\r\n/);
+        const processStat = `/proc/${member}/stat`;
+        const fields = readFileSync(processStat, 'utf8').split(') ')[1].split(' ');
+        assert.equal(fields[2], leader, 'First pipeline stage should be the foreground group leader');
+        await reaped(Number(leader));
+        terminal.close();
+        await terminal.closed();
+        await until(() => {
+            try {
+                // A container's init may leave an exited orphan as a zombie.
+                return readFileSync(processStat, 'utf8').includes(') Z ');
+            } catch (error) {
+                if (error.code === 'ENOENT') return true;
+                throw error;
+            }
+        }, () => `Foreground pipeline stage ${member} survived closing its terminal`);
     });

@@ -17,6 +17,9 @@ FetchContent_Declare(httplib
     URL_HASH SHA256=be711ddaf7a3655d8f23aa5655709250b24d247aedd4b2629989d18b6164e5be
 )
 FetchContent_MakeAvailable(httplib)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    include(httplib_websocket_close.cmake)
+endif()
 
 enable_language(C)
 # Argon2 reference implementation, release 20190702.

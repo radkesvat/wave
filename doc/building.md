@@ -129,8 +129,10 @@ the OpenSSL 3 development package. The first configure downloads cpp-httplib
 v0.67.0, nlohmann/json v3.12.0, and the Argon2 reference implementation release
 `20190702` and verifies their pinned archive checksums. [cpp-httplib release](https://github.com/yhirose/cpp-httplib/releases/tag/v0.67.0), [nlohmann/json release](https://github.com/nlohmann/json/releases/tag/v3.12.0)
 
-Linux builds include HTTPS support by default. Use `-DWAVE_ENABLE_AUTH=OFF`
-to build without HTTPS support. HTTP still requires administrator sign-in.
+On Linux, the build patches cpp-httplib so closing a WebSocket wakes a thread
+that is still reading terminal input. Linux builds include HTTPS support by
+default. Use `-DWAVE_ENABLE_AUTH=OFF` to build without HTTPS support.
+HTTP still requires administrator sign-in.
 
 Run these commands from the Wave root with the native compiler on `PATH`.
 Use `backend-debug` in both commands for a debug build.
@@ -307,15 +309,31 @@ Full-screen programs use the host's `xterm-256color` terminfo entry.
 Use **Ctrl+Shift+V** or the browser's Paste command to paste on Linux.
 Select **Ctrl**, then press a letter to send its control character.
 Select **Esc** to send Escape.
+Press **Ctrl+Shift+Space** to move focus from the terminal to **Close terminal**
+while the shell or a full-screen program keeps running. Enable **Screen reader
+output** in the toolbar to read terminal rows and hear new output.
 Use `exit` or **Close terminal** to end the session. Leaving Console,
 disconnecting, and session revocation also close its terminal. A Wave backend
 can host up to four console sessions at a time.
+On Linux 5.1 and later, Wave can forcibly stop foreground pipeline stages
+that ignore a terminal hangup. On older kernels, a foreground job that
+ignores both interrupts and hangups can continue after disconnecting.
 
 The terminal uses the authenticated, same-origin `/ws/console` WebSocket.
 Binary frames carry terminal bytes in both directions. A text frame such
 as `{"type":"resize","cols":100,"rows":30}` starts the shell on first receipt
 and resizes it thereafter. The server reports terminal status in text
 frames with `type` set to `ready`, `exit`, or `error`.
+
+Each binary input message can carry up to 64 KiB. The server allows up to
+1 MiB of pending input per terminal. The browser requests input acknowledgements
+with `"input_ack":true` in the first resize frame. The server adds
+`"input_window":1048576` to its `ready`
+frame and sends `{"type":"input_ack","bytes":N}` as it writes each group of
+`N` bytes to the pseudoterminal. The browser sends a whole paste only when it
+fits in the remaining window. If the queue is full, wait and retry the paste.
+Split pastes larger than the window into smaller pieces. With an older backend
+that omits `input_window`, the browser limits the WebSocket's outgoing buffer.
 
 ### Panel Controls and versioning
 
