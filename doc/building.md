@@ -157,9 +157,10 @@ Both Telegram Bot forms use `apply_bot_settings`. Settings sends
 submitted fields so saves from the two forms can arrive in either order.
 
 Other connected browsers receive the shared updates. Overview and Server
-Status use the same server metrics. Restarting the process restores the
-sample data. The console, credentials, and bot actions run as in-memory
-demonstrations.
+Status use the same server metrics. The Server Status charts show recent
+samples from a rolling history of up to 19 points, sampled about every five
+seconds. Restarting the process restores the sample data. The console,
+credentials, and bot actions run as in-memory demonstrations.
 
 The standalone `/ws/overview` endpoint sends one JSON text frame and closes
 the connection. Its fixed fixture contains `cpu_percent`, `memory_used_gib`,

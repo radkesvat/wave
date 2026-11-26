@@ -46,7 +46,7 @@ void chart(const char* title, const char* unit, double ceiling, float height,
         const auto label = std::format("{:.0f}", ceiling * tick / 4);
         draw.AddText({left - ImGui::CalcTextSize(label.c_str()).x - 5, y - 8}, plot_muted, label.c_str());
     }
-    draw.AddText({left, bottom + 5}, plot_muted, "Past hour");
+    draw.AddText({left, bottom + 5}, plot_muted, "Recent samples");
     draw.AddText({right - ImGui::CalcTextSize("Now").x, bottom + 5}, plot_muted, "Now");
 
     const auto mouse = ImGui::GetIO().MousePos;
