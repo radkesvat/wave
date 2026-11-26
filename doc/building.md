@@ -67,6 +67,9 @@ errors. Panes, tabs, and controls use rounded corners. Table rows, plot grids,
 and progress fills keep straight edges. Borders use logical pixels so they
 scale with the canvas.
 
+Workspace buttons use a lighter fill, a subtle shadow, and distinct colors
+for hover and press. The header uses flat Menu and Tools controls.
+
 Wave embeds Poppins Medium 4.004. Workspace text uses 23 logical pixels from
 1600 CSS pixels and 18 at narrower widths. Secondary text and headings use
 shared sizes. The font notice is available in About and under `site/licenses/`.

@@ -472,7 +472,7 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
             ImGui::TextColored(theme::rgba(Color::secondary_text), "Loading sample data…");
         } else {
             ImGui::TextColored(theme::rgba(Color::warning), "Sample data unavailable.");
-            if (ImGui::Button("Reconnect")) {
+            if (theme::button("Reconnect")) {
                 session.start();
             }
         }

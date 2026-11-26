@@ -44,7 +44,7 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
     const bool ready = session.status() == PreviewStatus::ready && logs != session.data().end();
     bool turned_on = false;
 
-    if (ImGui::Button("Options")) {
+    if (theme::button("Options")) {
         ImGui::OpenPopup("Log options");
     }
     if (ImGui::BeginPopup("Log options")) {
@@ -55,7 +55,7 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
     }
     ImGui::SameLine();
     ImGui::BeginDisabled(!ready);
-    if (ImGui::Button("Clear")) {
+    if (theme::button("Clear")) {
         state.local_feedback.clear();
         if (!session.send({{"action", "clear_logs"}})) {
             state.local_feedback = "Could not clear preview logs.";
@@ -63,7 +63,7 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
         }
     }
     ImGui::SameLine();
-    const bool copy = ImGui::Button("Copy");
+    const bool copy = theme::button("Copy");
     ImGui::EndDisabled();
 
     if (!narrow) {

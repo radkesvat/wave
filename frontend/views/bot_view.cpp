@@ -147,7 +147,7 @@ void bot_connection(BotViewState& state, PreviewSession& session, const Json& bo
     } else {
         ImGui::TextColored(rgba(Color::warning), "Sample bot disconnected");
     }
-    if (ImGui::Button(connected ? "Open setup demo" : "Set up bot")) {
+    if (theme::button(connected ? "Open setup demo" : "Set up bot")) {
         session.abandon(state.connect_request);
         state.setup = Setup::intro;
         state.connect_reply.reset();
@@ -158,13 +158,13 @@ void bot_connection(BotViewState& state, PreviewSession& session, const Json& bo
         if (!narrow) {
             ImGui::SameLine();
         }
-        if (ImGui::Button("Copy access link")) {
+        if (theme::button("Copy access link")) {
             const std::string link{string_field(bot, "admin_link")};
             ImGui::SetClipboardText(link.c_str());
             state.access_link_copied = !link.empty();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Disconnect")) {
+        if (theme::button("Disconnect")) {
             state.requested_dialog = BotViewState::Dialog::disconnect;
         }
     }
@@ -248,7 +248,7 @@ void bot_settings(BotViewState& state, PreviewSession& session)
     }
 
     ImGui::BeginDisabled(!state.settings_dirty);
-    if (ImGui::Button("Save bot settings")) {
+    if (theme::button("Save bot settings")) {
         Json rules = Json::object();
         for (std::size_t i = 0; i < notification_options.size(); ++i) {
             rules[notification_options[i].key] = {{"enabled", state.rules[i].enabled},
@@ -283,7 +283,7 @@ void bot_overrides(BotViewState& state, PreviewSession& session)
         wrapped("Enter 0 for the default port or a value from 1 to 65535.", Color::error);
     }
     ImGui::BeginDisabled(!state.overrides_dirty || !valid);
-    if (ImGui::Button("Save overrides")) {
+    if (theme::button("Save overrides")) {
         submit_bot_save(state.overrides_save, session,
                         {{"overrides",
                           {{"domain", state.domain.data()},
@@ -304,12 +304,12 @@ void bot_actions(BotViewState& state, PreviewSession& session, const Json& bot)
     ImGui::TextUnformatted("Demo message");
     ImGui::InputTextMultiline("##bot-message", state.message.data(), state.message.size(), {-1, 76});
     ImGui::BeginDisabled(!state.message[0]);
-    if (ImGui::Button("Message preview")) {
+    if (theme::button("Message preview")) {
         state.requested_dialog = BotViewState::Dialog::message;
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Test status")) {
+    if (theme::button("Test status")) {
         session.send(
             {{"action", "bot_action"}, {"kind", "test status"}, {"audience", audiences[state.audience]}});
     }

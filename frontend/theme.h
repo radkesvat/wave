@@ -35,6 +35,10 @@ enum class Color {
     warning,
     hover,
     pressed,
+    button_face,
+    button_hover,
+    button_pressed,
+    button_shadow,
     selected,
     chart_fill,
     text_selection,
@@ -58,5 +62,7 @@ ImU32 packed(Color color);
 ImVec4 rgba(Color color);
 void apply(bool high_contrast);
 void apply_text_scale(int viewport_width);
+bool button(const char* label, const ImVec2& size = {});
+bool small_button(const char* label);
 
 } // namespace wave::theme

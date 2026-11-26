@@ -44,6 +44,10 @@ constexpr auto standard = [] {
     colors[index(Color::warning)] = rgb(0xFFC36A);
     colors[index(Color::hover)] = rgb(0x37313B);
     colors[index(Color::pressed)] = rgb(0x41313B);
+    colors[index(Color::button_face)] = rgb(0x45404F);
+    colors[index(Color::button_hover)] = rgb(0x595067);
+    colors[index(Color::button_pressed)] = rgb(0x513938);
+    colors[index(Color::button_shadow)] = rgb(0x050405, 200);
     colors[index(Color::selected)] = colors[index(Color::raised)];
     colors[index(Color::chart_fill)] = rgb(active_orange, 38);
     colors[index(Color::text_selection)] = rgb(0x643B2E);
@@ -63,6 +67,9 @@ constexpr auto stronger = [] {
     colors[index(Color::focus)] = rgb(0xFFB48F);
     colors[index(Color::hover)] = rgb(0x423B49);
     colors[index(Color::pressed)] = rgb(0x533E48);
+    colors[index(Color::button_face)] = rgb(0x554C60);
+    colors[index(Color::button_hover)] = rgb(0x665A74);
+    colors[index(Color::button_pressed)] = rgb(0x633F3C);
     colors[index(Color::selected)] = rgb(0x3B3442);
     colors[index(Color::text_selection)] = rgb(0x754430);
     colors[index(Color::scrollbar)] = colors[index(Color::control_border)];
@@ -70,6 +77,14 @@ constexpr auto stronger = [] {
 }();
 
 const Palette* current = &standard;
+
+void push_button_colors()
+{
+    ImGui::PushStyleColor(ImGuiCol_Button, rgba(Color::button_face));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, rgba(Color::button_hover));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, rgba(Color::button_pressed));
+    ImGui::PushStyleColor(ImGuiCol_BorderShadow, rgba(Color::button_shadow));
+}
 
 } // namespace
 
@@ -182,6 +197,22 @@ void apply_text_scale(int viewport_width)
     auto& style = ImGui::GetStyle();
     style.FontSizeBase = compact ? secondary_font_size : workspace_font_size;
     style.ItemSpacing.y = compact ? 5.0f : 7.0f;
+}
+
+bool button(const char* label, const ImVec2& size)
+{
+    push_button_colors();
+    const bool pressed = ImGui::Button(label, size);
+    ImGui::PopStyleColor(4);
+    return pressed;
+}
+
+bool small_button(const char* label)
+{
+    push_button_colors();
+    const bool pressed = ImGui::SmallButton(label);
+    ImGui::PopStyleColor(4);
+    return pressed;
 }
 
 } // namespace wave::theme

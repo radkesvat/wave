@@ -61,18 +61,18 @@ TopologyViewState::Bounds draw_topology(TopologyViewState::Map& state, const Jso
                                         std::string_view map, bool narrow)
 {
     ImGui::BeginDisabled(state.zoom <= 0.7f);
-    if (ImGui::Button("-##zoom")) {
+    if (theme::button("-##zoom")) {
         state.zoom = std::max(0.7f, state.zoom / 1.25f);
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(state.zoom >= 2.5f);
-    if (ImGui::Button("+##zoom")) {
+    if (theme::button("+##zoom")) {
         state.zoom = std::min(2.5f, state.zoom * 1.25f);
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Fit map")) {
+    if (theme::button("Fit map")) {
         state.zoom = 1;
         state.offset_x = state.offset_y = 0;
     }

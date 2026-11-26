@@ -326,6 +326,39 @@ for (const { scale, highContrast, normal, hovered } of [
     });
 }
 
+test('draws raised Logs buttons with distinct interaction states', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    const preview = await mockPreview(page);
+    const pixel = async (x, y) => (await screenshotPixels(page, { x, y, width: 1, height: 1 })).pixels.slice(0, 3);
+
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*Preview fixture is ready/ }).waitFor();
+        await settleCanvas(page);
+
+        for (const x of [204, 279, 339]) {
+            assert.deepEqual(await pixel(x, 626), [69, 64, 79], 'Options, Clear, and Copy share a solid face.');
+        }
+        assert.ok((await pixel(230, 650))[0] < 31, 'The lower edge casts a shadow on the dark pane.');
+        assert.deepEqual(await pixel(540, 626), [13, 11, 14], 'The search field uses its inset fill.');
+
+        await page.mouse.move(294, 636);
+        await settleCanvas(page);
+        assert.deepEqual(await pixel(279, 626), [89, 80, 103]);
+        await page.mouse.down();
+        await settleCanvas(page);
+        assert.deepEqual(await pixel(279, 626), [81, 57, 56]);
+        await page.mouse.up();
+        assert.deepEqual((await preview.action(0)).request, { action: 'clear_logs' });
+
+        await page.mouse.move(132, 23);
+        await settleCanvas(page);
+        assert.deepEqual(await pixel(110, 12), [55, 49, 59], 'The header uses its flat hover treatment.');
+    } finally {
+        await page.close();
+    }
+});
+
 test('updates the painted page scrollbar when High contrast changes', async () => {
     const viewport = { ...desktop, height: 560 };
     const page = await browser.newPage({ viewport });

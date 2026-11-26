@@ -123,13 +123,13 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
         wrapped("Enter a panel name, admin name, domain, template, /path and port 1-65535.", Color::error);
     }
     ImGui::BeginDisabled(!state.dirty || !valid);
-    if (ImGui::Button("Apply changes")) {
+    if (theme::button("Apply changes")) {
         state.apply_reply.reset();
         ImGui::OpenPopup("Apply preview settings");
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Backup preview")) {
+    if (theme::button("Backup preview")) {
         state.backup = Json{{"format", "wave-preview"},
                             {"settings", settings},
                             {"users", array_field(session.data(), "users")}}
@@ -141,7 +141,7 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
         if (!narrow) {
             ImGui::SameLine();
         }
-        if (ImGui::Button("Revert edits")) {
+        if (theme::button("Revert edits")) {
             state.dirty = false;
             state.source = nullptr;
             state.password.fill('\0');

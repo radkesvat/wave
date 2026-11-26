@@ -56,24 +56,24 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
                        running ? "Bash preview running" : "Bash preview stopped");
     ImGui::TextWrapped("Try help, uptime, whoami or status for canned responses.");
 
-    if (ImGui::Button("Options")) {
+    if (theme::button("Options")) {
         ImGui::OpenPopup("Console options");
     }
     if (ImGui::BeginPopup("Console options")) {
         ImGui::Checkbox("Auto-scroll", &state.autoscroll);
-        if (ImGui::Button(running ? "Stop console" : "Start console")) {
+        if (theme::button(running ? "Stop console" : "Start console")) {
             session.send({{"action", running ? "stop_console" : "start_console"}});
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Clear##console")) {
+    if (theme::button("Clear##console")) {
         session.send({{"action", "clear_console"}});
         state.copied = false;
     }
     ImGui::SameLine();
-    const bool copy = ImGui::Button("Copy##console");
+    const bool copy = theme::button("Copy##console");
     if (!narrow) {
         ImGui::SameLine();
     }
@@ -133,7 +133,7 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
     if (!narrow) {
         ImGui::SameLine();
     }
-    const bool run = ImGui::Button(run_label);
+    const bool run = theme::button(run_label);
     if ((submitted || run) && state.command[0] &&
         session.send({{"action", "console_command"}, {"input", state.command.data()}})) {
         state.command[0] = '\0';
@@ -141,11 +141,11 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
         state.copied = false;
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton(previous_label)) {
+    if (theme::small_button(previous_label)) {
         fill(state.command, history_step(history, state.history_position, -1));
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton(next_label)) {
+    if (theme::small_button(next_label)) {
         fill(state.command, history_step(history, state.history_position, 1));
     }
     ImGui::EndDisabled();

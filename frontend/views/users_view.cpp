@@ -124,7 +124,7 @@ void submit(UsersViewState& state, PreviewSession& session, const char* action, 
 
 void row_options(UsersViewState& state, PreviewSession& session, const UserRecord& user)
 {
-    if (ImGui::Button("Options")) {
+    if (theme::button("Options")) {
         ImGui::OpenPopup("User options");
     }
     if (!ImGui::BeginPopup("User options")) {
@@ -488,7 +488,7 @@ void compact_users(UsersViewState& state, PreviewSession& session, const std::ve
     }
     state.sort_column = columns[state.compact_sort];
     ImGui::SameLine();
-    if (ImGui::Button(state.descending ? "Descending" : "Ascending")) {
+    if (theme::button(state.descending ? "Descending" : "Ascending")) {
         state.descending = !state.descending;
         state.compact_page = 0;
     }
@@ -509,13 +509,13 @@ void compact_users(UsersViewState& state, PreviewSession& session, const std::ve
     state.compact_page = std::min(state.compact_page, final_page);
 
     ImGui::BeginDisabled(state.compact_page == 0);
-    if (ImGui::Button("Previous")) {
+    if (theme::button("Previous")) {
         --state.compact_page;
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(state.compact_page == final_page);
-    if (ImGui::Button("Next")) {
+    if (theme::button("Next")) {
         ++state.compact_page;
     }
     ImGui::EndDisabled();
@@ -907,13 +907,13 @@ void render_users(UsersViewState& state, PreviewSession& session)
     const bool compact = width < desktop_widths.minimum_table;
     update_switch_requests(state, session, users.rows);
     ImGui::BeginDisabled(!ready);
-    if (ImGui::Button("Create user")) {
+    if (theme::button("Create user")) {
         open_dialog(state, session, UserDialog::create);
     }
     ImGui::SameLine();
     const float live_width = std::max(button_width("Live data"), button_width("Paused"));
     const char* live_label = users.live ? "Live data" : "Paused";
-    if (ImGui::Button(live_label, {live_width, 0})) {
+    if (theme::button(live_label, {live_width, 0})) {
         send(state, session, {{"action", "set_users_live"}, {"live", !users.live}});
     }
     const auto& style = ImGui::GetStyle();
@@ -921,7 +921,7 @@ void render_users(UsersViewState& state, PreviewSession& session)
         button_width("Create user") + live_width + button_width("Bot actions") + 2 * style.ItemSpacing.x) {
         ImGui::SameLine();
     }
-    if (ImGui::Button("Bot actions")) {
+    if (theme::button("Bot actions")) {
         ImGui::OpenPopup("User bot actions");
     }
     if (ImGui::BeginPopup("User bot actions")) {
