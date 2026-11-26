@@ -182,9 +182,10 @@ details**. **Use example** fills the initial demo credentials, `demo` and
 preview process. The dialog shows the request status and keeps the draft
 available after a rejection, timeout, or disconnect. When the server
 confirms, select **Open workspace**. Use your saved credentials from
-**Menu → Demo sign-in**. The domain and PEM path fields in **Panel Settings**
-are for sample values. Supply deployment credentials and TLS settings through
-the authenticated installation flow. [Authenticated HTTPS installation](authentication.md)
+**Menu → Demo sign-in**. **Panel Settings** shows the preview domain,
+certificate chain path, and private key path. **Apply changes** saves those
+sample values for the current preview process. Configure deployment TLS in
+`wave-db.json`. [Authenticated HTTPS installation](authentication.md)
 
 ### Preview controls and server options
 
@@ -248,6 +249,9 @@ and `password`. The server validates the name and both credentials before
 updating the panel name and the in-memory demo account. Existing domain,
 certificate, and private key settings are preserved. The preview snapshots
 omit the password.
+
+Send one or more of `domain`, `certificate_path`, and `private_key_path`
+in the `settings` object of an `apply_settings` request.
 
 User edits send the user ID and changed fields. Connection and limit options
 are updated individually so changes from other browsers to untouched fields

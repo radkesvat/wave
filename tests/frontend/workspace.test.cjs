@@ -71,9 +71,8 @@ function fixture() {
         logs: [{ ts: '09:41:02', level: 'info', message: 'Preview fixture is ready.' }],
         server: serverSnapshot,
         settings: {
-            name: 'Wave Preview', admin_username: 'demo', domain: 'wave.example.invalid', port: 2030,
-            websocket_path: '/ws/preview', site_template: 'Wave Standard', certificate_path: 'preview/server.crt',
-            private_key_path: 'preview/server.key', multiplex: true,
+            name: 'Wave Preview', admin_username: 'demo', domain: 'wave.example.invalid',
+            certificate_path: 'preview/server.crt', private_key_path: 'preview/server.key',
         },
         topology: {
             nodes: [
@@ -1701,69 +1700,79 @@ test('setup fields and actions are reachable at 320 × 256', async () => {
     }
 });
 
-test('applies a populated Settings draft after a broadcast and a page change', async () => {
+async function applyPreviewTlsSettings(page) {
+    await canvasClick(page, 245, 249);
+    const { bottom } = await dialogFrame(page);
+    await canvasClick(page, 754, bottom - 25);
+}
+
+test('applies only the TLS Settings draft after a broadcast and a page change', async () => {
     const page = await browser.newPage({ viewport: desktop });
     const data = fixture();
-    const original = { ...data.settings };
+    const tls = { domain: 'harbor.example.invalid', certificate_path: 'preview/harbor.crt',
+        private_key_path: 'preview/harbor.key' };
     const preview = await mockPreview(page, { data, handle(current, request, reply) {
         Object.assign(current.settings, request.settings);
-        reply({ feedback: 'Applied sample panel settings.' });
+        reply({ feedback: 'Applied sample TLS settings.' });
     } });
 
     try {
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
         await openView(page, 'Panel Settings');
-        await replaceText(page, 325, 141, 'Harbor QA');
+        await replaceText(page, 325, 105, tls.domain);
+        await replaceText(page, 325, 161, tls.certificate_path);
+        await replaceText(page, 325, 217, tls.private_key_path);
         data.settings.name = 'Another client';
         data.logs.push({ ts: '09:41:03', level: 'info', message: 'Received another client’s settings.' });
         await preview.broadcast();
         await page.getByRole('img', { name: /Received another client’s settings/ }).waitFor();
         await openView(page, 'Server Status');
         await openView(page, 'Panel Settings');
-        await canvasClick(page, 245, 414);
-        await canvasClick(page, 754, 436);
-        await page.getByRole('img', { name: /Applied sample panel settings/ }).waitFor();
+        await applyPreviewTlsSettings(page);
+        await page.getByRole('img', { name: /Applied sample TLS settings/ }).waitFor();
         assert.equal(preview.actions.length, 1);
-        assertRequest(preview.actions[0].request, { action: 'apply_settings', settings: { ...original, name: 'Harbor QA' } });
+        assertRequest(preview.actions[0].request, { action: 'apply_settings', settings: tls });
+        assert.equal(data.settings.name, 'Another client');
     } finally {
         await page.close();
     }
 });
 
-test('a later Settings save preserves a remote change received while the page was inactive', async () => {
+test('a later TLS Settings save preserves a remote change received while the page was inactive', async () => {
     const page = await browser.newPage({ viewport: desktop });
     const data = fixture();
     const original = { ...data.settings };
+    const { domain, certificate_path, private_key_path } = original;
+    const tls = { domain, certificate_path, private_key_path };
     const preview = await mockPreview(page, { data, handle() {} });
-    const apply = async () => {
-        await canvasClick(page, 245, 414);
-        await canvasClick(page, 754, 436);
-    };
 
     try {
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
         await openView(page, 'Panel Settings');
-        await replaceText(page, 325, 141, 'Harbor QA');
-        await apply();
+        await replaceText(page, 325, 105, 'harbor.example.invalid');
+        await applyPreviewTlsSettings(page);
         const first = await preview.action(0);
-        assertRequest(first.request, { action: 'apply_settings', settings: { ...original, name: 'Harbor QA' } });
+        assertRequest(first.request, { action: 'apply_settings',
+            settings: { ...tls, domain: 'harbor.example.invalid' } });
 
-        await canvasClick(page, 640, 445);
+        const { bottom } = await dialogFrame(page);
+        await canvasClick(page, 640, bottom - 25);
         await openView(page, 'Server Status');
-        data.settings = first.request.settings;
-        first.reply({ feedback: 'Applied the new panel name.' });
+        data.settings = { ...original, ...first.request.settings };
+        first.reply({ feedback: 'Applied the new domain.' });
         data.settings = original;
-        data.logs.push({ ts: '09:41:03', level: 'info', message: 'Another client restored the panel name.' });
+        data.logs.push({ ts: '09:41:03', level: 'info', message: 'Another client restored the domain.' });
         await preview.broadcast();
-        await page.getByRole('img', { name: /Another client restored the panel name/ }).waitFor();
+        await page.getByRole('img', { name: /Another client restored the domain/ }).waitFor();
 
         await openView(page, 'Panel Settings');
-        await replaceText(page, 325, 194, 'harbor-admin');
-        await apply();
+        await replaceText(page, 325, 161, 'preview/harbor.crt');
+        await applyPreviewTlsSettings(page);
         const second = await preview.action(1);
-        assertRequest(second.request, { action: 'apply_settings', settings: { ...original, admin_username: 'harbor-admin' } });
+        assertRequest(second.request, { action: 'apply_settings',
+            settings: { ...tls, certificate_path: 'preview/harbor.crt' } });
     } finally {
         await page.close();
     }

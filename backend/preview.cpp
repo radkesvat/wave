@@ -119,9 +119,7 @@ Json make_server()
 Json make_settings()
 {
     return {{"name", "Wave Preview"}, {"admin_username", "demo"}, {"domain", "wave.example.invalid"},
-            {"port", 2030}, {"websocket_path", "/ws/preview"}, {"site_template", "Wave Standard"},
-            {"certificate_path", "preview/server.crt"}, {"private_key_path", "preview/server.key"},
-            {"multiplex", true}};
+            {"certificate_path", "preview/server.crt"}, {"private_key_path", "preview/server.key"}};
 }
 
 Json make_topology()
@@ -303,17 +301,13 @@ bool update_user(const Json& input, Json& result)
         update_integer(*options, edited, "ip_limit", 0, 1000000);
 }
 
-bool update_settings(const Json& input, Json& result)
+bool update_tls_settings(const Json& input, Json& result)
 {
-    return input.is_object() && update_text(input, result, "name", 80, true) &&
-        update_text(input, result, "admin_username", 64, true) &&
+    return input.is_object() &&
+        (input.contains("domain") || input.contains("certificate_path") || input.contains("private_key_path")) &&
         update_text(input, result, "domain", 160, true) &&
-        update_integer(input, result, "port", 1, 65535) &&
-        update_field(input, result, "websocket_path", [](const Json& value) {
-            return text_value(value, 160, true) && value.get_ref<const std::string&>().starts_with('/');
-        }) && update_text(input, result, "site_template", 80, true) &&
-        update_text(input, result, "certificate_path", 160) && update_text(input, result, "private_key_path", 160) &&
-        update_bool(input, result, "multiplex");
+        update_text(input, result, "certificate_path", 160) &&
+        update_text(input, result, "private_key_path", 160);
 }
 
 bool update_bot_settings(const Json& input, Json& result)
@@ -707,17 +701,11 @@ private:
     {
         const auto values = input.find("settings");
         auto settings = data_["settings"];
-        if (values == input.end() || !update_settings(*values, settings)) {
-            return {false, "Enter valid preview settings. The WebSocket path must start with / and the port must be 1 to 65535."};
-        }
-        if (const auto password = values->find("password"); password != values->end()) {
-            if (!text_value(*password, 96, true)) {
-                return {false, "Enter a valid demo password."};
-            }
-            demo_password_ = password->get<std::string>();
+        if (values == input.end() || !update_tls_settings(*values, settings)) {
+            return {false, "Enter a valid preview domain or PEM path."};
         }
         data_["settings"] = std::move(settings);
-        return complete("Applied sample panel settings.");
+        return complete("Applied sample TLS settings.");
     }
 
     Reply apply_bot_settings(const Json& input)
@@ -942,9 +930,6 @@ private:
         }
         if (action == "apply_settings") {
             return apply_settings(input);
-        }
-        if (action == "backup_settings") {
-            return complete("Prepared sample panel backup.", "info");
         }
         if (action == "console_command") {
             return console_command(input);

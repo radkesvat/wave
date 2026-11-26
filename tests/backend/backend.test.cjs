@@ -402,12 +402,12 @@ test('validates in-memory config changes and protects the active config', async 
 });
 
 test('validates preview setup and updates only the panel name and demo credentials', async t => {
-    const { socket } = await connectPreview(t);
-    const saved = await requestPreview(socket, 'apply_settings', { settings: {
-        domain: 'qa.example.invalid', certificate_path: 'preview/qa.crt', private_key_path: 'preview/qa.key',
-        admin_username: 'settings-admin', password: 'existing-demo-password',
-    } });
+    const { socket, initial } = await connectPreview(t);
+    const tls = { domain: 'qa.example.invalid', certificate_path: 'preview/qa.crt', private_key_path: 'preview/qa.key' };
+    const saved = await requestPreview(socket, 'apply_settings', { settings: { ...tls,
+        name: 'Ignored name', admin_username: 'ignored-admin', password: 'ignored-password' } });
     assert.equal(saved.ok, true, saved.feedback);
+    assert.deepEqual(saved.data.settings, { ...initial.settings, ...tls });
 
     const setupCredentials = { username: 'preview-admin', password: 'demo-password' };
     const fields = { name: 'Wave QA', ...setupCredentials };
@@ -422,7 +422,7 @@ test('validates preview setup and updates only the panel name and demo credentia
         assert.deepEqual(rejected.data.settings, saved.data.settings);
     }
     const preservedSignIn = await requestPreview(socket, 'sign_in', {
-        username: 'settings-admin', password: 'existing-demo-password',
+        username: initial.settings.admin_username, password: 'wave-demo',
     });
     assert.equal(preservedSignIn.ok, true, preservedSignIn.feedback);
 
@@ -450,14 +450,23 @@ test('validates preview setup and updates only the panel name and demo credentia
     assert.equal(invalid.ok, false);
 });
 
-test('simulates preview settings, bot actions, and console entirely in memory', async t => {
-    const { socket } = await connectPreview(t);
-    const settings = await requestPreview(socket, 'apply_settings', { settings: { port: 4070, multiplex: false } });
+test('validates TLS fields and partially updates the preview settings', async t => {
+    const { socket, initial } = await connectPreview(t);
+    for (const settings of [{ port: 4070, multiplex: false }, { domain: '  ' },
+        { domain: 'valid.example.invalid', private_key_path: 5 }, { certificate_path: 'a'.repeat(161) }]) {
+        const rejected = await requestPreview(socket, 'apply_settings', { settings });
+        assert.equal(rejected.ok, false, rejected.feedback);
+        assert.deepEqual(rejected.data.settings, initial.settings);
+    }
+    const private_key_path = 'preview/renewed.key';
+    const settings = await requestPreview(socket, 'apply_settings', { settings: { private_key_path } });
     assert.equal(settings.ok, true, settings.feedback);
-    assert.equal(settings.data.settings.port, 4070);
-    assert.equal(settings.data.settings.multiplex, false);
+    assert.deepEqual(settings.data.settings, { ...initial.settings, private_key_path });
     assert.equal((await fetch(new URL('/', url))).status, 200);
+});
 
+test('simulates preview bot actions and console entirely in memory', async t => {
+    const { socket } = await connectPreview(t);
     const connected = await requestPreview(socket, 'bot_connect', { token: 'demo-placeholder' });
     assert.equal(connected.ok, true, connected.feedback);
     assert.equal(connected.data.bot.connected, true);
