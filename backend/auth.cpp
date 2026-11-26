@@ -154,7 +154,7 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         res.set_file_content(file, "application/wasm");
     });
     for (const auto* name : {"wave.txt", "dear-imgui.txt", "poppins.txt", "nlohmann-json.txt",
-                             "nlohmann-json-third-party.txt", "nayuki-qr.txt"}) {
+                             "nlohmann-json-third-party.txt", "nayuki-qr.txt", "implot.txt"}) {
         server.Get(std::string("/licenses/") + name,
                    [file = (site_dir / "licenses" / name).string()](const Request&, Response& res) {
                        res.set_file_content(file, "text/plain; charset=utf-8");

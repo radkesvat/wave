@@ -2,6 +2,7 @@
 
 #include "browser_ui.h"
 #include "dialog.h"
+#include "preview_backup.h"
 #include "view_helpers.h"
 
 #include <imgui_internal.h>
@@ -20,6 +21,10 @@ constexpr char popup_id[] = "###ServerPanelControlsDialog";
 constexpr char target_label[] = "Target panel version";
 constexpr char pending_message[] = "Applying to preview…";
 constexpr char disconnected_message[] = "The preview connection closed before confirming the change.";
+constexpr char restore_message[] =
+    "Choose a backup JSON file to replace the preview TLS settings and inactive configs.";
+constexpr char backup_selected_message[] = "Wave preview backup selected.";
+constexpr auto request_id_bytes = sizeof(",\"request_id\":18446744073709551615") - 1;
 
 const Json& server_snapshot(const PreviewSession& session)
 {
@@ -34,6 +39,14 @@ bool supports(const Json& core, std::string_view capability)
 bool can_edit_configs(const Json& core)
 {
     return supports(core, "configs") && field(core, "configs").is_array();
+}
+
+bool can_use_backup(const PreviewSession& session)
+{
+    const auto& settings = field(session.data(), "settings");
+    return session.ready() && can_edit_configs(field(server_snapshot(session), "core")) &&
+           std::ranges::all_of(preview_backup_tls_fields,
+                               [&](const char* key) { return field(settings, key).is_string(); });
 }
 
 bool can_stop(const Json& core)
@@ -383,6 +396,73 @@ void render_confirmation(PanelControlsState& state, PreviewSession& session, con
     }
 }
 
+void download_backup(const PreviewSession& session)
+{
+    auto settings = Json::object();
+    for (const auto* key : preview_backup_tls_fields) {
+        settings[key] = field(field(session.data(), "settings"), key);
+    }
+    auto configs = Json::array();
+    for (const auto& config : array_field(field(server_snapshot(session), "core"), "configs")) {
+        if (!bool_field(config, "active")) {
+            configs.push_back({{"name", field(config, "name")}, {"enabled", field(config, "enabled")}});
+        }
+    }
+    const Json backup = {{"format", preview_backup_format},
+                         {"version", preview_backup_version},
+                         {"settings", std::move(settings)},
+                         {"configs", std::move(configs)}};
+    download_preview_file("wave-preview-backup.json", backup.dump(2) + '\n', "application/json");
+}
+
+void render_restore(PanelControlsState& state, PreviewSession& session)
+{
+    if (const auto content = take_preview_json_file()) {
+        auto backup = Json::parse(*content, nullptr, false);
+        Json request = {{"action", "restore_preview_backup"}, {"backup", nullptr}};
+        if (field(backup, "format") == preview_backup_format &&
+            field(backup, "version").is_number_integer() &&
+            field(backup, "version") == preview_backup_version) {
+            request["backup"] = std::move(backup);
+        }
+        if (request["backup"].is_null() ||
+            request.dump().size() + request_id_bytes > max_preview_restore_request_bytes) {
+            state.reply = PreviewReply{PreviewReply::Status::rejected, "Choose a valid Wave preview backup."};
+        } else {
+            state.restore_request = std::move(request);
+        }
+    }
+
+    const bool pending = state.request_id.has_value();
+    const bool unavailable = !can_use_backup(session);
+    const bool selected = state.restore_request.is_object();
+    Dialog frame("Restore backup###ServerPanelControlsDialog", 380,
+                 {{"Cancel", pending}, {"Restore", pending || unavailable || !selected}});
+    if (!frame) {
+        return;
+    }
+    wrapped(restore_message);
+    ImGui::BeginDisabled(pending || unavailable);
+    if (theme::button("Choose file", {-1, control_height()})) {
+        state.restore_request = nullptr;
+        state.reply.reset();
+        choose_preview_json_file(max_preview_backup_file_bytes);
+    }
+    ImGui::EndDisabled();
+    if (selected) {
+        wrapped(backup_selected_message, Color::secondary_text);
+    }
+    show_result(state, session);
+    const int action = frame.footer();
+    if (action == 0 || (state.reply && state.reply->ok())) {
+        clear_preview_json_file();
+        state.restore_request = nullptr;
+        close_dialog(state);
+    } else if (action == 1) {
+        submit(state, session, state.restore_request);
+    }
+}
+
 } // namespace
 
 void update_panel_controls(PanelControlsState& state, PreviewSession& session)
@@ -400,6 +480,19 @@ void update_panel_controls(PanelControlsState& state, PreviewSession& session)
     if (state.dialog != ControlsDialog::update && (state.target_version == string_field(server, "version") ||
                                                    !has_panel_version(server, state.target_version))) {
         state.target_version.clear();
+    }
+}
+
+void render_panel_config_menu(PanelControlsState& state, const PreviewSession& session)
+{
+    const auto& core = field(server_snapshot(session), "core");
+    const bool available = session.ready() && !state.request_id;
+    if (ImGui::MenuItem("Create config", nullptr, false, available && can_edit_configs(core))) {
+        state.config_name.fill('\0');
+        open_dialog(state, ControlsDialog::create);
+    }
+    if (ImGui::MenuItem("Manage configs", nullptr, false, available && field(core, "configs").is_array())) {
+        open_dialog(state, ControlsDialog::manage);
     }
 }
 
@@ -431,12 +524,12 @@ void render_panel_controls(PanelControlsState& state, PreviewSession& session, f
     draw_panel_versions(state, server, layout, disabled);
     if (layout.has_core) {
         ImGui::Spacing();
-        if (layout.button("Create config", disabled || !can_edit_configs(core))) {
-            state.config_name.fill('\0');
-            open_dialog(state, ControlsDialog::create);
+        const bool backup_disabled = disabled || !can_use_backup(session);
+        if (layout.button("Backup", backup_disabled)) {
+            download_backup(session);
         }
-        if (layout.button("Manage configs", disabled || !field(core, "configs").is_array())) {
-            open_dialog(state, ControlsDialog::manage);
+        if (layout.button("Restore", backup_disabled)) {
+            open_dialog(state, ControlsDialog::restore);
         }
     }
     if (!layout.notice.empty()) {
@@ -480,6 +573,9 @@ void render_panel_control_dialog(PanelControlsState& state, PreviewSession& sess
     case ControlsDialog::manage:
         render_configs(state, session, core);
         break;
+    case ControlsDialog::restore:
+        render_restore(state, session);
+        break;
     case ControlsDialog::stop:
     case ControlsDialog::update:
     case ControlsDialog::remove:
@@ -488,20 +584,24 @@ void render_panel_control_dialog(PanelControlsState& state, PreviewSession& sess
     }
 }
 
-std::string describe_panel_controls(const PanelControlsState& state, const PreviewSession& session)
+std::string describe_panel_controls(const PanelControlsState& state, const PreviewSession& session,
+                                    bool include_status)
 {
     const auto& server = server_snapshot(session);
     const auto& core = field(server, "core");
-    std::string description = "Panel Controls. ";
-    if (core.is_object()) {
-        description += core_state_label(core) + ' ';
-    }
-    const auto active = string_field(server, "version", "unavailable");
-    const auto target = state.target_version.empty() ? active : std::string_view(state.target_version);
-    description += std::format("Panel version {}. Target panel version {}. ", active, target);
-    const auto notice = controls_notice(server, session);
-    if (!notice.empty()) {
-        description += notice + ' ';
+    std::string description;
+    if (include_status) {
+        description = "Panel Controls. ";
+        if (core.is_object()) {
+            description += core_state_label(core) + ' ';
+        }
+        const auto active = string_field(server, "version", "unavailable");
+        const auto target = state.target_version.empty() ? active : std::string_view(state.target_version);
+        description += std::format("Panel version {}. Target panel version {}. ", active, target);
+        const auto notice = controls_notice(server, session);
+        if (!notice.empty()) {
+            description += notice + ' ';
+        }
     }
     switch (state.dialog) {
     case ControlsDialog::none:
@@ -530,6 +630,12 @@ std::string describe_panel_controls(const PanelControlsState& state, const Previ
     }
     case ControlsDialog::remove:
         description += std::format("Confirm removal of {}. ", state.remove_name);
+        break;
+    case ControlsDialog::restore:
+        description += "Restore backup. ";
+        if (state.restore_request.is_object()) {
+            description += std::string(backup_selected_message) + ' ';
+        }
         break;
     }
     if (state.request_id) {

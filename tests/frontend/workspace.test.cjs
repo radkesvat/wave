@@ -628,6 +628,30 @@ async function plotColors(page, clip) {
     });
 }
 
+async function assertPlotLegend(page, card, [left, right], expected) {
+    const { pixels, width } = await screenshotPixels(page, {
+        x: left, y: card.titleEnd + 1, width: right - left, height: 76,
+    });
+    let grid;
+    for (let y = 0; y < 35 && !grid; y++) {
+        const row = pixels.slice(y * width * 4, (y + 1) * width * 4);
+        const line = colorRuns(row, [statusOutlineColor], width / 2).find(([start]) => start > 20);
+        if (line) grid = { x: line[0], y };
+    }
+    assert.ok(grid, 'The plot grid begins just below the chart title.');
+
+    const x = grid.x + 18;
+    const swatches = pixels.filter((_, i) => Math.floor(i / 4) % width === x);
+    const rows = expected.map(color => {
+        const matches = colorRuns(swatches, [color], 9);
+        assert.equal(matches.length, 1, 'The series has a colored swatch inside the grid.');
+        const [[top]] = matches;
+        assert.ok(top > grid.y && top < grid.y + 42, 'The swatch is near the top-left of the grid.');
+        return top;
+    });
+    assert.deepEqual(rows, rows.toSorted((a, b) => a - b), 'Legend entries stack in series order.');
+}
+
 test('Server Status fits the desktop pane and scrolls when the window is shorter', async () => {
     const wide = { width: 1920, height: 960 };
     const page = await browser.newPage({ viewport: wide });
@@ -673,9 +697,14 @@ test('Server Status aligns both grid rows, updates a live plot, and reflows both
         }).waitFor();
         await settleCanvas(page);
         const wideGrid = await desktopStatusGrid(page, wide);
-        const wideInfo = wideGrid.cards[1];
-        const trafficClip = { x: wideGrid.columns[1][0] + 60, y: wideInfo.titleEnd + 46, width: 20,
-            height: wideInfo.bottom - wideInfo.titleEnd - 52 };
+        const [wideCpu, wideTraffic] = wideGrid.cards;
+        const [leftColumn, rightColumn] = wideGrid.columns;
+        await assertPlotLegend(page, wideCpu, leftColumn, [downloadPlotColor]);
+        await assertPlotLegend(page, wideCpu, rightColumn, [uploadPlotColor]);
+        await assertPlotLegend(page, wideTraffic, rightColumn, [uploadPlotColor, downloadPlotColor]);
+
+        const trafficClip = { x: rightColumn[1] - 120, y: wideTraffic.titleEnd + 46, width: 20,
+            height: wideTraffic.bottom - wideTraffic.titleEnd - 52 };
         assert.ok((await plotColors(page, trafficClip)).every(y => y >= 0),
             'Upload and download have distinct lines inside the same plot.');
 
@@ -936,18 +965,17 @@ test('Server Status selects a panel version and confirms updates independently o
     }
 });
 
-test('Server Status stacks controls and edits preview configs by touch', async () => {
+test('Server Status stacks full-width backup and restore controls and imports a downloaded backup', async () => {
     const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
     const data = statusFixture();
-    const core = data.server.core;
+    const configs = data.server.core.configs;
+    configs.push({ id: 2, name: 'Standby', enabled: false, active: false });
     const preview = await mockPreview(page, { data, handle() {} });
     const status = name => page.getByRole('img', { name }).waitFor();
     const tap = async (x, y) => {
         await page.touchscreen.tap(x, y);
         await settleCanvas(page);
     };
-    const footer = (primary = true) => pressCoreFooter(page, tap, primary);
-    const configRow = async index => (await dialogFrame(page)).top + 78 + 80 * index;
     try {
         await page.goto(url);
         await status(/Wave Users.*Sample data/);
@@ -971,7 +999,7 @@ test('Server Status stacks controls and edits preview configs by touch', async (
         const buttonColors = [[69, 64, 79], [89, 80, 103]];
         const { pixels } = await screenshotPixels(page, { x: 42, y, width: 1, height });
         const buttons = colorRuns(pixels, buttonColors, 20);
-        assert.equal(buttons.length, 3, 'Stop, Create config, and Manage configs each occupy a row.');
+        assert.equal(buttons.length, 3, 'Stop, Backup, and Restore each occupy a row.');
         assert.ok(buttons.every(([top, bottom]) => bottom - top >= 36),
             'The stacked layout keeps taller touch targets.');
         const { pixels: right } = await screenshotPixels(page, { x, y, width: 1, height });
@@ -980,10 +1008,77 @@ test('Server Status stacks controls and edits preview configs by touch', async (
             assert.ok(buttonColors.some(color => pixelMatches(right, row * 4, color)),
                 'The button fills the row to the right edge.');
         }
-        const [, createY, manageY] = rows.map(row => row + y);
+        const [, backupY, restoreY] = rows.map(row => row + y);
 
-        await tap(x, createY);
-        await status(/Create new config/);
+        const downloaded = page.waitForEvent('download');
+        await tap(x, backupY);
+        const download = await downloaded;
+        assert.equal(download.suggestedFilename(), 'wave-preview-backup.json');
+        const buffer = await readFile(await download.path());
+        const backup = {
+            format: 'wave-preview-backup', version: 1,
+            settings: {
+                domain: data.settings.domain, certificate_path: data.settings.certificate_path,
+                private_key_path: data.settings.private_key_path,
+            },
+            configs: [{ name: 'Standby', enabled: false }],
+        };
+        assert.deepEqual(JSON.parse(buffer), backup);
+        data.settings.domain = 'changed.example.invalid';
+        configs[1].enabled = true;
+        await preview.broadcast();
+
+        await tap(x, restoreY);
+        await status(/Restore backup/);
+        const selectFile = async buffer => {
+            const chooser = page.waitForEvent('filechooser');
+            await tap(120, (await dialogFrame(page)).top + 92);
+            await (await chooser).setFiles({ name: 'preview.json', mimeType: 'application/json', buffer });
+        };
+        await selectFile(Buffer.from('{}'));
+        await status(/Choose a valid Wave preview backup/);
+        await pressCoreFooter(page, tap);
+        assert.equal(preview.actions.length, 0, 'An invalid file cannot be submitted.');
+        await selectFile(buffer);
+        await status(/Wave preview backup selected/);
+        assert.equal(preview.actions.length, 0, 'Selecting a backup does not restore it.');
+        await pressCoreFooter(page, tap);
+        const restored = await preview.action(0);
+        assertRequest(restored.request, { action: 'restore_preview_backup', backup });
+        await status(/Wave preview backup selected.*Applying to preview/);
+        Object.assign(data.settings, backup.settings);
+        configs[1].enabled = backup.configs[0].enabled;
+        restored.reply({ feedback: 'Restored preview TLS settings and inactive configs.' });
+        await status(/Restored preview TLS settings and inactive configs/);
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+    } finally {
+        await page.close();
+    }
+});
+
+test('top-bar Menu opens preview config dialogs from Users by touch', async () => {
+    const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
+    const data = statusFixture();
+    const core = data.server.core;
+    const preview = await mockPreview(page, { data, handle() {} });
+    const status = name => page.getByRole('img', { name }).waitFor();
+    const tap = async (x, y) => {
+        await page.touchscreen.tap(x, y);
+        await settleCanvas(page);
+    };
+    const footer = (primary = true) => pressCoreFooter(page, tap, primary);
+    const configRow = async index => (await dialogFrame(page)).top + 78 + 80 * index;
+    const openConfigMenuItem = async y => {
+        await tap(130, 24);
+        await page.locator('#menu[aria-expanded="true"]').waitFor();
+        await tap(164, y);
+        await page.locator('#menu[aria-expanded="false"]').waitFor();
+    };
+    try {
+        await page.goto(url);
+        await status(/Wave Users.*Sample data/);
+        await openConfigMenuItem(213);
+        await status(/^Wave Users.*Create new config/);
         await footer();
         assert.equal(preview.actions.length, 0, 'A blank form cannot submit.');
         await tap(80, (await dialogFrame(page)).top + 69);
@@ -997,8 +1092,8 @@ test('Server Status stacks controls and edits preview configs by touch', async (
         core.configs.push(config);
         created.reply({ feedback: 'Created preview config Lab preview (disabled).' });
         await status(/Created preview config Lab preview \(disabled\)/);
-        await tap(x, manageY);
-        await status(/Manage configs\. Default enabled, active and protected\. Lab preview disabled/);
+        await openConfigMenuItem(237);
+        await status(/^Wave Users.*Manage configs\. Default enabled, active and protected\. Lab preview disabled/);
         await tap(45, await configRow(0));
         await tap(160, await configRow(0));
         assert.equal(preview.actions.length, 1, 'The active config controls are disabled.');
@@ -1416,6 +1511,34 @@ test('narrow touch activates a switch and header controls and scrolls on a swipe
         await page.waitForFunction(() => scrollY > 0);
         assert.equal(await page.getByRole('button', { name: 'Menu' }).getAttribute('aria-expanded'), 'false');
         assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    } finally {
+        await page.close();
+    }
+});
+
+test('Tools opens and closes both upstream demo windows on a phone', async () => {
+    const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
+    await mockPreview(page);
+    const tap = async (x, y) => {
+        await page.touchscreen.tap(x, y);
+        await settleCanvas(page);
+    };
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*Sample data/ }).waitFor();
+        const titles = [];
+        for (const y of [136, 159]) {
+            await tap(182, 24);
+            await page.locator('#tools[aria-expanded="true"]').waitFor();
+            await tap(210, y);
+            await page.waitForFunction(() => Module['_wave_scroll_window_at'](20, 75));
+            assert.equal(await page.evaluate(() => Module['_wave_scroll_window_at'](186, 24)), 0,
+                'The window starts below the Tools trigger.');
+            titles.push(await page.screenshot({ clip: { x: 32, y: 61, width: 160, height: 24 } }));
+            await tap(portrait.width - 24, 73);
+            await page.waitForFunction(() => !Module['_wave_scroll_window_at'](20, 75));
+        }
+        assert.ok(!titles[0].equals(titles[1]), 'The options open distinct demo windows.');
     } finally {
         await page.close();
     }

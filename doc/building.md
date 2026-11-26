@@ -9,9 +9,9 @@ shows WaterWall as disconnected.
 - CMake 3.24 or newer and Ninja on your `PATH`
 - Git and Python 3 for the Emscripten SDK setup
 - Emscripten SDK 7.0.1
-- Network access on the first build to fetch Dear ImGui v1.93.0,
+- Network access on the first build to fetch Dear ImGui v1.93.0, ImPlot v1.1,
   nlohmann/json v3.12.0, Project Nayuki QR Code generator v1.8.0, and the SDK's
-  SDL2 port. [QR release](https://github.com/nayuki/QR-Code-generator/releases/tag/v1.8.0)
+  SDL2 port. [ImPlot release](https://github.com/epezent/implot/releases/tag/v1.1) [QR release](https://github.com/nayuki/QR-Code-generator/releases/tag/v1.8.0)
 
 The SDK supplies the Clang-based `em++` driver and the Emscripten CMake toolchain.
 Install the SDK outside the Wave checkout and activate it in the shell you will
@@ -159,7 +159,8 @@ Open a row's **Options** to edit the user, read notes, share a configuration
 by QR code, reset traffic totals, or delete the user. The Logs pane records
 demo changes and provides search, auto-scroll, copy, and clear controls.
 Menu opens version information, demo sign-in, first-run setup, and demo
-sign-out. Tools opens diagnostics and input helpers.
+sign-out. Tools opens diagnostics and input helpers. **ImGui Demo** and
+**ImPlot Demo** toggle the libraries' interactive example windows.
 
 Preview dialogs share a square-cornered frame, a dark title strip, and a
 right-aligned action row below the body. Workspace dialogs center in the
@@ -218,6 +219,7 @@ Server Status shows CPU and Memory in the top row when the work pane is
 wide enough. Server Information and Panel Controls each have their own card
 under CPU, beside Traffic. When space is tight, the five cards stack in order
 from CPU and Memory through Server Information, Panel Controls, and Traffic.
+Each plot shows current readings in a legend inside its upper-left corner.
 On a phone, swipe through the cards to reach Logs.
 At short desktop heights, scroll inside the work pane to see the rest of
 the grid. Server Status reserves the browser scrollbar gutter on platforms
@@ -304,15 +306,24 @@ choice stays in the browser until you confirm **Update panel**. The preview
 stores the reported panel version in memory and displays it in Server
 Information, About, and the Wave version dialog.
 
-**Create config** saves an in-memory entry by name with its enabled checkbox
-clear. Names are case-sensitive, can contain up to 64 UTF-8 bytes, and must be
-unique after trimming surrounding spaces. Blank names and ASCII control
-characters are invalid. **Manage configs** can enable or disable an entry, or
-remove it after confirmation. The active entry is protected against both
+The top-bar **Menu** provides **Create config** and **Manage configs** on
+every preview workspace page. **Create config** saves an in-memory entry by
+name with its enabled checkbox clear. Names are case-sensitive, can contain up
+to 64 UTF-8 bytes, and must be unique after trimming surrounding spaces.
+Blank names and ASCII control characters are invalid. **Manage configs** can
+enable or disable an entry, or remove it after confirmation. The active entry is protected against both
 changes, including while the preview core is stopped. Enabling an entry only
 changes its preview flag. Live config-file writes, activation, and reload are
-unimplemented. Panel Controls changes are shared by connected browsers and reset
-with the preview backend.
+unimplemented. Config changes are shared by connected browsers and reset with
+the preview backend.
+
+**Backup** in Panel Controls downloads `wave-preview-backup.json` with the
+preview TLS domain, PEM paths, and inactive config entries. **Restore** imports
+that file and asks for confirmation before replacing those settings and entries
+for all connected preview browsers. The active config stays protected. The
+file contains config names and enabled flags, and restoration affects only
+in-memory preview data. For deployment settings, see
+[Authenticated HTTPS mode](authentication.md).
 
 The preview snapshot reports the current panel version in `server.version`
 and the panel catalog in `server.available_panel_versions`. The `server.core`
@@ -328,6 +339,7 @@ connection closes, Server Status shows the last snapshot and offers to reconnect
 | `create_core_config` | `name` |
 | `set_core_config_enabled` | Config `id` and boolean `enabled` |
 | `remove_core_config` | Config `id` |
+| `restore_preview_backup` | Downloaded JSON object as `backup` |
 
 ### Backend tests
 

@@ -16,6 +16,7 @@ struct StatusSeries {
     const nlohmann::json& samples;
     const char* name;
     theme::Color color;
+    std::string legend;
 };
 
 using StatusTicks = std::array<std::string, 5>;

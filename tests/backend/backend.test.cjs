@@ -465,6 +465,60 @@ test('validates TLS fields and partially updates the preview settings', async t 
     assert.equal((await fetch(new URL('/', url))).status, 200);
 });
 
+test('restores preview backups atomically and preserves the active config and demo account', async t => {
+    const { socket, initial } = await connectPreview(t);
+    const observer = await connectPreview(t);
+    const files = await readdir(cwd);
+    const original = initial.server.core.configs;
+    const active = original.find(config => config.active);
+    const standby = original.find(config => !config.active);
+    const tls = {
+        domain: 'restored.example.invalid', certificate_path: 'preview/restore.crt', private_key_path: '',
+    };
+    const configs = [{ name: standby.name, enabled: false }, { name: 'Restored config', enabled: true }];
+    const backup = { format: 'wave-preview-backup', version: 1, settings: tls, configs };
+    for (const invalid of [
+        { ...backup, format: 'wave-db' }, { ...backup, version: 2 }, { ...backup, settings: { ...tls, domain: '' } },
+        { ...backup, settings: { domain: tls.domain } }, { ...backup, configs: null },
+        { ...backup, configs: [...configs, { name: active.name, enabled: false }] },
+        { ...backup, configs: [...configs, { name: '  Restored config ', enabled: false }] },
+        { ...backup, configs: [{ name: 'Invalid flag', enabled: 1 }] },
+        { ...backup, configs: Array.from({ length: 64 }, (_, i) => ({ name: `Too many ${i}`, enabled: false })) },
+    ]) {
+        const reply = await requestPreview(socket, 'restore_preview_backup', { backup: invalid });
+        assert.equal(reply.ok, false, reply.feedback);
+        assert.deepEqual(reply.data.settings, initial.settings);
+        assert.deepEqual(reply.data.server.core.configs, original);
+    }
+
+    const broadcast = nextPreviewSnapshot(observer.socket, frame => frame.data.settings.domain === tls.domain);
+    const restored = await requestPreview(socket, 'restore_preview_backup', { backup });
+    assert.equal(restored.ok, true, restored.feedback);
+    const expected = [active, { ...standby, enabled: false }, {
+        id: restored.data.server.core.configs.at(-1).id, ...configs[1], active: false,
+    }];
+    assert.deepEqual(restored.data.server.core.configs, expected);
+    assert.deepEqual((await broadcast).data.server.core.configs, expected);
+    assert.deepEqual(restored.data.settings, { ...initial.settings, ...tls });
+    assert.equal(restored.data.server.version, initial.server.version);
+
+    const full = {
+        ...backup,
+        configs: Array.from({ length: 63 }, (_, i) => ({
+            name: String(i).padStart(2, '0') + '"'.repeat(62), enabled: false,
+        })),
+    };
+    assert.ok(JSON.stringify(full).length > 8192, 'A full backup can exceed the ordinary request limit.');
+    const filled = await requestPreview(socket, 'restore_preview_backup', { backup: full });
+    assert.equal(filled.ok, true, filled.feedback);
+    assert.equal(filled.data.server.core.configs.length, 64);
+    assert.deepEqual(filled.data.server.core.configs[0], active);
+    const cleared = await requestPreview(socket, 'restore_preview_backup', { backup: { ...backup, configs: [] } });
+    assert.equal(cleared.ok, true, cleared.feedback);
+    assert.deepEqual(cleared.data.server.core.configs, [active]);
+    assert.deepEqual(await readdir(cwd), files);
+});
+
 test('simulates preview bot actions and console entirely in memory', async t => {
     const { socket } = await connectPreview(t);
     const connected = await requestPreview(socket, 'bot_connect', { token: 'demo-placeholder' });

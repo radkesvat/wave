@@ -157,7 +157,7 @@
 
         function usesDocumentScroll(event, bounds = canvas.getBoundingClientRect()) {
           return bounds.height > innerHeight && event.clientX < bounds.right - 34 &&
-              !Module['_wave_dialog_at'](event.clientX - bounds.left, event.clientY - bounds.top);
+              !Module['_wave_scroll_window_at'](event.clientX - bounds.left, event.clientY - bounds.top);
         }
 
         canvas.addEventListener("wheel", event => {

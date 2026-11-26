@@ -10,6 +10,7 @@
 #include <imgui.h>
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl2.h>
+#include <implot.h>
 
 #include <algorithm>
 #include <cmath>
@@ -104,6 +105,7 @@ void apply_theme(bool high_contrast)
 struct Application {
     SDL_Window* window = nullptr;
     SDL_GLContext gl_context = nullptr;
+    ImPlotContext* implot = nullptr;
     bool imgui_sdl = false;
     bool imgui_gl = false;
     bool visible = false;
@@ -146,6 +148,7 @@ struct Application {
 
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
+        implot = ImPlot::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -202,6 +205,9 @@ struct Application {
         }
         if (imgui_sdl) {
             ImGui_ImplSDL2_Shutdown();
+        }
+        if (implot) {
+            ImPlot::DestroyContext(implot);
         }
         ImGui::DestroyContext();
         if (gl_context) {
@@ -333,14 +339,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wave_scroll_panel(float x, float y, float d
     io.AddMouseWheelEvent(dx, dy);
 }
 
-extern "C" EMSCRIPTEN_KEEPALIVE bool wave_dialog_at(float x, float y)
+extern "C" EMSCRIPTEN_KEEPALIVE bool wave_scroll_window_at(float x, float y)
 {
-    return wave::dialog_at(x, y);
+    return wave::dialog_at(x, y) || wave::panel_demo_at(application.panel, x, y);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE bool wave_topology_at(float x, float y)
 {
-    return application.panel.topology.canvas_at(x, y);
+    return !wave::panel_demo_at(application.panel, x, y) && application.panel.topology.canvas_at(x, y);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void wave_pan_topology(float dx, float dy)

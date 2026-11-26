@@ -1,6 +1,7 @@
 #include "preview.h"
 
 #include "core_config_name.h"
+#include "preview_backup.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -413,9 +414,17 @@ private:
 
     std::string handle_message(std::string_view message, std::uint64_t& sent_revision)
     {
-        const auto request = message.size() > max_request_bytes || message.find('\0') != std::string_view::npos
+        const bool invalid_frame =
+            message.size() > max_preview_restore_request_bytes || message.find('\0') != std::string_view::npos;
+        auto request = invalid_frame
             ? Json{}
             : Json::parse(message, nullptr, false);
+        if (message.size() > max_request_bytes) {
+            const auto action = request.find("action");
+            if (action == request.end() || *action != "restore_preview_backup") {
+                request = nullptr;
+            }
+        }
         const auto action_value = request.find("action");
         const std::string_view action = action_value != request.end() && text_value(*action_value, 48, true)
             ? action_value->get_ref<const std::string&>()
@@ -708,6 +717,56 @@ private:
         return complete("Applied sample TLS settings.");
     }
 
+    Reply restore_backup(const Json& input)
+    {
+        const auto invalid = Reply{false, "Choose a valid Wave preview backup."};
+        const auto backup = input.find("backup");
+        if (backup == input.end() || !backup->is_object() ||
+            !backup->contains("format") || (*backup)["format"] != preview_backup_format ||
+            !backup->contains("version") || !(*backup)["version"].is_number_integer() ||
+            (*backup)["version"] != preview_backup_version) {
+            return invalid;
+        }
+        const auto tls = backup->find("settings");
+        const auto saved_configs = backup->find("configs");
+        auto settings = data_["settings"];
+        if (tls == backup->end() || !std::ranges::all_of(preview_backup_tls_fields, [&](const char* field) {
+                return tls->contains(field);
+            }) ||
+            !update_tls_settings(*tls, settings) || saved_configs == backup->end() ||
+            !saved_configs->is_array() || saved_configs->size() >= max_core_configs) {
+            return invalid;
+        }
+
+        auto& current = data_["server"]["core"]["configs"];
+        const auto active =
+            std::ranges::find_if(current, [](const Json& config) { return config["active"] == true; });
+        auto configs = Json::array({*active});
+        int next_id = next_config_id_;
+        for (const auto& config : *saved_configs) {
+            const auto raw_name = config.find("name");
+            const auto* text = raw_name == config.end() ? nullptr : raw_name->get_ptr<const std::string*>();
+            const auto name = text ? core_config_name(*text) : std::string_view{};
+            const auto enabled = config.find("enabled");
+            if (name.empty() || enabled == config.end() || !enabled->is_boolean() ||
+                std::ranges::any_of(configs, [&](const Json& item) { return item["name"] == name; })) {
+                return invalid;
+            }
+            const auto existing =
+                std::ranges::find_if(current, [&](const Json& item) { return item["name"] == name; });
+            if (existing == current.end() && next_id == std::numeric_limits<int>::max()) {
+                return {false, "The preview config list is full."};
+            }
+            const int id = existing == current.end() ? next_id++ : (*existing)["id"].get<int>();
+            configs.push_back({{"id", id}, {"name", name}, {"enabled", *enabled}, {"active", false}});
+        }
+
+        data_["settings"] = std::move(settings);
+        current = std::move(configs);
+        next_config_id_ = next_id;
+        return complete("Restored preview TLS settings and inactive configs.");
+    }
+
     Reply apply_bot_settings(const Json& input)
     {
         const auto values = input.find("settings");
@@ -930,6 +989,9 @@ private:
         }
         if (action == "apply_settings") {
             return apply_settings(input);
+        }
+        if (action == "restore_preview_backup") {
+            return restore_backup(input);
         }
         if (action == "console_command") {
             return console_command(input);

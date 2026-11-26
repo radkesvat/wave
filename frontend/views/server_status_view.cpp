@@ -6,7 +6,6 @@
 
 #include <array>
 #include <format>
-#include <span>
 #include <string_view>
 #include <utility>
 
@@ -20,14 +19,6 @@ using theme::packed;
 constexpr float gutter = 12;
 constexpr ImVec2 card_padding{10, 8};
 constexpr float minimum_plot_height = 134;
-constexpr float swatch_size = 9;
-constexpr float swatch_gap = 6;
-
-struct Reading {
-    Color color;
-    std::string text;
-    std::string_view layout_text{};
-};
 
 using InfoRows = std::array<std::pair<const char*, std::string>, 10>;
 
@@ -171,56 +162,6 @@ void draw_information(const InfoRows& info, const InformationLayout& layout)
     }
 }
 
-struct LegendItem {
-    ImVec2 offset;
-    float text_width;
-};
-
-struct LegendLayout {
-    std::array<LegendItem, 2> items{};
-    float height = 0;
-
-    LegendLayout(std::span<const Reading> readings, float width)
-    {
-        constexpr float item_gap = 16;
-        float x = 0;
-        float y = 0;
-        for (std::size_t i = 0; i < readings.size(); ++i) {
-            const auto& reading = readings[i];
-            const std::string_view label = reading.text;
-            const auto layout_text = reading.layout_text.empty() ? label : reading.layout_text;
-            const float item_width =
-                swatch_size + swatch_gap + std::max(text_width(label), text_width(layout_text));
-            if (x > 0 && x + item_width > width) {
-                x = 0;
-                y = height + ImGui::GetStyle().ItemSpacing.y;
-            }
-            const float label_width = std::max(1.0f, width - x - swatch_size - swatch_gap);
-            items[i] = {{x, y}, label_width};
-            const float item_height =
-                std::max(wrapped_height(label, label_width), wrapped_height(layout_text, label_width));
-            height = std::max(height, y + item_height);
-            x += item_width + item_gap;
-        }
-    }
-};
-
-void draw_legend(std::span<const Reading> readings, const LegendLayout& layout)
-{
-    auto& draw = *ImGui::GetWindowDrawList();
-    const ImVec2 start = ImGui::GetCursorScreenPos();
-    const float swatch_top = std::floor((ImGui::GetFontSize() - swatch_size) * 0.5f);
-    for (std::size_t i = 0; i < readings.size(); ++i) {
-        const ImVec2 pos{start.x + layout.items[i].offset.x, start.y + layout.items[i].offset.y};
-        draw.AddRectFilled({pos.x, pos.y + swatch_top},
-                           {pos.x + swatch_size, pos.y + swatch_top + swatch_size},
-                           packed(readings[i].color));
-        draw_text(draw, {pos.x + swatch_size + swatch_gap, pos.y}, Color::primary_text, readings[i].text,
-                  layout.items[i].text_width);
-    }
-    ImGui::Dummy({ImGui::GetContentRegionAvail().x, layout.height});
-}
-
 float title_band_height()
 {
     return ImGui::GetFontSize() + 10;
@@ -254,18 +195,10 @@ bool begin_card(const char* title, ImVec2 pos, ImVec2 size)
     return visible;
 }
 
-float chart_minimum_height(const LegendLayout& legend)
-{
-    return title_band_height() + 2 * card_padding.y + legend.height + ImGui::GetStyle().ItemSpacing.y +
-           minimum_plot_height;
-}
-
-void chart_card(const char* title, ImVec2 pos, ImVec2 size, std::span<const Reading> readings,
-                const LegendLayout& legend, const StatusTicks& ticks, float left_gutter, const char* unit,
-                double ceiling, std::initializer_list<StatusSeries> series)
+void chart_card(const char* title, ImVec2 pos, ImVec2 size, const StatusTicks& ticks, float left_gutter,
+                const char* unit, double ceiling, std::initializer_list<StatusSeries> series)
 {
     if (begin_card(title, pos, size)) {
-        draw_legend(readings, legend);
         render_status_plot(ticks, left_gutter, unit, ceiling,
                            std::max(minimum_plot_height, ImGui::GetContentRegionAvail().y), series);
     }
@@ -282,7 +215,6 @@ bool server_status_has_columns(float content_width, float font_size)
 float render_server_status(const Json& server, PanelControlsState& controls, PreviewSession& session,
                            bool stacked)
 {
-    update_panel_controls(controls, session);
     const StatusSamples samples(server);
     const double memory_ceiling = samples.memory_capacity > 0
                                       ? samples.memory_capacity
@@ -293,39 +225,26 @@ float render_server_status(const Json& server, PanelControlsState& controls, Pre
     const auto traffic_ticks = status_ticks(traffic_maximum);
     const float axis_gutter = std::max(
         {status_axis_gutter(cpu_ticks), status_axis_gutter(memory_ticks), status_axis_gutter(traffic_ticks)});
-    const std::array cpu{Reading{Color::accent, samples.cpu_value()}};
-    const std::array memory{Reading{Color::info, samples.memory_value()}};
-    // Reserve room for three integer digits using the widest digit in Wave's font.
-    const std::array traffic{Reading{Color::info, samples.upload_value(), "Upload 444.4 MiB/s"},
-                             Reading{Color::accent, samples.download_value(), "Download 444.4 MiB/s"}};
-
     const ImVec2 available = ImGui::GetContentRegionAvail();
     const ImVec2 start = ImGui::GetCursorScreenPos();
     const float left_width = stacked ? available.x : std::floor((available.x - gutter) * 0.5f);
     const float right_width = stacked ? left_width : available.x - left_width - gutter;
     const float information_width = stacked ? left_width : std::floor((left_width - gutter) * 0.5f);
     const float controls_width = stacked ? left_width : left_width - information_width - gutter;
-    const float left_body = std::max(1.0f, left_width - 2 * card_padding.x);
-    const float right_body = std::max(1.0f, right_width - 2 * card_padding.x);
     const float information_body = std::max(1.0f, information_width - 2 * card_padding.x);
     const float controls_body = std::max(1.0f, controls_width - 2 * card_padding.x);
     const auto info = server_information(server, samples);
     const InformationLayout information(info, information_body);
-    LegendLayout cpu_legend(cpu, left_body);
-    LegendLayout memory_legend(memory, right_body);
-    const LegendLayout traffic_legend(traffic, right_body);
-    if (!stacked) {
-        cpu_legend.height = memory_legend.height = std::max(cpu_legend.height, memory_legend.height);
-    }
-    float cpu_height = chart_minimum_height(cpu_legend);
-    float memory_height = chart_minimum_height(memory_legend);
-    float traffic_height = chart_minimum_height(traffic_legend);
     const float card_frame_height = title_band_height() + 2 * card_padding.y;
+    const float chart_minimum_height = card_frame_height + minimum_plot_height;
+    float cpu_height = chart_minimum_height;
+    float memory_height = chart_minimum_height;
+    float traffic_height = chart_minimum_height;
     float info_height = card_frame_height + information.height;
     float controls_height =
         card_frame_height + panel_controls_height(controls, session, controls_body, !stacked);
     if (!stacked) {
-        const float top_minimum = std::max(cpu_height, memory_height);
+        const float top_minimum = chart_minimum_height;
         const float bottom_minimum = std::max({info_height, controls_height, traffic_height});
         const float rows_height = std::max(available.y - gutter, top_minimum + bottom_minimum);
         cpu_height = memory_height =
@@ -339,11 +258,10 @@ float render_server_status(const Json& server, PanelControlsState& controls, Pre
     const float controls_x = stacked ? start.x : start.x + information_width + gutter;
     const float controls_y = stacked ? info_y + info_height + gutter : info_y;
     const float traffic_y = stacked ? controls_y + controls_height + gutter : info_y;
-    chart_card("CPU", start, {left_width, cpu_height}, cpu, cpu_legend, cpu_ticks, axis_gutter, "%", 100,
-               {{samples.cpu, "CPU", cpu[0].color}});
-    chart_card("Memory", {right_x, memory_y}, {right_width, memory_height}, memory, memory_legend,
-               memory_ticks, axis_gutter, "GiB", memory_ceiling,
-               {{samples.memory, "Memory", memory[0].color}});
+    chart_card("CPU", start, {left_width, cpu_height}, cpu_ticks, axis_gutter, "%", 100,
+               {{samples.cpu, "CPU", Color::accent, samples.cpu_value()}});
+    chart_card("Memory", {right_x, memory_y}, {right_width, memory_height}, memory_ticks, axis_gutter, "GiB",
+               memory_ceiling, {{samples.memory, "Memory", Color::info, samples.memory_value()}});
     if (begin_card("Server Information", {start.x, info_y}, {information_width, info_height})) {
         draw_information(info, information);
     }
@@ -352,11 +270,10 @@ float render_server_status(const Json& server, PanelControlsState& controls, Pre
         render_panel_controls(controls, session, controls_body, !stacked);
     }
     ImGui::EndChild();
-    chart_card(
-        "Traffic", {right_x, traffic_y}, {right_width, traffic_height}, traffic, traffic_legend,
-        traffic_ticks, axis_gutter, "MiB/s", traffic_maximum,
-        {{samples.upload, "Upload", traffic[0].color}, {samples.download, "Download", traffic[1].color}});
-    render_panel_control_dialog(controls, session);
+    chart_card("Traffic", {right_x, traffic_y}, {right_width, traffic_height}, traffic_ticks, axis_gutter,
+               "MiB/s", traffic_maximum,
+               {{samples.upload, "Upload", Color::info, samples.upload_value()},
+                {samples.download, "Download", Color::accent, samples.download_value()}});
     return traffic_y + traffic_height - start.y;
 }
 

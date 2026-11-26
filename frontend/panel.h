@@ -56,6 +56,8 @@ struct PanelState {
     bool tools_open = false;
     bool high_contrast = false;
     bool metrics_open = false;
+    bool imgui_demo_open = false;
+    bool implot_demo_open = false;
     int browser_control = 0;
     PanelDialog requested_dialog = PanelDialog::none;
     char input_sample[257]{};
@@ -65,6 +67,7 @@ const char* panel_page_name(PanelPage page);
 std::span<const PanelNavigationItem> panel_navigation();
 float panel_height(float viewport_width, float canvas_width, const PanelState& state);
 void render_panel(PanelState& state, PreviewSession& session, float viewport_width, int browser_focus);
+bool panel_demo_at(const PanelState& state, float x, float y);
 std::string describe_panel(const PanelState& state, const PreviewSession& session);
 
 } // namespace wave

@@ -6,6 +6,13 @@ FetchContent_Declare(imgui
 )
 FetchContent_MakeAvailable(imgui)
 
+# ImPlot v1.1. Pin the archive to both its commit and content hash.
+FetchContent_Declare(implot
+    URL https://codeload.github.com/epezent/implot/tar.gz/819f200639455a58b6b3d4156b70e4271aeb2d00
+    URL_HASH SHA256=75491b25e1027ed0d1c9b1cd1fdcfb94efabfc45328d4356461e96419833960d
+)
+FetchContent_MakeAvailable(implot)
+
 set(WAVE_STARTUP_CANVAS 080C10)
 set(WAVE_STARTUP_TEXT EAEBFF)
 set(wave_shell "${CMAKE_CURRENT_BINARY_DIR}/shell.html")
@@ -31,11 +38,15 @@ add_executable(wave
     views/topology_view.cpp
     views/users_view.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+    ${implot_SOURCE_DIR}/implot.cpp
+    ${implot_SOURCE_DIR}/implot_items.cpp
+    ${implot_SOURCE_DIR}/implot_demo.cpp
 )
 set_target_properties(wave PROPERTIES
     CXX_STANDARD 20
@@ -51,10 +62,12 @@ target_include_directories(wave PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}"
     "${imgui_SOURCE_DIR}"
     "${imgui_SOURCE_DIR}/backends"
+    "${implot_SOURCE_DIR}"
 )
 target_link_libraries(wave PRIVATE nlohmann_json::nlohmann_json)
 include(qr_code.cmake)
-target_compile_definitions(wave PRIVATE IMGUI_IMPL_OPENGL_ES3)
+# The WebGL renderer needs 32-bit indices for large meshes in the ImPlot demo.
+target_compile_definitions(wave PRIVATE IMGUI_IMPL_OPENGL_ES3 "ImDrawIdx=unsigned int")
 target_compile_options(wave PRIVATE
     -sUSE_SDL=2
     "$<$<CONFIG:Release>:-flto>"
@@ -81,6 +94,7 @@ add_custom_command(TARGET wave POST_BUILD
 )
 
 configure_file("${imgui_SOURCE_DIR}/LICENSE.txt" "${CMAKE_BINARY_DIR}/site/licenses/dear-imgui.txt" COPYONLY)
+configure_file("${implot_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/site/licenses/implot.txt" COPYONLY)
 configure_file("${PROJECT_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/site/licenses/wave.txt" COPYONLY)
 configure_file("${PROJECT_SOURCE_DIR}/doc/licenses/poppins.txt" "${CMAKE_BINARY_DIR}/site/licenses/poppins.txt" COPYONLY)
 configure_file("${nlohmann_json_SOURCE_DIR}/LICENSE.MIT" "${CMAKE_BINARY_DIR}/site/licenses/nlohmann-json.txt" COPYONLY)

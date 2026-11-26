@@ -21,6 +21,7 @@ void render_about(bool authenticated, std::string_view version)
     ImGui::TextLinkOpenURL("nlohmann/json (MIT)", "/licenses/nlohmann-json.txt");
     ImGui::TextLinkOpenURL("nlohmann/json third-party notices", "/licenses/nlohmann-json-third-party.txt");
     ImGui::TextLinkOpenURL("Nayuki QR Code generator (MIT)", "/licenses/nayuki-qr.txt");
+    ImGui::TextLinkOpenURL("ImPlot (MIT)", "/licenses/implot.txt");
 }
 
 } // namespace wave

@@ -2,6 +2,8 @@
 
 #include <emscripten.h>
 
+#include <cstdlib>
+
 namespace wave {
 namespace {
 
@@ -40,6 +42,39 @@ EM_JS(void, download_file, (const char* filename, const char* contents, int leng
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
+
+EM_JS(void, choose_json_file, (int maxBytes), {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    const selection = {};
+    Module['previewJsonSelection'] = selection;
+    input.addEventListener('change', async () => {
+        const file = input.files[0];
+        if (!file) return;
+        if (file.size > maxBytes) {
+            selection.text = "";
+            return;
+        }
+        try {
+            const content = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
+            selection.text = content.includes(String.fromCharCode(0)) ? "" : content;
+        } catch {
+            selection.text = "";
+        }
+    }, { once: true });
+    input.click();
+});
+
+EM_JS_DEPS(take_json_file, "$stringToNewUTF8");
+EM_JS(char*, take_json_file, (), {
+    const selection = Module['previewJsonSelection'];
+    if (selection?.text === undefined) return 0;
+    delete Module['previewJsonSelection'];
+    return stringToNewUTF8(selection.text);
+});
+
+EM_JS(void, clear_json_file, (), { delete Module['previewJsonSelection']; });
 // clang-format on
 
 } // namespace
@@ -59,6 +94,27 @@ void reveal_canvas_item(float top, float bottom)
 void download_preview_file(const char* filename, std::string_view contents, const char* media_type)
 {
     download_file(filename, contents.data(), static_cast<int>(contents.size()), media_type);
+}
+
+void choose_preview_json_file(std::size_t max_bytes)
+{
+    choose_json_file(static_cast<int>(max_bytes));
+}
+
+std::optional<std::string> take_preview_json_file()
+{
+    auto* text = take_json_file();
+    if (!text) {
+        return std::nullopt;
+    }
+    std::string result(text);
+    std::free(text);
+    return result;
+}
+
+void clear_preview_json_file()
+{
+    clear_json_file();
 }
 
 } // namespace wave

@@ -14,7 +14,8 @@ struct PanelControlsState {
         update,
         create,
         manage,
-        remove
+        remove,
+        restore
     };
 
     Dialog dialog = Dialog::none;
@@ -25,15 +26,18 @@ struct PanelControlsState {
     int remove_id = 0;
     unsigned keyboard_focus = 0;
     std::string remove_name;
+    nlohmann::json restore_request;
     std::optional<std::uint64_t> request_id;
     std::optional<PreviewReply> reply;
 };
 
 void update_panel_controls(PanelControlsState& state, PreviewSession& session);
+void render_panel_config_menu(PanelControlsState& state, const PreviewSession& session);
 float panel_controls_height(const PanelControlsState& state, const PreviewSession& session, float width,
                             bool compact);
 void render_panel_controls(PanelControlsState& state, PreviewSession& session, float width, bool compact);
 void render_panel_control_dialog(PanelControlsState& state, PreviewSession& session);
-std::string describe_panel_controls(const PanelControlsState& state, const PreviewSession& session);
+std::string describe_panel_controls(const PanelControlsState& state, const PreviewSession& session,
+                                    bool include_status);
 
 } // namespace wave

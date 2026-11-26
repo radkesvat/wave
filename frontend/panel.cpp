@@ -1,5 +1,6 @@
 #include "panel.h"
 
+#include "browser_ui.h"
 #include "dialog.h"
 #include "preview_session.h"
 #include "theme.h"
@@ -8,6 +9,8 @@
 #include "views/view_helpers.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
+#include <implot.h>
 
 #include <algorithm>
 #include <array>
@@ -165,6 +168,8 @@ struct HeaderPopup {
 
 constexpr HeaderPopup menu{"Menu", "Wave menu", "Version information", panel_menu_control};
 constexpr HeaderPopup tools{"Tools", "Wave tools", "Connection diagnostics", panel_tools_control};
+constexpr char imgui_demo_title[] = "Dear ImGui Demo";
+constexpr char implot_demo_title[] = "ImPlot Demo";
 
 struct HeaderTrigger {
     ImVec2 anchor;
@@ -272,6 +277,10 @@ void render_menus(PanelState& state, float x, int focus, PreviewSession& session
             if (ImGui::MenuItem("Demo sign-out")) {
                 state.requested_dialog = PanelDialog::sign_out;
             }
+            if (state.entry.page == EntryPage::workspace) {
+                ImGui::Separator();
+                render_panel_config_menu(state.panel_controls, session);
+            }
         }
         ImGui::EndPopup();
     }
@@ -284,6 +293,9 @@ void render_menus(PanelState& state, float x, int focus, PreviewSession& session
         if (!state.auth.enabled() && ImGui::MenuItem("Mini keyboard")) {
             state.requested_dialog = PanelDialog::input;
         }
+        ImGui::Separator();
+        ImGui::MenuItem("ImGui Demo", nullptr, &state.imgui_demo_open);
+        ImGui::MenuItem("ImPlot Demo", nullptr, &state.implot_demo_open);
         ImGui::EndPopup();
     }
     state.menu_open = ImGui::IsPopupOpen(menu.name);
@@ -414,6 +426,30 @@ void mini_keyboard(PanelState& state)
     }
 }
 
+void render_demo(const char* title, void (*show)(bool*), bool& open, const CanvasViewport& viewport)
+{
+    if (!open) {
+        return;
+    }
+    const auto* window = ImGui::FindWindowByName(title);
+    // The ImPlot demo can also open Dear ImGui's demo through its own Tools menu.
+    if (!window || !window->Active) {
+        show(&open);
+        window = ImGui::FindWindowByName(title);
+    }
+    if (!window || !window->Appearing) {
+        return;
+    }
+
+    const ImVec2 min{viewport.left + margin, std::max(viewport.top, desktop_header) + margin};
+    const ImVec2 max{viewport.left + viewport.width - margin, viewport.top + viewport.height - margin};
+    const ImVec2 size{std::min(window->SizeFull.x, std::max(1.0f, max.x - min.x)),
+                      std::min(window->SizeFull.y, std::max(1.0f, max.y - min.y))};
+    ImGui::SetWindowSize(title, size);
+    ImGui::SetWindowPos(title, {std::clamp(window->Pos.x, min.x, std::max(min.x, max.x - size.x)),
+                                std::clamp(window->Pos.y, min.y, std::max(min.y, max.y - size.y))});
+}
+
 void render_dialogs(PanelState& state, PreviewSession& session)
 {
     if (state.requested_dialog != PanelDialog::none) {
@@ -496,6 +532,11 @@ void render_dialogs(PanelState& state, PreviewSession& session)
                                  ImGuiCond_Appearing);
         ImGui::ShowMetricsWindow(&state.metrics_open);
     }
+    if (state.imgui_demo_open || state.implot_demo_open) {
+        const auto viewport = visible_canvas();
+        render_demo(implot_demo_title, ImPlot::ShowDemoWindow, state.implot_demo_open, viewport);
+        render_demo(imgui_demo_title, ImGui::ShowDemoWindow, state.imgui_demo_open, viewport);
+    }
 }
 
 void render_view(PanelState& state, PreviewSession& session, bool narrow, bool stacked_status)
@@ -575,6 +616,16 @@ std::span<const PanelNavigationItem> panel_navigation()
     return navigation;
 }
 
+bool panel_demo_at(const PanelState& state, float x, float y)
+{
+    const auto contains = [x, y](const char* title) {
+        const auto* window = ImGui::FindWindowByName(title);
+        return window && window->Active && window->Rect().Contains({x, y});
+    };
+    return (state.imgui_demo_open && contains(imgui_demo_title)) ||
+           (state.implot_demo_open && (contains(implot_demo_title) || contains(imgui_demo_title)));
+}
+
 float panel_height(float viewport_width, float canvas_width, const PanelState& state)
 {
     const PanelLayout layout(viewport_width, state);
@@ -599,6 +650,9 @@ float panel_height(float viewport_width, float canvas_width, const PanelState& s
 void render_panel(PanelState& state, PreviewSession& session, float viewport_width, int browser_focus)
 {
     state.topology.visible_bounds = {};
+    if (!state.auth.enabled()) {
+        update_panel_controls(state.panel_controls, session);
+    }
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     if (state.browser_control && state.navigation_open && state.entry.page == EntryPage::workspace) {
         const auto selected = std::ranges::find(navigation, static_cast<PanelPage>(state.browser_control),
@@ -666,6 +720,7 @@ void render_panel(PanelState& state, PreviewSession& session, float viewport_wid
                 render_logs(state.logs, session, layout.narrow);
             }
             ImGui::EndChild();
+            render_panel_control_dialog(state.panel_controls, session);
         }
     }
     render_dialogs(state, session);
@@ -687,10 +742,16 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
     }
     const auto description =
         std::format("Wave {}. Preview. WaterWall disconnected.", panel_page_name(state.page));
+    const bool controls_dialog = state.panel_controls.dialog != PanelControlsState::Dialog::none;
     const bool has_server = state.page == PanelPage::server && session.data().contains("server");
     if (!session.ready() && !has_server) {
-        return description + (session.status() == PreviewStatus::loading ? " Loading sample data."
-                                                                         : " Sample data unavailable.");
+        auto result =
+            description + (session.status() == PreviewStatus::loading ? " Loading sample data."
+                                                                      : " Sample data unavailable.");
+        if (controls_dialog) {
+            result += ' ' + describe_panel_controls(state.panel_controls, session, false);
+        }
+        return result;
     }
 
     const auto& logs = session.data()["logs"];
@@ -703,17 +764,19 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
         }
     }
     const auto action = session.feedback_action();
-    if (!session.feedback().empty() &&
-        (state.page != PanelPage::server ||
-         (action != "update_panel" && action.find("_core") == std::string_view::npos))) {
+    if (!session.feedback().empty() && ((!has_server && !controls_dialog) ||
+                                        (action != "update_panel" && action != "restore_preview_backup" &&
+                                         action.find("_core") == std::string_view::npos))) {
         result += " ";
         result += session.feedback();
     }
     if (state.page == PanelPage::server) {
         result += ' ' + describe_server_status(session.data()["server"]);
-        result += ' ' + describe_panel_controls(state.panel_controls, session);
     } else if (state.page == PanelPage::topology) {
         result += ' ' + describe_topology(state.topology, session.data()["topology"]);
+    }
+    if (has_server || controls_dialog) {
+        result += ' ' + describe_panel_controls(state.panel_controls, session, has_server);
     }
     return result;
 }

@@ -16,6 +16,11 @@ using theme::packed;
 
 constexpr float edge_padding = 10;
 constexpr float tick_gap = 6;
+constexpr float legend_inset = 8;
+constexpr ImVec2 legend_padding{7, 5};
+constexpr float legend_swatch = 9;
+constexpr float legend_swatch_gap = 6;
+constexpr float legend_row_gap = 4;
 
 double positive_ceiling(double ceiling)
 {
@@ -39,6 +44,65 @@ std::size_t sample_count(const StatusSeries& line)
 {
     return line.samples.is_array() ? std::min(line.samples.size(), status_history_capacity) : 0;
 }
+
+struct PlotLegend {
+    ImVec2 start;
+    ImVec2 end;
+    float text_width = 0;
+
+    PlotLegend(ImVec2 grid_start, ImVec2 grid_end, std::initializer_list<StatusSeries> series)
+        : start{grid_start.x + legend_inset, grid_start.y + legend_inset}, end(start)
+    {
+        constexpr float chrome_width = 2 * legend_padding.x + legend_swatch + legend_swatch_gap;
+        const float available_width = grid_end.x - start.x - legend_inset - chrome_width;
+        const float available_height = grid_end.y - start.y - legend_inset;
+        if (series.size() == 0 || available_width <= 0 ||
+            available_height < ImGui::GetFontSize() + 2 * legend_padding.y) {
+            return;
+        }
+        for (const auto& line : series) {
+            text_width = std::max(text_width, ImGui::CalcTextSize(line.legend.c_str()).x + 1);
+        }
+        text_width = std::min(text_width, available_width);
+        float height = 2 * legend_padding.y + legend_row_gap * (series.size() - 1);
+        for (const auto& line : series) {
+            height += row_height(line.legend);
+        }
+        end = {start.x + chrome_width + text_width, start.y + std::min(height, available_height)};
+    }
+
+    float row_height(std::string_view text) const
+    {
+        return ImGui::CalcTextSize(text.data(), text.data() + text.size(), false, text_width).y;
+    }
+
+    bool hovered() const
+    {
+        return text_width > 0 && ImGui::IsMouseHoveringRect(start, end);
+    }
+
+    void draw(ImDrawList& draw, std::initializer_list<StatusSeries> series) const
+    {
+        if (text_width <= 0) {
+            return;
+        }
+        draw.AddRectFilled(start, end, packed(Color::pane), theme::control_radius);
+        draw.AddRect(start, end, packed(Color::divider), theme::control_radius, theme::border_width);
+        draw.PushClipRect(start, end, true);
+        const float x = start.x + legend_padding.x;
+        const float swatch_offset = std::floor((ImGui::GetFontSize() - legend_swatch) * 0.5f);
+        float y = start.y + legend_padding.y;
+        for (const auto& line : series) {
+            draw.AddRectFilled({x, y + swatch_offset}, {x + legend_swatch, y + swatch_offset + legend_swatch},
+                               packed(line.color));
+            const auto& text = line.legend;
+            draw.AddText(ImGui::GetFont(), ImGui::GetFontSize(), {x + legend_swatch + legend_swatch_gap, y},
+                         packed(Color::primary_text), text.data(), text.data() + text.size(), text_width);
+            y += row_height(text) + legend_row_gap;
+        }
+        draw.PopClipRect();
+    }
+};
 
 } // namespace
 
@@ -111,22 +175,18 @@ void render_status_plot(const StatusTicks& ticks, float left_gutter, const char*
         draw.AddText({recent_x, bottom + 6}, label_color, recent);
         draw.AddText({now_x, bottom + 6}, label_color, "Now");
     }
-    ImGui::PopFont();
-
     std::size_t count = 0;
     for (const auto& line : series) {
         count = std::max(count, sample_count(line));
     }
-    if (count == 0) {
-        return;
-    }
+    const PlotLegend legend({left, top}, {right, bottom}, series);
     const auto mouse = ImGui::GetIO().MousePos;
-    const bool hovered =
-        ImGui::IsItemHovered() && mouse.x >= left && mouse.x <= right && mouse.y >= top && mouse.y <= bottom;
+    const bool hovered = count > 0 && ImGui::IsItemHovered() && mouse.x >= left && mouse.x <= right &&
+                         mouse.y >= top && mouse.y <= bottom && !legend.hovered();
     // Index from the newest sample, so channels with fewer samples still share the same time axis.
-    const float fraction = hovered ? (right - mouse.x) / (right - left) : 0;
-    const auto age = static_cast<std::size_t>(std::lround(fraction * (count - 1)));
-    const float step = (right - left) / std::max<std::size_t>(1, count - 1);
+    const float step = (right - left) / (std::max<std::size_t>(2, count) - 1);
+    const auto age =
+        hovered && count > 1 ? static_cast<std::size_t>(std::lround((right - mouse.x) / step)) : 0;
     if (hovered) {
         draw.AddLineV(std::round(right - step * age), top, bottom, label_color, theme::border_width);
     }
@@ -148,6 +208,8 @@ void render_status_plot(const StatusTicks& ticks, float left_gutter, const char*
             draw.AddCircleFilled(points[size - 1 - age], hovered ? 4 : 3, color);
         }
     }
+    legend.draw(draw, series);
+    ImGui::PopFont();
     if (hovered && ImGui::BeginTooltip()) {
         const char* spacing = std::string_view(unit) == "%" ? "" : " ";
         for (const auto& line : series) {
