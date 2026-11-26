@@ -393,15 +393,21 @@ move them and use the connection ports or the next node selector to link
 them. Double-click a node card to open its editor. The graph labels links
 defined in WaterWall settings, including split paths, pairs, fallbacks,
 authentication dependencies, and route targets.
-Set named targets in the node editor. Edit Router rules and SniffRouter routes
-in **Settings JSON**. Renaming a node updates references in the config.
+The node editor shows controls and value checks for the selected WaterWall
+1.6.0 node type. It includes named targets, Router rules, and SniffRouter
+routes. Changing a control updates **Settings JSON** and preserves other
+settings in the object. Typing in **Settings JSON** selects **Custom JSON**
+and disables the settings controls, including named-target selectors. Clear
+**Custom JSON** to resume editing the parsed object with those controls.
+Wave checks JSON structure in both modes and checks graph references on save.
+Renaming a node updates references in the config.
 TunDevice and RawSocket show the connected port when placed at either end of
 a chain. Unconnected adapters show both ports so you can attach either side.
 Roll the mouse wheel up to zoom in around the pointer and down to zoom out.
 Use **View** to zoom or fit the graph. In **Config**, choose **Save changes**
 to write `config.json` or **View saved JSON** to see the saved file. Wave writes
-coordinates into each node's `panel-settings` object. WaterWall ignores that
-object.
+coordinates and each node's custom JSON preference into its `panel-settings`
+object. WaterWall ignores that object.
 
 Use **Config → Edit JSON** to edit the current draft or paste an existing `config.json`
 or a JSON array of nodes. **Apply nodes** replaces the draft's nodes and keeps

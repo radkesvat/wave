@@ -5,6 +5,7 @@
 #include <imgui.h>
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -12,6 +13,11 @@
 namespace wave {
 
 struct ConfigNodesState {
+    struct SettingInput {
+        std::string text;
+        std::string error;
+    };
+
     struct Bounds {
         float left = 0;
         float top = 0;
@@ -52,7 +58,9 @@ struct ConfigNodesState {
     std::string node_name;
     std::string node_type;
     std::string node_next;
+    bool custom_json = false;
     std::string settings_text;
+    std::map<std::string, SettingInput, std::less<>> invalid_setting_inputs;
     std::string json_text;
     nlohmann::json import_config;
     std::string error;

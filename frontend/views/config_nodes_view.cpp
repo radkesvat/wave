@@ -5,6 +5,7 @@
 #include "dialog.h"
 #include "view_helpers.h"
 #include "waterwall_node_links.h"
+#include "waterwall_node_settings.h"
 #include "waterwall_nodes.h"
 
 #include <misc/cpp/imgui_stdlib.h>
@@ -27,6 +28,7 @@ using theme::Color;
 using theme::packed;
 using State = ConfigNodesState;
 using Bounds = State::Bounds;
+namespace spec = node_settings;
 
 constexpr float card_width = 148;
 constexpr float card_height = 58;
@@ -606,14 +608,18 @@ void open_dialog(State& state, State::Dialog dialog)
         state.node_name.clear();
         state.node_type.clear();
         state.node_next.clear();
+        state.custom_json = false;
         state.settings_text = "{}";
+        state.invalid_setting_inputs.clear();
     } else if (dialog == State::Dialog::edit) {
         const auto& node = nodes(state)[*state.selected];
         state.node_name = name_of(node);
         state.node_type = string_field(node, "type");
         state.node_next = string_field(node, "next");
+        state.custom_json = bool_field(field(node, "panel-settings"), "custom-json");
         const auto& settings = field(node, "settings");
         state.settings_text = settings.is_null() ? "{}" : settings.dump(2);
+        state.invalid_setting_inputs.clear();
     } else if (dialog == State::Dialog::json) {
         state.json_text = state.saved.dump(2);
     } else if (dialog == State::Dialog::edit_json) {
@@ -639,6 +645,10 @@ Json parse_node_settings(std::string_view text, std::string& error)
 {
     constexpr std::string_view invalid = "Node settings must be a JSON object.";
     error.clear();
+    if (text.size() > max_core_config_bytes) {
+        error = "Wave can save configs up to 256 KiB.";
+        return {};
+    }
     auto settings = parse_plain_core_config_json(text, invalid, error);
     if (error.empty() && !settings.is_object()) {
         error = invalid;
@@ -648,7 +658,8 @@ Json parse_node_settings(std::string_view text, std::string& error)
 
 bool apply_node(State& state, bool adding)
 {
-    auto& list = state.draft["nodes"];
+    auto draft = state.draft;
+    auto& list = draft["nodes"];
     const auto name = std::string_view(state.node_name);
     const auto duplicate = find_node(list, name);
     const auto current = adding ? std::optional<std::size_t>{} : state.selected;
@@ -668,6 +679,18 @@ bool apply_node(State& state, bool adding)
     if (!state.error.empty()) {
         return false;
     }
+    if (!state.custom_json) {
+        if (!state.invalid_setting_inputs.empty()) {
+            const auto& [path, input] = *state.invalid_setting_inputs.begin();
+            state.error =
+                std::format("Invalid setting {}. {}", std::string_view(path).substr(1), input.error);
+            return false;
+        }
+        state.error = spec::validate(state.node_type, settings);
+        if (!state.error.empty()) {
+            return false;
+        }
+    }
     const bool allow_next = can_send(state.node_type, settings);
     const auto next = allow_next ? find_node(list, state.node_next) : std::nullopt;
     if (current && next && makes_cycle(list, *current, *next)) {
@@ -682,6 +705,19 @@ bool apply_node(State& state, bool adding)
     if (!settings.empty() || previous_settings != node.end() || adding) {
         node["settings"] = std::move(settings);
     }
+    auto panel = node.find("panel-settings");
+    if (state.custom_json) {
+        if (panel != node.end() && !panel->is_object()) {
+            state.error = "Node panel-settings must be an object.";
+            return false;
+        }
+        node["panel-settings"]["custom-json"] = true;
+    } else if (panel != node.end() && bool_field(*panel, "custom-json")) {
+        panel->erase("custom-json");
+        if (panel->empty()) {
+            node.erase(panel);
+        }
+    }
     if (state.node_next.empty() || !allow_next) {
         node.erase("next");
     } else {
@@ -692,7 +728,17 @@ bool apply_node(State& state, bool adding)
             rename_links(entry, previous_name, name);
         }
     }
+    const auto serialized = draft.dump(2);
+    if (serialized.size() + 1 > max_core_config_bytes) {
+        state.error = "Wave can save configs up to 256 KiB.";
+        return false;
+    }
+    parse_plain_core_config_json(serialized, "Enter valid configuration JSON.", state.error);
+    if (!state.error.empty()) {
+        return false;
+    }
     state.selected = adding ? list.size() - 1 : *current;
+    state.draft = std::move(draft);
     change(state);
     return true;
 }
@@ -762,14 +808,17 @@ bool apply_config_json(State& state)
 }
 
 bool select_target(const State& state, const char* label, std::string& target, bool adding,
-                   const NodeLinkField* setting = nullptr)
+                   const NodeLinkField* setting = nullptr, bool empty_value_is_present = false)
 {
     ImGui::PushID(label);
     ImGui::TextUnformatted(label);
     ImGui::SetNextItemWidth(-1);
     bool changed = false;
-    if (ImGui::BeginCombo("##target", target.empty() ? "None" : target.c_str())) {
-        if (ImGui::Selectable("None", target.empty()) && !target.empty()) {
+    const auto* preview =
+        target.empty() ? (empty_value_is_present ? "Invalid value" : "None") : target.c_str();
+    if (ImGui::BeginCombo("##target", preview)) {
+        if (ImGui::Selectable("None", target.empty() && !empty_value_is_present) &&
+            (!target.empty() || empty_value_is_present)) {
             target.clear();
             changed = true;
         }
@@ -801,28 +850,349 @@ bool select_target(const State& state, const char* label, std::string& target, b
     return changed;
 }
 
-void edit_setting_links(State& state, Json& settings, bool adding)
+bool is_link_container(std::string_view path, const NodeLinkField& link)
 {
-    if (!settings.is_object()) {
+    for (const char* group : {link.object, link.collection}) {
+        if (group) {
+            if (!path.starts_with('/')) {
+                return false;
+            }
+            path.remove_prefix(1);
+            const auto delimiter = path.find('/');
+            if (path.substr(0, delimiter) != group) {
+                return false;
+            }
+            path.remove_prefix(delimiter == path.npos ? path.size() : delimiter);
+        }
+    }
+    return link.collection ? path.starts_with('/') && path.size() > 1 &&
+                                 path.substr(1).find_first_not_of("0123456789") == path.npos
+                           : path.empty();
+}
+
+bool edit_setting_link(const State& state, Json& settings, bool adding, const NodeLinkField& setting)
+{
+    const auto* key = node_link_key(settings, setting);
+    auto target = std::string(string_field(settings, key));
+    if (!select_target(state, setting.label, target, adding, &setting, settings.contains(key))) {
+        return false;
+    }
+    if (target.empty()) {
+        erase_node_link(settings, setting);
+    } else {
+        settings[key] = target;
+    }
+    return true;
+}
+
+void setting_tooltip(const spec::Field& setting)
+{
+    if (setting.kind == spec::Kind::text_or_list) {
+        ImGui::SetItemTooltip("%s\nEnter a JSON string or an array of strings. %s", setting.key,
+                              setting.hint);
         return;
     }
-    for (const auto& setting : node_link_fields(state.node_type)) {
-        const auto& container = setting.object ? field(settings, setting.object) : settings;
-        if (setting.collection || (!container.is_null() && !container.is_object())) {
-            continue;
+    ImGui::SetItemTooltip("%s%s%s", setting.key, *setting.hint ? "\n" : "", setting.hint);
+}
+
+bool edit_setting_choice(Json& settings, const spec::Field& setting, const char* key)
+{
+    using enum spec::Kind;
+    constexpr const char* boolean_options[] = {"Enabled", "Disabled"};
+    const auto options = setting.kind == boolean ? std::span{boolean_options} : setting.choices;
+    const auto stored = settings.find(key);
+    const bool omitted = stored == settings.end();
+    const auto option_value = [&](std::size_t index) -> Json {
+        return setting.kind == boolean ? Json(index == 0) : Json(options[index]);
+    };
+    const auto is_selected = [&](const Json& value, std::size_t index) {
+        if (setting.kind != choice || !setting.case_insensitive || !value.is_string()) {
+            return value == option_value(index);
         }
-        const auto* key = node_link_key(container, setting);
-        auto target = std::string(string_field(container, key));
-        if (select_target(state, setting.label, target, adding, &setting)) {
-            auto& editable = setting.object ? settings[setting.object] : settings;
-            if (target.empty()) {
-                erase_node_link(editable, setting);
-            } else {
-                editable[key] = target;
+        auto option = setting;
+        option.choices = options.subspan(index, 1);
+        return spec::valid_value(value, option);
+    };
+    const char* preview = setting.required ? "Choose a value" : "WaterWall default";
+    if (!omitted) {
+        preview = stored->is_null() && setting.nullable ? "Null" : "Invalid value";
+        for (std::size_t i = 0; i < options.size(); ++i) {
+            if (is_selected(*stored, i)) {
+                preview = options[i];
+                break;
             }
-            state.settings_text = settings.dump(2);
         }
     }
+    if (!ImGui::BeginCombo("##value", preview)) {
+        return false;
+    }
+    bool changed = false;
+    if (ImGui::Selectable(setting.required ? "Unset" : "WaterWall default", omitted) && !omitted) {
+        settings.erase(key);
+        changed = true;
+    }
+    if (setting.nullable &&
+        ImGui::Selectable("Null", field(settings, key).is_null() && settings.contains(key))) {
+        settings[key] = nullptr;
+        changed = true;
+    }
+    for (std::size_t i = 0; i < options.size(); ++i) {
+        if (ImGui::Selectable(options[i], is_selected(field(settings, key), i))) {
+            settings[key] = option_value(i);
+            changed = true;
+        }
+    }
+    ImGui::EndCombo();
+    return changed;
+}
+
+Json parse_setting_input(const spec::Field& setting, const std::string& input, std::string& error)
+{
+    using enum spec::Kind;
+    if (input.size() > max_core_config_bytes) {
+        error = "Wave can save configs up to 256 KiB.";
+        return {};
+    }
+    const bool special_port =
+        setting.kind == port && (std::ranges::find(setting.choices, input) != setting.choices.end() ||
+                                 (setting.allow_random_port && input.starts_with("random(")));
+    auto value =
+        special_port ? Json(input) : parse_plain_core_config_json(input, "Enter a valid value.", error);
+    if (!error.empty() || spec::valid_value(value, setting)) {
+        return value;
+    }
+    if (*setting.hint) {
+        error = setting.hint;
+    } else if (setting.kind == integer || setting.kind == number || setting.kind == port ||
+               setting.kind == integer_or_boolean) {
+        error = std::format("Enter a {} from {} to {}.", setting.kind == number ? "number" : "whole number",
+                            setting.minimum, setting.maximum);
+    } else {
+        error = "Enter a supported value.";
+    }
+    return {};
+}
+
+bool edit_setting_input(State& state, Json& settings, const spec::Field& setting, const char* key,
+                        const std::string& path)
+{
+    using enum spec::Kind;
+    const auto& value = field(settings, key);
+    const auto invalid = state.invalid_setting_inputs.find(path);
+    const bool plain_text = setting.kind == text;
+    const bool multiline = setting.kind == array || setting.kind == object || setting.kind == json ||
+                           setting.kind == text_or_list;
+    std::string input;
+    if (invalid != state.invalid_setting_inputs.end()) {
+        input = invalid->second.text;
+    } else if (!value.is_null()) {
+        input = !multiline && value.is_string() ? value.get<std::string>() : value.dump(multiline ? 2 : -1);
+    }
+    const auto hint = plain_text               ? (value == "" ? "Empty value" : "Enter text")
+                      : setting.kind == number ? "Enter a number"
+                                               : "Enter a whole number";
+    const char* input_hint = hint;
+    if (setting.kind == port_list) {
+        input_hint = "Enter a port or [port, port]";
+    } else if (setting.kind == port_range) {
+        input_hint = "Enter [first port, last port]";
+    } else if (setting.kind == port && !setting.choices.empty()) {
+        input_hint = setting.allow_random_port ? "Enter a port, random(min,max), or select a mode"
+                                               : "Enter a port or select a mode";
+    }
+    const bool typed = multiline ? ImGui::InputTextMultiline("##value", &input, {-1, 76})
+                                 : ImGui::InputTextWithHint("##value", input_hint, &input);
+    bool changed = false;
+    if (typed) {
+        state.invalid_setting_inputs.erase(path);
+        if (input.empty()) {
+            changed = settings.erase(key) != 0;
+        } else if (plain_text) {
+            settings[key] = input;
+            changed = true;
+        } else {
+            std::string error;
+            auto updated = parse_setting_input(setting, input, error);
+            if (error.empty()) {
+                settings[key] = std::move(updated);
+                changed = true;
+            } else {
+                state.invalid_setting_inputs[path] = {std::move(input), std::move(error)};
+            }
+        }
+    }
+    const auto assign = [&](Json selected) {
+        state.invalid_setting_inputs.erase(path);
+        settings[key] = std::move(selected);
+        changed = true;
+    };
+    if (setting.kind == port && !setting.choices.empty()) {
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##port-mode", "Special values")) {
+            for (const auto* option : setting.choices) {
+                if (ImGui::Selectable(option, field(settings, key) == option)) {
+                    assign(option);
+                }
+            }
+            ImGui::EndCombo();
+        }
+    } else if (setting.kind == integer_or_boolean) {
+        if (ImGui::SmallButton("Enable")) {
+            assign(true);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Disable")) {
+            assign(false);
+        }
+    }
+    if (const auto error = state.invalid_setting_inputs.find(path);
+        error != state.invalid_setting_inputs.end()) {
+        wrapped(error->second.error, Color::error);
+    } else if ((field(settings, key) == "" ||
+                (multiline && settings.contains(key) && field(settings, key).is_null())) &&
+               ImGui::SmallButton("Clear value")) {
+        settings.erase(key);
+        changed = true;
+    }
+    return changed;
+}
+
+bool edit_setting_fields(State& state, Json& settings, bool adding, std::span<const spec::Field> fields,
+                         const std::string& path = {});
+
+bool edit_setting_group(State& state, Json& settings, bool adding, const spec::Field& setting,
+                        const char* key, const std::string& path)
+{
+    using enum spec::Kind;
+    const bool expanded =
+        ImGui::TreeNodeEx("##group", ImGuiTreeNodeFlags_SpanAvailWidth, "%s", setting.label);
+    setting_tooltip(setting);
+    if (!expanded) {
+        return false;
+    }
+    const bool is_object = setting.kind == spec::Kind::object;
+    const auto item = settings.find(key);
+    bool changed = false;
+    auto value = item == settings.end() ? (is_object ? Json::object() : Json::array()) : *item;
+    const bool valid = is_object ? value.is_object() : value.is_array();
+    if (!valid) {
+        wrapped("Use Custom JSON to repair this value, or clear it to start over.", Color::warning);
+    } else if (is_object) {
+        changed = edit_setting_fields(state, value, adding, setting.children, path);
+        if (item == settings.end() && ImGui::SmallButton("Add empty group")) {
+            changed = true;
+        }
+    } else {
+        std::optional<std::size_t> remove;
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            ImGui::PushID(static_cast<int>(i));
+            auto& row = value[i];
+            if (setting.kind == string_list) {
+                auto input = row.is_string() ? row.get<std::string>() : row.dump();
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::InputText("##entry", &input)) {
+                    row = std::move(input);
+                    changed = true;
+                }
+            } else {
+                ImGui::SeparatorText(std::format("Entry {}", i + 1).c_str());
+                if (row.is_object()) {
+                    changed |= edit_setting_fields(state, row, adding, setting.children,
+                                                   std::format("{}/{}", path, i));
+                } else {
+                    wrapped("This entry needs a JSON object.", Color::warning);
+                }
+            }
+            if (ImGui::SmallButton("Remove entry")) {
+                remove = i;
+            }
+            ImGui::PopID();
+        }
+        if (remove) {
+            value.erase(value.begin() + static_cast<Json::difference_type>(*remove));
+            const auto prefix = path + '/';
+            std::erase_if(state.invalid_setting_inputs,
+                          [&](const auto& entry) { return entry.first.starts_with(prefix); });
+            changed = true;
+        }
+        if (ImGui::SmallButton("Add entry")) {
+            value.push_back(setting.kind == string_list ? Json("") : Json::object());
+            changed = true;
+        }
+        if (setting.kind == string_list && item == settings.end()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Use empty list")) {
+                changed = true;
+            }
+        }
+    }
+    if (item != settings.end() && ImGui::SmallButton("Clear value")) {
+        const auto prefix = path + '/';
+        std::erase_if(state.invalid_setting_inputs,
+                      [&](const auto& entry) { return entry.first.starts_with(prefix); });
+        settings.erase(key);
+        changed = true;
+    } else if (changed) {
+        if (setting.kind == object_list && value.empty()) {
+            settings.erase(key);
+        } else {
+            settings[key] = std::move(value);
+        }
+    }
+    ImGui::TreePop();
+    return changed;
+}
+
+bool edit_setting_fields(State& state, Json& settings, bool adding, std::span<const spec::Field> fields,
+                         const std::string& path)
+{
+    using enum spec::Kind;
+    bool changed = false;
+    const auto links = node_link_fields(state.node_type);
+    const auto matches = [&](const spec::Field& field, const NodeLinkField& link) {
+        return field.kind == node_target && std::string_view(field.key) == link.key &&
+               is_link_container(path, link);
+    };
+    for (const auto& setting : fields) {
+        if (setting.kind == node_target) {
+            const auto link =
+                std::ranges::find_if(links, [&](const auto& link) { return matches(setting, link); });
+            if (link != links.end()) {
+                changed |= edit_setting_link(state, settings, adding, *link);
+            } else {
+                const NodeLinkField reference{setting.key, setting.label, NodeLinkKind::reference, nullptr,
+                                              nullptr,     nullptr,       setting.aliases};
+                changed |= edit_setting_link(state, settings, adding, reference);
+            }
+            continue;
+        }
+        ImGui::PushID(setting.key);
+        const auto* key = spec::field_key(settings, setting);
+        if (state.node_type == "AuthenticationServer" && path.empty() &&
+            std::string_view(setting.key) == "db-path") {
+            wrapped("Wave assigns the user database path when you save.", Color::secondary_text);
+        } else if ((setting.kind == object && !setting.children.empty()) || setting.kind == object_list ||
+                   setting.kind == string_list) {
+            changed |= edit_setting_group(state, settings, adding, setting, key, path + '/' + setting.key);
+        } else {
+            ImGui::TextUnformatted(setting.label);
+            setting_tooltip(setting);
+            ImGui::SetNextItemWidth(-1);
+            if (setting.kind == boolean || setting.kind == choice) {
+                changed |= edit_setting_choice(settings, setting, key);
+            } else {
+                changed |= edit_setting_input(state, settings, setting, key, path + '/' + setting.key);
+            }
+        }
+        ImGui::PopID();
+    }
+    for (const auto& link : links) {
+        if (is_link_container(path, link) &&
+            std::ranges::none_of(fields, [&](const auto& field) { return matches(field, link); })) {
+            changed |= edit_setting_link(state, settings, adding, link);
+        }
+    }
+    return changed;
 }
 
 void edit_node(State& state, bool adding)
@@ -839,30 +1209,58 @@ void edit_node(State& state, bool adding)
     if (ImGui::BeginCombo("##node-type", state.node_type.empty() ? "Choose a WaterWall node type"
                                                                  : state.node_type.c_str())) {
         for (const auto type : waterwall_node_types) {
-            if (ImGui::Selectable(type.data(), state.node_type == type)) {
+            if (ImGui::Selectable(type.data(), state.node_type == type) && state.node_type != type) {
                 state.node_type = type;
+                state.invalid_setting_inputs.clear();
+                state.error.clear();
             }
         }
         ImGui::EndCombo();
     }
-    const bool router = state.node_type == "Router" || state.node_type == "SniffRouter";
-    std::string settings_error;
-    auto settings = node_link_fields(state.node_type).empty()
-                        ? Json{}
-                        : parse_node_settings(state.settings_text, settings_error);
-    if (settings_error.empty()) {
-        edit_setting_links(state, settings, adding);
-    }
-    if (can_send(state.node_type, settings)) {
-        select_target(state, router ? "Default next node" : "Next node", state.node_next, adding);
-    }
+    ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Settings JSON");
-    if (router) {
-        wrapped(state.node_type == "Router" ? "Set conditional branches in rules using target."
-                                            : "Set conditional branches in routes using next.",
-                Color::secondary_text);
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Custom JSON", &state.custom_json)) {
+        state.error.clear();
+        if (!state.custom_json) {
+            parse_node_settings(state.settings_text, state.error);
+            state.custom_json = !state.error.empty();
+        }
+        state.invalid_setting_inputs.clear();
     }
-    ImGui::InputTextMultiline("##node-settings", &state.settings_text, {-1, 160});
+    ImGui::SetItemTooltip("Editing JSON enables this mode and pauses the settings controls.");
+    if (ImGui::InputTextMultiline("##node-settings", &state.settings_text, {-1, 134})) {
+        state.custom_json = true;
+        state.invalid_setting_inputs.clear();
+        state.error.clear();
+    }
+    std::string settings_error;
+    auto settings = parse_node_settings(state.settings_text, settings_error);
+    if (!settings_error.empty()) {
+        settings = Json::object();
+    }
+    if (!state.node_type.empty()) {
+        const bool router = state.node_type == "Router" || state.node_type == "SniffRouter";
+        if (can_send(state.node_type, settings)) {
+            select_target(state, router ? "Default next node" : "Next node", state.node_next, adding);
+        }
+        ImGui::SeparatorText(std::format("{} settings", state.node_type).c_str());
+        const auto fields = spec::fields(state.node_type);
+        if (fields.empty() && node_link_fields(state.node_type).empty()) {
+            wrapped(std::ranges::binary_search(waterwall_node_types, state.node_type)
+                        ? "WaterWall 1.6.0 exposes no settings for this node."
+                        : "Use Custom JSON to edit this imported node’s settings.",
+                    Color::secondary_text);
+        } else {
+            ImGui::BeginDisabled(state.custom_json || !settings_error.empty());
+            if (edit_setting_fields(state, settings, adding, fields) && !state.custom_json &&
+                settings_error.empty()) {
+                state.settings_text = settings.dump(2);
+                state.error.clear();
+            }
+            ImGui::EndDisabled();
+        }
+    }
     if (!state.error.empty()) {
         wrapped(state.error, Color::error);
     }
@@ -1268,6 +1666,10 @@ std::string describe_config_nodes(const ConfigNodesState& state)
         description += std::format(" {}.", title(state.dialog));
         if (state.dialog == State::Dialog::confirm_import) {
             description += std::string(" ") + import_notice;
+        }
+        if ((state.dialog == State::Dialog::add || state.dialog == State::Dialog::edit) &&
+            state.custom_json) {
+            description += " Custom JSON enabled.";
         }
     }
     if (state.dirty) {

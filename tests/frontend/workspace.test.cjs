@@ -186,20 +186,20 @@ async function verticalRuns(page, x, top, bottom, [r, g, b], minimum = 1) {
     }, { encoded: screenshot.toString('base64'), r, g, b, minimum, top });
 }
 
-async function dialogFrame(page) {
+async function dialogFrame(page, scanTop = 114) {
     const { width, height } = page.viewportSize();
     const deadline = Date.now() + timeout;
     do {
         await settleCanvas(page);
         // Chromium can briefly tint the canvas after a touch, changing the border pixels.
-        const outline = await verticalRuns(page, Math.floor(width / 2), 114, height, [138, 132, 149]);
+        const outline = await verticalRuns(page, Math.floor(width / 2), scanTop, height, [138, 132, 149]);
         if (outline.length >= 2) return { top: outline[0][0], bottom: outline.at(-1)[1] };
     } while (Date.now() < deadline);
     assert.fail('Expected a dialog outline.');
 }
 
-async function confirmDialog(page, activate, width = 380) {
-    const { bottom } = await dialogFrame(page);
+async function confirmDialog(page, activate, width = 380, scanTop = 114) {
+    const { bottom } = await dialogFrame(page, scanTop);
     const viewport = page.viewportSize().width;
     const right = (viewport + Math.min(width, viewport - 24)) / 2 - 12;
     await activate(right - 42, bottom - 25);
@@ -861,21 +861,24 @@ test('edits a WaterWall node graph and reopens the saved JSON', async () => {
         await replaceText(page, 640, addTop + 72, 'outlet');
         await click(page, 893, addTop + 128);
         await click(page, 420, addTop + 275);
+        await replaceText(page, 640, (await dialogFrame(page)).top + 216, '{"mode":"passive"}');
+        await status(page, /Add node\..*Custom JSON enabled\./);
         await confirmDialog(page, (x, y) => click(page, x, y), 560);
         await status(page, /2 nodes. Selected outlet. Type BlackHole/);
 
         await page.mouse.dblclick(300, (await graphTop()) + 143, { delay: 40 });
         await settleCanvas(page);
         await status(page, /Edit node\./);
+        await status(page, /Edit node\..*Custom JSON enabled\./);
         const { top: editTop } = await dialogFrame(page);
         await replaceText(page, 640, editTop + 72, 'discard');
-        await replaceText(page, 640, editTop + 200, '{"port":1,"port":2}');
+        await replaceText(page, 640, editTop + 216, '{"port":1,"port":2}');
         await confirmDialog(page, (x, y) => click(page, x, y), 560);
         await status(page, /Edit node\..*duplicate JSON object key\./);
-        await replaceText(page, 640, (await dialogFrame(page)).top + 200, '{"value":"\\u0000"}');
+        await replaceText(page, 640, (await dialogFrame(page)).top + 216, '{"value":"\\u0000"}');
         await confirmDialog(page, (x, y) => click(page, x, y), 560);
         await status(page, /Edit node\..*cannot contain a NUL character\./);
-        await replaceText(page, 640, (await dialogFrame(page)).top + 200, '{}');
+        await replaceText(page, 640, (await dialogFrame(page)).top + 216, '{"mode":"active"}');
         await confirmDialog(page, (x, y) => click(page, x, y), 560);
         await status(page, /Selected discard. Type BlackHole/);
 
@@ -905,7 +908,8 @@ test('edits a WaterWall node graph and reopens the saved JSON', async () => {
             ...config,
             nodes: [
                 { ...config.nodes[0], next: 'discard', 'panel-settings': inlet['panel-settings'] },
-                { name: 'discard', type: 'BlackHole', settings: {} },
+                { name: 'discard', type: 'BlackHole', settings: { mode: 'active' },
+                    'panel-settings': { 'custom-json': true } },
             ],
         });
 
@@ -994,6 +998,95 @@ test('edits a WaterWall node graph and reopens the saved JSON', async () => {
         await confirmDialog(page, activate, 740);
         await page.waitForFunction(async () => (await navigator.clipboard.readText()).length > 0);
         assert.deepEqual(JSON.parse(await page.evaluate(() => navigator.clipboard.readText())), document);
+    } finally {
+        await page.close();
+    }
+});
+
+test('preserves imported settings during form edits and locks both kinds of controls in Custom JSON', async () => {
+    const page = await browser.newPage({ viewport: desktop, permissions: ['clipboard-read', 'clipboard-write'] });
+    const data = fixture('stopped');
+    const config = { name: 'Resolver fixture', nodes: [] };
+    const resolver = {
+        name: 'resolver', type: 'DomainResolver', next: 'sink',
+        settings: {
+            mode: 'chain', strategy: 'prefer-ipv4', servers: ['192.0.2.53'], 'dns-next': 'sink',
+            'imported-extra': { values: [true, { marker: 'retained' }] },
+        },
+        'panel-settings': { x: 28, y: 42, 'imported-metadata': 7 },
+        'pannel-settinsg': { marker: 'preserved as imported' },
+    };
+    const nodes = [
+        resolver,
+        { name: 'sink', type: 'BlackHole', settings: { mode: 'passive' } },
+        { name: 'other', type: 'BlackHole', settings: { mode: 'active' } },
+    ];
+    data.server.core.configs = [{ id: 10, name: config.name, enabled: false, active: false }];
+    const preview = await mockPreview(page, data);
+    const activate = (x, y) => click(page, x, y);
+    const openResolver = async () => {
+        await click(page, 270, (await graphCanvasTop(page)) + 70);
+        await status(page, /Selected resolver\. Type DomainResolver\./);
+        await graphMenuItem(page, 'nodes', 1);
+        await status(page, /Edit node\./);
+        return dialogFrame(page, 0);
+    };
+    const rawY = top => top + 218;
+    const readSettings = async top => {
+        await page.evaluate(() => navigator.clipboard.writeText(''));
+        await click(page, 800, rawY(top));
+        await page.locator('#wave-text-input').waitFor({ state: 'visible', timeout });
+        await page.keyboard.press('Control+a');
+        await settleCanvas(page);
+        await page.keyboard.press('Control+c');
+        await page.waitForFunction(async () => (await navigator.clipboard.readText()).length > 0);
+        return JSON.parse(await page.evaluate(() => navigator.clipboard.readText()));
+    };
+    try {
+        await page.goto(url);
+        await page.getByRole('link', { name: config.name, exact: true }).focus();
+        await page.keyboard.press('Enter');
+        const loaded = await preview.action(0);
+        assertRequest(loaded.request, { action: 'get_core_config', id: 10 });
+        loaded.reply({ result: { config, revision: 'before-form', editable: true } });
+        await status(page, /Wave Config Resolver fixture\. Nodes tab\. Nodes\. 0 nodes\./);
+        await openConfigJsonEditor(page);
+        await pasteConfigJson(page, JSON.stringify(nodes));
+        await status(page, /3 nodes\..*Unsaved changes\./);
+
+        const { top, bottom } = await openResolver();
+        const rows = await verticalRuns(page, 820, top + 325, bottom - 45, [13, 11, 14], 18);
+        assert.ok(rows.length >= 5, 'Expected the DNS strategy and branch dropdowns.');
+        const strategy = rows[3];
+        const branch = rows[4];
+        await click(page, 855, (strategy[0] + strategy[1]) / 2);
+        await click(page, 435, strategy[1] + 109);
+        const formSettings = { ...resolver.settings, strategy: 'prefer-ipv6' };
+        assert.deepEqual(await readSettings(top), formSettings);
+        await confirmDialog(page, activate, 560, 0);
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+
+        const { top: customTop } = await openResolver();
+        assert.deepEqual(await readSettings(customTop), formSettings);
+        const customSettings = { ...formSettings, strategy: 'only-ipv6', 'dns-next': 'other' };
+        await replaceText(page, 640, rawY(customTop), JSON.stringify(customSettings));
+        await status(page, /Edit node\..*Custom JSON enabled\./);
+        for (const [row, optionOffset] of [[strategy, 109], [branch, 19]]) {
+            await click(page, 855, customTop + (row[0] + row[1]) / 2 - top);
+            await click(page, 435, customTop + row[1] + optionOffset - top);
+        }
+        assert.deepEqual(await readSettings(customTop), customSettings);
+        await confirmDialog(page, activate, 560, 0);
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+
+        await graphMenuItem(page, 'config', 0);
+        const saved = await preview.action(1);
+        assertRequest(saved.request, { action: 'save_core_config', id: 10, revision: 'before-form', config: {
+            ...config, nodes: [{
+                ...resolver, settings: customSettings,
+                'panel-settings': { ...resolver['panel-settings'], 'custom-json': true },
+            }, ...nodes.slice(1)],
+        } });
     } finally {
         await page.close();
     }
