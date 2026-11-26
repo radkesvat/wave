@@ -191,8 +191,10 @@ Configure deployment TLS in `wave-db.json`. [Administrator setup](authentication
 
 ### Preview controls and server options
 
-The sidebar contains **Server Status**, **Users**, **Settings**,
-**Console**, **Nodes & Routers**, and **About**.
+The sidebar starts with **Server Status**, **Users**, and **Nodes & Routers**.
+Dividers separate the items, with a thicker line below **Server Status**.
+**Console**, **Settings**, and **About** are pinned to the bottom of the desktop
+sidebar and share the last row on narrow screens.
 Tab goes from **Menu** and **Tools** into the workspace. Press Enter on a
 focused pane, then use Tab to move between its controls.
 

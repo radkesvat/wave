@@ -27,11 +27,13 @@ using theme::packed;
 constexpr std::array navigation{
     PanelNavigationItem{"Server Status", PanelPage::server},
     PanelNavigationItem{"Users", PanelPage::users},
-    PanelNavigationItem{"Settings", PanelPage::settings},
-    PanelNavigationItem{"Console", PanelPage::console},
     PanelNavigationItem{"Nodes & Routers", PanelPage::topology},
+    PanelNavigationItem{"Console", PanelPage::console},
+    PanelNavigationItem{"Settings", PanelPage::settings},
     PanelNavigationItem{"About", PanelPage::about},
 };
+constexpr std::size_t footer_item_count = 3;
+constexpr auto first_footer_item = navigation.size() - footer_item_count;
 
 constexpr float margin = 10;
 constexpr float sidebar_width = 178;
@@ -41,11 +43,12 @@ constexpr float narrow_header = 78;
 constexpr float breakpoint = 760;
 constexpr float nav_row = 34;
 constexpr float wide_nav_row = 38;
+constexpr ImVec2 nav_inset{7, 5};
+constexpr float nav_status_gap = 4;
 constexpr float header_button_height = 34;
-constexpr int narrow_navigation_columns = 2;
-constexpr auto narrow_navigation_rows =
-    (navigation.size() + narrow_navigation_columns - 1) / narrow_navigation_columns;
-constexpr float narrow_navigation_height = narrow_navigation_rows * nav_row + 2 * margin;
+constexpr std::array narrow_navigation_columns{std::size_t{1}, first_footer_item - 1, footer_item_count};
+constexpr float narrow_navigation_height =
+    narrow_navigation_columns.size() * nav_row + 2 * margin + nav_status_gap;
 constexpr float narrow_work_height = 660;
 constexpr float narrow_logs_height = 232;
 constexpr float desktop_logs_min_height = 195;
@@ -262,53 +265,77 @@ void render_menus(PanelState& state, float x, int focus, PreviewSession& session
     ImGui::PopFont();
 }
 
-void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 viewport)
+void render_navigation(PanelState& state, const PanelLayout& layout, float canvas_width,
+                       float viewport_height)
 {
     if (!layout.sidebar) {
         return;
     }
-    const int columns = layout.narrow ? narrow_navigation_columns : 1;
-    const float width = layout.narrow ? viewport.x - 2 * margin : layout.navigation_width - margin;
+    const float width = layout.narrow ? canvas_width - 2 * margin : layout.navigation_width - margin;
     const float row_height = layout.wide ? wide_nav_row : nav_row;
-    const float item_width = std::floor((width - (columns + 1) * 6) / columns);
+    const float item_height = row_height - 4;
+    const auto rows = layout.narrow ? narrow_navigation_columns.size() : navigation.size();
     ImGui::SetCursorScreenPos({margin, layout.header_height + margin});
-    const float height =
-        layout.narrow ? narrow_navigation_height - margin : viewport.y - layout.header_height - 2 * margin;
+    const float min_height = 2 * nav_inset.y + rows * row_height + nav_status_gap;
+    const float height = layout.narrow
+                             ? narrow_navigation_height - margin
+                             : std::max(min_height, viewport_height - layout.header_height - 2 * margin);
+    const float footer_offset = layout.narrow ? 0 : height - min_height;
     // Share the workspace focus scope so Tab can reach its controls after a sidebar click.
     if (begin_pane("Navigation", {width, height}, Color::pane,
                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse,
                    ImGuiChildFlags_NavFlattened)) {
         ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
         ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, {0.0f, 0.5f});
-        for (std::size_t i = 0; i < navigation.size(); ++i) {
-            const int row = static_cast<int>(i) / columns;
-            const int column = static_cast<int>(i) % columns;
-            ImGui::SetCursorPos({7 + column * (item_width + 5), 5 + row * row_height});
-            const auto& item = navigation[i];
-            const bool selected = state.page == item.page;
-            const bool smaller_label = layout.narrow && ImGui::CalcTextSize(item.label).x > item_width - 4;
-            if (smaller_label) {
-                ImGui::PushFont(nullptr, theme::annotation_font_size);
+        // Selectable expands its hitbox by half the item spacing around the label area.
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {2 * nav_inset.x, 0});
+        auto& draw = *ImGui::GetWindowDrawList();
+        const ImVec2 origin = ImGui::GetWindowPos();
+        const ImU32 divider = packed(Color::divider);
+        auto item = navigation.begin();
+        for (std::size_t row = 0; row < rows; ++row) {
+            const auto columns = layout.narrow ? narrow_navigation_columns[row] : 1;
+            const float y = nav_inset.y + row * row_height + (row == 0 ? 0 : nav_status_gap) +
+                            (row >= first_footer_item ? footer_offset : 0);
+            for (std::size_t column = 0; column < columns; ++column, ++item) {
+                const float column_left = std::floor(column * width / columns);
+                const float column_right = std::floor((column + 1) * width / columns);
+                const float item_left = column_left + (column == 0 ? 0 : theme::border_width);
+                const float item_width = column_right - item_left - 2 * nav_inset.x;
+                ImGui::SetCursorPos({item_left + nav_inset.x, y});
+                const bool selected = state.page == item->page;
+                const bool smaller_label = layout.narrow && ImGui::CalcTextSize(item->label).x > item_width;
+                if (smaller_label) {
+                    ImGui::PushFont(nullptr, theme::annotation_font_size);
+                }
+                const bool activate = ImGui::Selectable(
+                    item->label, selected, ImGuiSelectableFlags_NoAutoClosePopups, {item_width, item_height});
+                if (smaller_label) {
+                    ImGui::PopFont();
+                }
+                if (activate) {
+                    state.page = item->page;
+                }
+                if (selected) {
+                    const auto min = ImGui::GetItemRectMin();
+                    const auto max = ImGui::GetItemRectMax();
+                    const float right = std::min(max.x, draw.GetClipRectMax().x);
+                    draw.AddRectFilled({right - theme::selection_width, min.y}, {right, max.y},
+                                       packed(Color::accent));
+                }
+                if (column != 0) {
+                    draw.AddLineV(origin.x + column_left, origin.y + y, origin.y + y + item_height, divider,
+                                  theme::border_width);
+                }
             }
-            const bool activate =
-                ImGui::Selectable(item.label, selected, ImGuiSelectableFlags_NoAutoClosePopups,
-                                  {item_width - 4, row_height - 5});
-            if (smaller_label) {
-                ImGui::PopFont();
-            }
-            if (activate) {
-                state.page = item.page;
-            }
-            if (selected) {
-                const auto min = ImGui::GetItemRectMin();
-                const auto max = ImGui::GetItemRectMax();
-                const float right = std::ceil(max.x) + 1;
-                ImGui::GetWindowDrawList()->AddRectFilled(
-                    {right - theme::selection_width, std::ceil(min.y) + 2}, {right, std::floor(max.y) - 2},
-                    packed(Color::accent));
+            if (row + 1 < rows) {
+                const bool below_status = row == 0;
+                const float line_y = origin.y + y + (below_status ? row_height : item_height + 1);
+                draw.AddLineH(origin.x, origin.x + width, line_y, divider,
+                              below_status ? 2 * theme::border_width : theme::border_width);
             }
         }
-        ImGui::PopStyleVar();
+        ImGui::PopStyleVar(2);
         ImGui::PopItemFlag();
     }
     ImGui::EndChild();
@@ -574,7 +601,7 @@ float panel_height(float viewport_width, float canvas_width, const PanelState& s
                : 666;
 }
 
-void render_panel(PanelState& state, PreviewSession& session, float viewport_width, int browser_focus)
+void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_viewport, int browser_focus)
 {
     state.console = {};
     state.topology.visible_bounds = {};
@@ -601,17 +628,17 @@ void render_panel(PanelState& state, PreviewSession& session, float viewport_wid
                      ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar(2);
 
-    PanelLayout layout(viewport_width, state);
+    PanelLayout layout(browser_viewport.x, state);
     const float menu_x = draw_header(layout, viewport, in_workspace);
     if (in_workspace) {
         render_menus(state, menu_x, browser_focus, session);
     }
     state.browser_control = 0;
-    layout = PanelLayout(viewport_width, state);
+    layout = PanelLayout(browser_viewport.x, state);
     if (!in_workspace) {
         render_entry(state.entry, state.auth, layout.header_height);
     } else {
-        render_navigation(state, layout, viewport);
+        render_navigation(state, layout, viewport.x, browser_viewport.y);
         const float width = layout.work_width(viewport.x);
         const bool stacked_status = layout.stack_server_status(state, viewport.x);
         const float logs_height =

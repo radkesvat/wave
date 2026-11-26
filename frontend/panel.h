@@ -12,6 +12,8 @@
 #include <span>
 #include <string>
 
+struct ImVec2;
+
 namespace wave {
 
 class PreviewSession;
@@ -66,7 +68,7 @@ struct PanelState {
 const char* panel_page_name(PanelPage page);
 std::span<const PanelNavigationItem> panel_navigation();
 float panel_height(float viewport_width, float canvas_width, const PanelState& state);
-void render_panel(PanelState& state, PreviewSession& session, float viewport_width, int browser_focus);
+void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_viewport, int browser_focus);
 bool panel_demo_at(const PanelState& state, float x, float y);
 std::string describe_panel(const PanelState& state, const PreviewSession& session);
 

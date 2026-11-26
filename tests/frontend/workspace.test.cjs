@@ -208,7 +208,7 @@ async function lifecycleButton(page, row) {
     await click(page, x, title[1] + 47 + 37 * row);
 }
 
-test('opens the authenticated workspace and updates host metrics during keyboard navigation', async () => {
+test('opens the authenticated workspace, updates host metrics, and navigates the sidebar', async () => {
     const page = await browser.newPage({ viewport: desktop });
     const data = fixture();
     const firstSnapshot = Promise.withResolvers();
@@ -221,6 +221,18 @@ test('opens the authenticated workspace and updates host metrics during keyboard
 
         await openView(page, 'Server Status');
         await status(page, /CPU 25\.0%\. Memory 4\.0 \/ 16\.0 GiB.*Upload 2\.0 MiB\/s\. Download 6\.0 MiB\/s/);
+        const dividers = await verticalRuns(page, 152, 91, desktop.height - 18, [61, 58, 67]);
+        assert.deepEqual(dividers.map(([top, bottom]) => bottom - top), [2, 1, 1, 1, 1]);
+        for (const x of [11, 176]) {
+            assert.deepEqual(await verticalRuns(page, x, 91, desktop.height - 18, [61, 58, 67]), dividers);
+        }
+        assert.deepEqual(await verticalRuns(page, 11, 68, 86, [43, 39, 48]), [[68, 86]]);
+        assert.deepEqual(await verticalRuns(page, 176, 60, 96, [243, 129, 74]), [[63, 93]]);
+        await page.mouse.move(12, 115);
+        await settleCanvas(page);
+        for (const x of [11, 176]) {
+            assert.deepEqual(await verticalRuns(page, x, 110, 128, [55, 49, 59]), [[110, 128]]);
+        }
         Object.assign(data.server, {
             cpu_percent: null, cpu_history: [25, null],
             upload_rate: 0.5 / 1024, download_rate: 1.5 / 1024,
@@ -228,7 +240,17 @@ test('opens the authenticated workspace and updates host metrics during keyboard
         });
         await preview.broadcast();
         await status(page, /CPU Unavailable.*Upload 0\.5 KiB\/s\. Download 1\.5 KiB\/s/);
-        await openView(page, 'About');
+        await click(page, 176, desktop.height - 35);
+        await status(page, /^Wave About\./);
+        const shortHeight = 500;
+        await page.setViewportSize({ ...desktop, height: shortHeight });
+        await settleCanvas(page);
+        await click(page, 80, shortHeight - 103);
+        await status(page, /^Wave Console\./);
+        await click(page, 80, shortHeight - 69);
+        await status(page, /^Wave Settings\./);
+        await click(page, 80, shortHeight - 35);
+        await status(page, /^Wave About\./);
     } finally {
         firstSnapshot.resolve();
         await page.close();
@@ -500,7 +522,7 @@ test('reserves space for a whole paste until the terminal acknowledges input byt
     }
 });
 
-test('creates and enables a config from the top-bar menu on touch', async () => {
+test('uses the sidebar and creates and enables a config from the top-bar menu on touch', async () => {
     const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
     const data = fixture();
     const preview = await mockPreview(page, data);
@@ -516,6 +538,22 @@ test('creates and enables a config from the top-bar menu on touch', async () => 
     try {
         await page.goto(url);
         await waitForUsers(page);
+        const dividers = await verticalRuns(page, 310, 120, 165, [61, 58, 67]);
+        assert.deepEqual(dividers.map(([top, bottom]) => bottom - top), [2, 1]);
+        const { width } = await page.locator('#canvas').boundingBox();
+        for (const x of [11, Math.floor(width) - 12]) {
+            assert.deepEqual(await verticalRuns(page, x, 120, 165, [61, 58, 67]), dividers);
+        }
+        const columnDivider = await verticalRuns(page, Math.floor(width / 2), 136, 156, [61, 58, 67]);
+        assert.deepEqual(columnDivider, [[136, 156]]);
+        await tap(60, 180);
+        await status(page, /^Wave Console\./);
+        await tap(185, 180);
+        await status(page, /^Wave Settings\./);
+        const rightEdge = Math.floor(width) - 12;
+        await tap(rightEdge, 180);
+        await status(page, /^Wave About\./);
+        assert.deepEqual(await verticalRuns(page, rightEdge, 171, 187, [243, 129, 74]), [[171, 187]]);
         await menuItem(167);
         await status(page, /Create new config/);
         await tap(80, (await dialogFrame(page)).top + 69);

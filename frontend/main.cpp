@@ -80,7 +80,10 @@ EM_JS(void, update_console, (bool active, float x, float y, float width, float h
 
 EM_JS(int, browser_panel_focus, (), { return Module['panelFocus'](); });
 
-EM_JS(int, browser_viewport_width, (), { return window.innerWidth; });
+EM_JS(void, read_browser_viewport, (float* width, float* height), {
+    HEAPF32[width >> 2] = window.innerWidth;
+    HEAPF32[height >> 2] = window.innerHeight;
+});
 
 EM_JS(void, scroll_to_top, (), { window.scrollTo(0, 0); });
 
@@ -282,8 +285,10 @@ struct Application {
     {
         const auto previous_entry = panel.entry.page;
         update_session();
-        // The responsive layout uses the viewport width even when a document scrollbar is present.
-        const int viewport_width = browser_viewport_width();
+        // Use the browser viewport even when the canvas extends beyond it.
+        ImVec2 browser_viewport;
+        read_browser_viewport(&browser_viewport.x, &browser_viewport.y);
+        const int viewport_width = static_cast<int>(browser_viewport.x);
         if (!fit_canvas(viewport_width)) {
             return;
         }
@@ -302,7 +307,7 @@ struct Application {
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
         const auto previous_page = panel.page;
-        wave::render_panel(panel, session, viewport_width, browser_panel_focus());
+        wave::render_panel(panel, session, browser_viewport, browser_panel_focus());
         // ImGui may spread the paste shortcut across frames to preserve input order.
         if (paste_target &&
             (paste_target != ImGui::GetActiveID() || ImGui::GetCurrentContext()->InputEventsQueue.empty())) {
