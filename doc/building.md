@@ -1,8 +1,9 @@
 # Build and preview Wave
 
-Wave builds a WebAssembly panel and a native server that supplies its preview
-data. Use a browser with WebGL 2 enabled. After sign-in, the workspace starts
-on Users and shows WaterWall as disconnected.
+Wave builds a WebAssembly panel and a Linux server that manages the WaterWall
+executable and supplies host metrics and preview workspace data. Use a browser
+with WebGL 2 enabled. After sign-in, the workspace starts on Users with sample
+records. See **Panel Controls** on Server Status for the WaterWall process state.
 
 ## Prerequisites
 
@@ -95,7 +96,8 @@ npm run --prefix tests/frontend install-browser
 
 After building a preset, use the matching CTest command. Each run serves its
 built site on a separate local port and supplies a WebSocket fixture for the
-workspace in Chromium.
+workspace in Chromium. The smoke suite covers browser startup and the main
+workspace workflows.
 
 ```sh
 ctest --preset web-debug
@@ -177,15 +179,15 @@ the username and password, then select **Create administrator**. Sign in
 with those credentials to open the workspace. A browser with a valid
 session opens the workspace directly.
 
-Use **Panel Settings → Administrator** to change the username or password.
-Saving changes signs out every active session. **Panel Settings** also shows
+Use **Settings → Panel → Administrator** to change the username or password.
+Saving changes signs out every active session. The **Panel** tab also shows
 the sample domain, certificate chain path, and private key path.
 **Apply changes** keeps those sample values for the current preview process.
 Configure deployment TLS in `wave-db.json`. [Administrator setup](authentication.md#set-up-the-administrator)
 
 ### Preview controls and server options
 
-The sidebar contains **Server Status**, **Users**, **Panel Settings**,
+The sidebar contains **Server Status**, **Users**, **Settings**,
 **Console**, **Nodes & Routers**, and **About**.
 Tab goes from **Menu** and **Tools** into the workspace. Press Enter on a
 focused pane, then use Tab to move between its controls.
@@ -289,52 +291,76 @@ machine to reach the sign-in page. [HTTPS configuration](authentication.md#confi
 ### Panel Controls and versioning
 
 Each Wave panel release uses the same version number as the WaterWall core
-release it supports. For example, Wave 1.6.0 would support WaterWall 1.6.0.
+release it supports. Wave 1.6.0 installs WaterWall from the
+[v1.6.0 release](https://github.com/radkesvat/WaterWall/releases/tag/v1.6.0).
+The current build offers only version 1.6.0 in the panel version picker.
+
+Wave creates two directories beside `wave-backend`:
+
+- `waterwall_bin/` holds the `Waterwall` executable. On first startup, Wave
+  downloads and extracts the matching release in the background if the binary
+  is missing. Automatic installation requires `curl` and `unzip` on `PATH`
+  and access to GitHub. Wave selects the Linux x86-64 or ARM64 archive built for
+  older CPUs and checks its pinned SHA-256 before extracting the executable.
+- `configs/` starts empty. The **Create config** menu item creates
+  `configs/<name>/config.json` with a WaterWall configuration skeleton.
+  Fill in its nodes before enabling it in **Manage configs**. Wave stores
+  names and enabled flags in `wave-db.json` under `core_configs`.
+
+After a failed install or removal of the executable, **Install core** replaces
+the lifecycle buttons and can retry the download. Wave records the first
+install attempt in `wave-db.json` so later restarts leave retries to the
+administrator. The panel remains available during installation and reports
+any error. Precreate `waterwall_bin/` and place the matching executable there
+with execute permission to provision Wave offline.
 
 Each button and the target panel version picker fill their own row in Panel
 Controls. The desktop grid uses shorter rows, and the stacked layout gives
-touch controls more height. **Start core** is available while the preview
-core is stopped. **Stop core** is available while it is running and requires
-confirmation.
-These actions change the simulated lifecycle state in memory. Live WaterWall
-starts its executable with a core JSON input and loads the listed node configs
-during startup. Live start and stop are unimplemented in Wave.
+touch controls more height. After installation, **Start core** is available
+while WaterWall is stopped. **Stop core** asks for confirmation before stopping
+the running process. If the executable is removed while WaterWall is running,
+stop it to reinstall. Wave starts WaterWall only when requested.
 
-Pick a target Wave panel version from the preview's sample catalog. The
-choice stays in the browser until you confirm **Update panel**. The preview
-stores the reported panel version in memory and displays it in Server
-Information, About, and the Wave version dialog.
+Use **Settings → Core** to edit the WaterWall core settings as JSON. Wave stores
+these settings in `wave-db.json` under `core_settings`. On **Start core**, Wave
+adds the enabled `configs/<name>/config.json` paths to the settings and passes
+the generated `core.json` through an anonymous in-memory file. WaterWall runs
+from the directory containing `wave-backend`, where relative paths resolve.
+Enable at least one config before starting. Settings and enabled flags take
+effect on the next start. [WaterWall core settings](https://radkesvat.github.io/WaterWall-Docs/docs/getting-started/installation)
+
+For deployments using `waterwall_config/` from an earlier build, copy the
+settings to the **Core** tab without the `configs` field, create an entry for
+each config, and copy the node JSON into its new `configs/<name>/config.json`.
+Wave leaves the old directory in place.
 
 The top-bar **Menu** provides **Create config** and **Manage configs** on
-every preview workspace page. **Create config** saves an in-memory entry by
-name with its enabled checkbox clear. Names are case-sensitive, can contain up
-to 64 UTF-8 bytes, and must be unique after trimming surrounding spaces.
-Blank names and ASCII control characters are invalid. **Manage configs** can
-enable or disable an entry, or remove it after confirmation. The active entry is protected against both
-changes, including while the preview core is stopped. Enabling an entry only
-changes its preview flag. Live config-file writes, activation, and reload are
-unimplemented. Config changes are shared by connected browsers and reset with
-the preview backend.
+every workspace page. New configs start disabled. Names are case-sensitive,
+can contain up to 64 UTF-8 bytes, and must be unique after trimming surrounding
+spaces. Blank names, `.` and `..`, path separators, and ASCII control
+characters are invalid. Configs in use by the running core are protected.
+Removing a config deletes its `config.json` and an empty folder after confirmation.
 
 **Backup** in Panel Controls downloads `wave-preview-backup.json` with the
-preview TLS domain, PEM paths, and inactive config entries. **Restore** imports
-that file and asks for confirmation before replacing those settings and entries
-for all connected preview browsers. The active config stays protected. The
-file contains config names and enabled flags, and restoration affects only
-in-memory preview data. For deployment settings, see
-[Authentication and HTTPS](authentication.md).
+sample TLS domain, PEM paths, and the inactive config list. The backup contains
+config names and enabled flags. **Restore** replaces the inactive config list
+after confirmation, retains existing `config.json` files, and creates a
+skeleton for a restored name that lacks a folder. For deployment settings,
+see [Authentication and HTTPS](authentication.md).
 
-The preview snapshot reports the current panel version in `server.version`
-and the panel catalog in `server.available_panel_versions`. The `server.core`
-object reports `state`, `configs`, and the `lifecycle` and `configs` capability
-flags. Requests use the existing `request_id` and snapshot reply.
+The workspace snapshot reports the build version in `server.version` and
+`server.available_panel_versions`. The `server.core` object reports `state`,
+any `error` from the installer or process, `configs`, and the `lifecycle`
+and `configs` capability flags. Requests use the existing `request_id` and
+snapshot reply. The install, start, and stop replies confirm receipt and
+later snapshots report completion.
 While a reply is pending, the controls block duplicate submissions. If the
 connection closes, Server Status shows the last snapshot and offers to reconnect.
 
 | Action | Additional request fields |
 | --- | --- |
-| `start_core`, `stop_core` | None |
-| `update_panel` | `version` from `server.available_panel_versions` |
+| `install_core`, `start_core`, `stop_core` | None |
+| `apply_core_settings` | JSON object as `settings`, up to 16 KiB |
 | `create_core_config` | `name` |
 | `set_core_config_enabled` | Config `id` and boolean `enabled` |
 | `remove_core_config` | Config `id` |

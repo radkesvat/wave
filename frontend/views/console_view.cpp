@@ -80,11 +80,27 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##console-search", "Search output", state.search.data(), state.search.size());
     ImGuiTextFilter filter(state.search.data());
-    std::string copied;
+    if (copy) {
+        std::string copied;
+        for (const auto& line : lines) {
+            const auto value = string_value(line);
+            if (filter.PassFilter(value.data(), value.data() + value.size())) {
+                copied.append(value).append("\n");
+            }
+        }
+        ImGui::SetClipboardText(copied.c_str());
+        state.copied = true;
+    }
+    if (state.copied) {
+        ImGui::TextColored(rgba(Color::success), "Console output copied");
+    }
+    feedback(session, {"console_command", "clear_console", "stop_console", "start_console"});
+
     const auto last = lines.empty() ? ""sv : string_value(lines.back());
     const bool output_changed = state.output_size != lines.size() || last != state.last_line;
+    const float command_bar_height = ImGui::GetFrameHeightWithSpacing() * (narrow ? 2.0f : 1.0f);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(Color::console));
-    if (ImGui::BeginChild("console-output", {0, narrow ? 208.0f : 252.0f}, ImGuiChildFlags_Borders)) {
+    if (ImGui::BeginChild("console-output", {0, -command_bar_height}, ImGuiChildFlags_Borders)) {
         for (const auto& line : lines) {
             const auto value = string_value(line);
             if (!filter.PassFilter(value.data(), value.data() + value.size())) {
@@ -104,19 +120,6 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
     ImGui::PopStyleColor();
     state.output_size = lines.size();
     state.last_line = last;
-    if (copy) {
-        for (const auto& line : lines) {
-            const auto value = string_value(line);
-            if (filter.PassFilter(value.data(), value.data() + value.size())) {
-                copied.append(value).append("\n");
-            }
-        }
-        ImGui::SetClipboardText(copied.c_str());
-        state.copied = true;
-    }
-    if (state.copied) {
-        ImGui::TextColored(rgba(Color::success), "Console output copied");
-    }
 
     ImGui::BeginDisabled(!running);
     ConsoleHistory navigation{history, state.history_position};
@@ -149,7 +152,6 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
         fill(state.command, history_step(history, state.history_position, 1));
     }
     ImGui::EndDisabled();
-    feedback(session, {"console_command", "clear_console", "stop_console", "start_console"});
 }
 
 } // namespace wave

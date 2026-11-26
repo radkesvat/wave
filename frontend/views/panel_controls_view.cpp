@@ -4,6 +4,7 @@
 #include "dialog.h"
 #include "preview_backup.h"
 #include "view_helpers.h"
+#include "wave_version.h"
 
 #include <imgui_internal.h>
 
@@ -19,10 +20,10 @@ using ControlsDialog = PanelControlsState::Dialog;
 
 constexpr char popup_id[] = "###ServerPanelControlsDialog";
 constexpr char target_label[] = "Target panel version";
-constexpr char pending_message[] = "Applying to preview…";
+constexpr char pending_message[] = "Applying change…";
 constexpr char disconnected_message[] = "The preview connection closed before confirming the change.";
 constexpr char restore_message[] =
-    "Choose a backup JSON file to replace the preview TLS settings and inactive configs.";
+    "Choose a backup JSON file to replace the sample TLS settings and inactive config list.";
 constexpr char backup_selected_message[] = "Wave preview backup selected.";
 constexpr auto request_id_bytes = sizeof(",\"request_id\":18446744073709551615") - 1;
 
@@ -73,7 +74,7 @@ const Json* find_config(const Json& core, int id)
 std::string core_state_label(const Json& core)
 {
     const auto state = string_field(core, "state", "unavailable");
-    return std::format("Preview core {}.", state);
+    return std::format("WaterWall core {}.", state);
 }
 
 std::string controls_notice(const Json& server, const PreviewSession& session)
@@ -121,6 +122,8 @@ void submit(PanelControlsState& state, PreviewSession& session, Json request)
     if (state.request_id) {
         return;
     }
+    const auto action = string_field(request, "action");
+    state.lifecycle_request = action == "install_core" || action == "start_core" || action == "stop_core";
     state.reply.reset();
     state.request_id = session.submit(std::move(request), 5000);
     if (!state.request_id) {
@@ -151,6 +154,8 @@ struct ControlsLayout {
     float frame_height;
     bool has_core;
     bool reconnect;
+    std::string_view core_state;
+    std::string_view core_error;
     std::string state_label;
     std::string active_label;
     std::string notice;
@@ -161,13 +166,23 @@ struct ControlsLayout {
         : width(width), frame_height(control_height(compact ? 32.0f : 40.0f)),
           has_core(field(server, "core").is_object()),
           reconnect(session.status() == PreviewStatus::unavailable),
+          core_state(string_field(field(server, "core"), "state")),
+          core_error(string_field(field(server, "core"), "error")),
           state_label(core_state_label(field(server, "core"))),
-          active_label(std::format("Panel version {}", string_field(server, "version", "unavailable"))),
+          active_label(std::format("Panel version {}", string_field(server, "version", wave::version))),
           notice(controls_notice(server, session)),
           result(state.request_id ? pending_message
                  : state.reply    ? std::string_view(state.reply->message)
                                   : "")
     {
+        if (core_error == result) {
+            core_error = {};
+        }
+    }
+
+    bool show_install() const
+    {
+        return core_state == "missing" || core_state == "installing";
     }
 
     float height() const
@@ -181,7 +196,9 @@ struct ControlsLayout {
         };
         if (has_core) {
             line(state_label);
-            height += 4 * (frame_height + gap) + 2 * gap;
+            line(core_error);
+            const int button_count = show_install() ? 3 : 4;
+            height += button_count * (frame_height + gap) + 2 * gap;
         }
         line(active_label);
         line(target_label);
@@ -209,7 +226,7 @@ void draw_panel_versions(PanelControlsState& state, const Json& server, const Co
     wrapped(layout.active_label);
     wrapped(target_label, Color::secondary_text);
     const auto& versions = array_field(server, "available_panel_versions");
-    const auto active = string_field(server, "version");
+    const auto active = string_field(server, "version", wave::version);
     const auto selected = state.target_version.empty() ? active : std::string_view(state.target_version);
     disabled |= versions.empty();
     ImGui::BeginDisabled(disabled);
@@ -266,9 +283,9 @@ void render_create(PanelControlsState& state, PreviewSession& session, const Jso
     ImGui::EndDisabled();
     const auto name = core_config_name(state.config_name.data());
     if (!name.empty() || state.config_name.front() == '\0') {
-        wrapped("New preview configs start disabled.", Color::secondary_text);
+        wrapped("New configs start disabled.", Color::secondary_text);
     } else {
-        wrapped("Enter a nonblank name of up to 64 bytes without control characters.", Color::error);
+        wrapped("Enter a valid filename of up to 64 bytes.", Color::error);
     }
     if (session.ready() && unavailable) {
         wrapped("Config creation is unavailable.", Color::warning);
@@ -292,7 +309,7 @@ void render_configs(PanelControlsState& state, PreviewSession& session, const Js
     const bool supported = can_edit_configs(core);
     const auto& configs = array_field(core, "configs");
     if (configs.empty()) {
-        wrapped("No preview configs.", Color::secondary_text);
+        wrapped("No configs.", Color::secondary_text);
     }
     if (session.ready() && !supported) {
         wrapped("Config changes are unavailable.", Color::warning);
@@ -342,30 +359,30 @@ void render_confirmation(PanelControlsState& state, PreviewSession& session, con
     if (remove) {
         title = "Remove config###ServerPanelControlsDialog";
         label = "Remove";
-        question = std::format("Remove {} from the preview config list?", state.remove_name);
+        question = std::format("Remove {} and its config.json file?", state.remove_name);
         const auto* config = find_config(core, state.remove_id);
         if (!can_edit_configs(core) || !config) {
-            unavailable = "That preview config is unavailable.";
+            unavailable = "That config is unavailable.";
         } else if (bool_field(*config, "active")) {
-            unavailable = "The active preview config is protected.";
+            unavailable = "Stop WaterWall before removing an active config.";
         }
         request = {{"action", "remove_core_config"}, {"id", state.remove_id}};
     } else if (state.dialog == ControlsDialog::update) {
         title = "Update panel###ServerPanelControlsDialog";
         label = "Update panel";
-        question = std::format("Apply {} as the preview panel version?", state.target_version);
+        question = std::format("Update Wave to version {}?", state.target_version);
         if (!has_panel_version(server, state.target_version)) {
-            unavailable = "That preview panel version is unavailable.";
+            unavailable = "That panel version is unavailable.";
         } else if (state.target_version == string_field(server, "version")) {
-            unavailable = "That preview panel version is already active.";
+            unavailable = "That panel version is already active.";
         }
         request = {{"action", "update_panel"}, {"version", state.target_version}};
     } else {
         title = "Stop core###ServerPanelControlsDialog";
         label = "Stop core";
-        question = "Stop the preview core? This changes its simulated lifecycle state.";
+        question = "Stop the WaterWall core process?";
         if (!can_stop(core)) {
-            unavailable = "Stop is unavailable in the current preview core state.";
+            unavailable = "Stop is unavailable in the current core state.";
         }
         request = {{"action", "stop_core"}};
     }
@@ -473,6 +490,9 @@ void update_panel_controls(PanelControlsState& state, PreviewSession& session)
                 "The preview did not confirm the change. Check the current state before retrying.";
         } else if (reply->status == PreviewReply::Status::disconnected) {
             reply->message = disconnected_message;
+        } else if (state.lifecycle_request && reply->ok()) {
+            // The current process state reports progress after a lifecycle request is accepted.
+            reply->message.clear();
         }
         state.reply = std::move(reply);
     }
@@ -511,13 +531,23 @@ void render_panel_controls(PanelControlsState& state, PreviewSession& session, f
     ImGui::BeginGroup();
     if (layout.has_core) {
         wrapped(layout.state_label);
-        const bool start_disabled =
-            disabled || !supports(core, "lifecycle") || field(core, "state") != "stopped";
-        if (layout.button("Start core", start_disabled)) {
-            submit(state, session, {{"action", "start_core"}});
+        const bool lifecycle_disabled = disabled || !supports(core, "lifecycle");
+        if (layout.show_install()) {
+            const bool installing = layout.core_state == "installing";
+            if (layout.button(installing ? "Installing core…" : "Install core",
+                              lifecycle_disabled || installing)) {
+                submit(state, session, {{"action", "install_core"}});
+            }
+        } else {
+            if (layout.button("Start core", lifecycle_disabled || layout.core_state != "stopped")) {
+                submit(state, session, {{"action", "start_core"}});
+            }
+            if (layout.button("Stop core", disabled || !can_stop(core))) {
+                open_dialog(state, ControlsDialog::stop);
+            }
         }
-        if (layout.button("Stop core", disabled || !can_stop(core))) {
-            open_dialog(state, ControlsDialog::stop);
+        if (!layout.core_error.empty()) {
+            wrapped(layout.core_error, Color::error);
         }
         ImGui::Spacing();
     }
@@ -594,8 +624,12 @@ std::string describe_panel_controls(const PanelControlsState& state, const Previ
         description = "Panel Controls. ";
         if (core.is_object()) {
             description += core_state_label(core) + ' ';
+            const auto error = string_field(core, "error");
+            if (!error.empty() && (state.request_id || !state.reply || state.reply->message != error)) {
+                description += std::format("Core error. {} ", error);
+            }
         }
-        const auto active = string_field(server, "version", "unavailable");
+        const auto active = string_field(server, "version", wave::version);
         const auto target = state.target_version.empty() ? active : std::string_view(state.target_version);
         description += std::format("Panel version {}. Target panel version {}. ", active, target);
         const auto notice = controls_notice(server, session);
@@ -619,7 +653,7 @@ std::string describe_panel_controls(const PanelControlsState& state, const Previ
         description += "Manage configs. ";
         const auto& configs = array_field(core, "configs");
         if (configs.empty()) {
-            description += "No preview configs. ";
+            description += "No configs. ";
         }
         for (const auto& config : configs) {
             description += std::format("{} {}{}. ", string_field(config, "name"),

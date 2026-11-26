@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
-project(Wave LANGUAGES CXX)
+project(Wave VERSION 1.6.0 LANGUAGES CXX)
+
+configure_file(common/wave_version.h.in generated/wave_version.h @ONLY)
 
 include(FetchContent)
 FetchContent_Declare(nlohmann_json

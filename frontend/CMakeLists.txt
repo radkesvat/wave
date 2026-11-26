@@ -44,6 +44,7 @@ add_executable(wave
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+    ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
     ${implot_SOURCE_DIR}/implot.cpp
     ${implot_SOURCE_DIR}/implot_items.cpp
     ${implot_SOURCE_DIR}/implot_demo.cpp
@@ -59,6 +60,7 @@ set_target_properties(wave PROPERTIES
 target_include_directories(wave PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${PROJECT_SOURCE_DIR}/common"
+    "${PROJECT_BINARY_DIR}/generated"
     "${CMAKE_CURRENT_BINARY_DIR}"
     "${imgui_SOURCE_DIR}"
     "${imgui_SOURCE_DIR}/backends"

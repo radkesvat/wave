@@ -22,7 +22,8 @@ For a previously configured build that has TLS off in its CMake cache, pass
 
 ## Database
 
-Wave stores its durable state in `wave-db.json` beside the executable. On
+Wave stores panel settings, core settings, and credentials in `wave-db.json`
+beside the executable. On
 first startup it creates the file with `admin: []` and listener settings.
 It fills missing listener fields with `0.0.0.0` and port `2045`, preserving
 configured values. The service account needs write access to the directory
@@ -104,7 +105,7 @@ or hyphens. Use a password of at least 15 characters and up to 256 UTF-8 bytes
 without ASCII control characters. Select **Create administrator**, then sign
 in with the new credentials. [Pre-DNS verification](#verify-https-before-dns)
 
-To change the username or password, go to **Panel Settings → Administrator**.
+To change the username or password, go to **Settings → Panel → Administrator**.
 Enter the current password and leave **New password** blank to keep it.
 **Save administrator** revokes all sessions and returns you to sign-in.
 
@@ -183,19 +184,19 @@ their session expires or is revoked.
 ## Tests
 
 The native suites use Node.js 22 or later and the OpenSSL command-line tool.
-`backend.tls` exercises database initialization, startup rejection, and client
-trust checks without a listener. `backend.auth` and `backend.smoke` require
-loopback sockets. The HTTPS fixture generates a private root, intermediate,
-and leaf certificate for a generic hostname and resolves it locally.
+`backend.tls` checks startup validation, private file locations, and certificate
+renewal without binding a listener. `backend.auth` checks HTTPS trust and
+session handling over loopback. The HTTPS fixture generates a private root,
+intermediate, and leaf certificate for a generic hostname and resolves it locally.
 
 ```sh
 ctest --preset backend-debug
 ctest --preset backend-release
 ```
 
-Run the browser session test against a built frontend with the existing
-Chromium test dependencies. On Linux the test uses NSS `certutil` to trust
-the generated root in a temporary browser trust store. [Frontend test prerequisites](building.md#frontend-tests)
+Run the browser sign-in smoke test against the built frontend and backend.
+It uses Chromium and a loopback HTTP listener. The native suites cover HTTPS
+trust and secure session handling. [Frontend test prerequisites](building.md#frontend-tests)
 
 ```sh
 WAVE_BACKEND="$PWD/build/backend-release/wave-backend" \

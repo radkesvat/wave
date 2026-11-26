@@ -27,6 +27,7 @@ struct PanelControlsState {
     unsigned keyboard_focus = 0;
     std::string remove_name;
     nlohmann::json restore_request;
+    bool lifecycle_request = false;
     std::optional<std::uint64_t> request_id;
     std::optional<PreviewReply> reply;
 };

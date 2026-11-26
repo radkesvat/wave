@@ -76,7 +76,8 @@ bool validate_site(const std::filesystem::path& site_dir, bool secure)
     return true;
 }
 
-void configure_workspace_routes(httplib::Server& server, const std::shared_ptr<wave::AuthStore>& store)
+void configure_workspace_routes(httplib::Server& server, const std::shared_ptr<wave::AuthStore>& store,
+                                const std::shared_ptr<wave::PanelDatabase>& database, bool first_install)
 {
     server.WebSocket("/ws", [store](const httplib::Request& req, httplib::ws::WebSocket& socket) {
         using namespace std::chrono_literals;
@@ -93,7 +94,7 @@ void configure_workspace_routes(httplib::Server& server, const std::shared_ptr<w
             }
         }
     });
-    wave::configure_preview_routes(server, store);
+    wave::configure_preview_routes(server, store, database, first_install);
 }
 
 } // namespace
@@ -108,9 +109,11 @@ int main(int argc, char* argv[])
 
     bool secure = false;
     wave::PanelSettings settings{};
+    std::shared_ptr<wave::PanelDatabase> database;
+    std::shared_ptr<wave::AuthStore> store;
     std::unique_ptr<httplib::Server> server;
     try {
-        const auto database =
+        database =
             std::make_shared<wave::PanelDatabase>(argv[0], options.site_dir, options.check_tls);
         settings = database->settings();
         secure = settings.tls.has_value();
@@ -140,9 +143,8 @@ int main(int argc, char* argv[])
         } else {
             server = std::make_unique<httplib::Server>();
         }
-        const auto store = std::make_shared<wave::AuthStore>(database);
+        store = std::make_shared<wave::AuthStore>(database);
         wave::configure_authenticated_routes(*server, options.site_dir, store, secure, authority);
-        configure_workspace_routes(*server, store);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return EXIT_FAILURE;
@@ -166,6 +168,13 @@ int main(int argc, char* argv[])
     const auto endpoint = secure ? "the authenticated HTTPS listener on port " : url_host + ':';
     if (!bound) {
         std::cerr << "Could not bind to " << endpoint << settings.listen_port << '\n';
+        return EXIT_FAILURE;
+    }
+    try {
+        const bool first_install = database->claim_waterwall_install();
+        configure_workspace_routes(*server, store, database, first_install);
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
         return EXIT_FAILURE;
     }
 

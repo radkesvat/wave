@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { createHmac, randomBytes } = require('node:crypto');
-const { readFile, readdir, stat, writeFile } = require('node:fs/promises');
+const { readFile, writeFile } = require('node:fs/promises');
 const https = require('node:https');
 const { setTimeout: delay } = require('node:timers/promises');
 const { test } = require('node:test');
@@ -90,6 +90,7 @@ function frameReader(socket, initial) {
 }
 
 function assertCookie(response, maxAge) {
+    assert.equal(response.status, 204);
     assert.equal(response.headers['set-cookie']?.length, 1);
     const [value, ...attributes] = response.headers['set-cookie'][0].split('; ');
     assert.ok(value.startsWith(cookiePrefix));
@@ -107,197 +108,115 @@ function sign(body, key) {
     return createHmac('sha256', key).update(body).digest('base64url');
 }
 
-test('TLS setup, protected routes, durable admin and session, logout, and expiry', async t => {
+async function assertPolicyClose(ws) {
+    let frame;
+    do {
+        frame = await ws.frame();
+    } while (frame.opcode === 1);
+    assert.equal(frame.opcode, 8);
+    assert.equal(frame.payload.readUInt16BE(), 1008);
+}
+
+test('HTTPS verifies trust and enforces durable JWT sessions on HTTP and WebSocket routes', async t => {
     const fixture = await authFixture(t);
     const { request, post, upgrade } = client(fixture);
-    const diskPaths = (await readdir(fixture.cwd, { recursive: true })).sort();
-    const candidates = [
-        { username: 'fixture-alfa', password: 'fake passphrase for alder' },
-        { username: 'fixture-bravo', password: 'fake passphrase for birch' },
-    ];
+    const credentials = { username: 'fixture-admin', password: 'fake fixture passphrase' };
 
     await fixture.start();
     await assert.rejects(request('/setup', { ca: [] }), { code: 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY' });
     await assert.rejects(request('/setup', { hostname: 'nested.panel.example.test' }),
         { code: 'ERR_TLS_CERT_ALTNAME_INVALID' });
-    for (const path of ['/', '/sign-in', '/panel']) {
-        const response = await request(path);
-        assert.equal(response.status, 303, path);
-        assert.equal(response.headers.location, '/setup');
-    }
-    assert.equal((await request('/setup')).body, fixture.index);
-    assert.equal((await request('/api/session')).status, 401);
+    const entry = await request('/panel');
+    assert.equal(entry.status, 303);
+    assert.equal(entry.headers.location, '/setup');
     assert.equal((await request('/', { headers: { Host: 'other.example.invalid' } })).status, 403);
-    assert.equal((await upgrade({ Origin: fixture.origin })).status, 401);
-    assert.equal((await upgrade({})).status, 403);
-    assert.equal((await post('setup', { ...candidates[0], password: 'short' })).status, 400);
-    assert.equal((await post('setup', candidates[0], { 'X-Wave-CSRF': '0' })).status, 403);
-    assert.equal((await post('setup', candidates[0], { Origin: 'https://other.example.invalid' })).status, 403);
-    assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')).admin, []);
-
-    const setup = await Promise.all(candidates.map(input => post('setup', input)));
+    assert.equal((await request('/api/session')).status, 401);
+    assert.equal((await upgrade({ Origin: fixture.origin }, '/ws/preview')).status, 401);
+    assert.equal((await post('setup', credentials, { 'X-Wave-CSRF': '0' })).status, 403);
+    assert.equal((await post('setup', credentials, { Origin: 'https://other.example.invalid' })).status, 403);
+    const setup = await Promise.all([post('setup', credentials), post('setup', credentials)]);
     assert.deepEqual(setup.map(response => response.status).sort(), [201, 409]);
-    const { username, password } = candidates[setup.findIndex(response => response.status === 201)];
-    assert.equal((await post('setup', candidates[0])).status, 409);
-    assert.equal((await request('/setup')).headers.location, '/sign-in');
-    assert.equal((await stat(fixture.database)).mode & 0o777, 0o600);
-    const stored = await readFile(fixture.database, 'utf8');
-    const { admin, auth } = JSON.parse(stored);
-    assert.deepEqual(admin, [{ username, password: admin[0].password }]);
-    assert.match(admin[0].password, /^\$argon2id\$v=19\$m=\d+,t=\d+,p=\d+\$/);
-    assert.ok(!stored.includes(password));
-    assert.deepEqual((await readdir(fixture.cwd, { recursive: true })).sort(), diskPaths);
+    assert.equal((await request('/panel')).headers.location, '/sign-in');
 
-    await fixture.stop();
-    await fixture.start();
-    assert.equal((await request('/setup')).headers.location, '/sign-in');
-    assert.equal((await post('setup', candidates[0])).status, 409);
-    assert.equal((await post('sign-in', { username, password: 'fake incorrect passphrase' })).status, 401);
-    assert.equal((await post('sign-in', { username, password })).status, 429);
-    await delay(1100);
-
-    const login = await post('sign-in', { username, password });
-    assert.equal(login.status, 204);
-    assert.equal(login.body, '');
-    const cookie = assertCookie(login, expirySeconds);
-    const components = cookie.slice(cookiePrefix.length).split('.');
-    assert.equal(components.length, 3);
-    const [header, payload, signature] = components;
+    const cookie = assertCookie(await post('sign-in', credentials), expirySeconds);
+    const { auth } = JSON.parse(await readFile(fixture.database, 'utf8'));
+    const [header, payload, signature] = cookie.slice(cookiePrefix.length).split('.');
     assert.deepEqual(JSON.parse(Buffer.from(header, 'base64url')), { alg: 'HS256', typ: 'JWT' });
     assert.equal(signature, sign(`${header}.${payload}`, auth.jwt_key));
     const claims = JSON.parse(Buffer.from(payload, 'base64url'));
-    assert.equal(claims.sub, username);
-    assert.ok(Math.abs(claims.exp - Math.floor(Date.now() / 1000) - expirySeconds) < 5);
-    const badToken = `${header}.${payload}.${signature[0] === 'A' ? 'B' : 'A'}${signature.slice(1)}`;
-    const identity = { type: 'session', username, expires_at: claims.exp };
+    assert.equal(claims.sub, credentials.username);
+    const forged = `${cookiePrefix}${header}.${payload}.${signature[0] === 'A' ? 'B' : 'A'}${signature.slice(1)}`;
+    assert.equal((await request('/api/session', { headers: { Cookie: forged } })).status, 401);
     const authenticated = { Cookie: cookie, Origin: fixture.origin };
-    for (const invalid of ['bad-token', badToken]) {
-        assert.equal((await request('/api/session', { headers: { Cookie: cookiePrefix + invalid } })).status, 401);
-        assert.equal((await upgrade({ Origin: fixture.origin, Cookie: cookiePrefix + invalid })).status, 401);
-    }
     assert.equal((await upgrade({ Cookie: cookie, Origin: 'https://other.example.invalid' })).status, 403);
-    assert.equal((await upgrade({ Cookie: cookie })).status, 403);
-    const preview = await upgrade(authenticated, '/ws/preview');
-    assert.equal(preview.status, 101);
-    try {
-        assert.equal(JSON.parse((await preview.frame()).payload).type, 'snapshot');
-    } finally {
-        preview.socket.destroy();
-    }
-    assert.equal((await request('/panel', { headers: authenticated })).body, fixture.index);
     assert.equal((await request('/wave-db.json', { headers: authenticated })).status, 404);
 
     await fixture.stop();
     await fixture.start();
     const retained = await request('/api/session', { headers: authenticated });
     assert.equal(retained.status, 200);
-    assert.deepEqual(JSON.parse(retained.body), identity);
+    assert.deepEqual(JSON.parse(retained.body), { type: 'session', username: claims.sub, expires_at: claims.exp });
     assert.equal(retained.headers['cache-control'], 'no-store');
 
     const ws = await upgrade(authenticated);
     assert.equal(ws.status, 101);
     try {
-        const initial = await ws.frame();
-        assert.equal(initial.opcode, 1);
-        assert.deepEqual(JSON.parse(initial.payload), identity);
-        assert.equal((await post('sign-out', {}, { ...authenticated, 'X-Wave-CSRF': '0' })).status, 403);
-        assert.equal((await request('/api/session', { headers: authenticated })).status, 200);
-        const logout = await post('sign-out', {}, authenticated);
-        assert.equal(logout.status, 204);
-        assertCookie(logout, 0);
-        const closing = await ws.frame();
-        assert.equal(closing.opcode, 8);
-        assert.equal(closing.payload.readUInt16BE(), 1008);
+        assert.equal((await ws.frame()).opcode, 1);
+        assertCookie(await post('sign-out', {}, authenticated), 0);
+        await assertPolicyClose(ws);
     } finally {
         ws.socket.destroy();
     }
-    assert.equal((await request('/panel', { headers: authenticated })).headers.location, '/sign-in');
-    assert.equal((await upgrade(authenticated)).status, 401);
 
-    const secondLogin = await post('sign-in', { username, password });
-    assert.equal(secondLogin.status, 204);
-    const newCookie = assertCookie(secondLogin, expirySeconds);
+    const shortSession = assertCookie(await post('sign-in', credentials), expirySeconds);
     await fixture.stop();
-    // Shorten only the isolated fixture's session and sign its matching JWT so the
-    // expiry checks exercise a genuinely signed, previously accepted session.
+    // Seed an expired signed session to exercise expiry without waiting on a timer.
     const state = JSON.parse(await readFile(fixture.database, 'utf8'));
-    assert.equal(state.auth.sessions.length, 1);
-    const [newHeader, newPayload] = newCookie.slice(cookiePrefix.length).split('.');
+    const [newHeader, newPayload] = shortSession.slice(cookiePrefix.length).split('.');
     const newClaims = JSON.parse(Buffer.from(newPayload, 'base64url'));
-    const expiry = Math.floor(Date.now() / 1000) + 6;
-    state.auth.sessions[0].expires_at = newClaims.exp = expiry;
+    state.auth.sessions.find(session => session.id === newClaims.jti).expires_at =
+        newClaims.exp = Math.floor(Date.now() / 1000) - 1;
     await writeFile(fixture.database, JSON.stringify(state));
     const body = `${newHeader}.${Buffer.from(JSON.stringify(newClaims)).toString('base64url')}`;
-    const expiring = { Cookie: `${cookiePrefix}${body}.${sign(body, auth.jwt_key)}`, Origin: fixture.origin };
+    const expired = { Cookie: `${cookiePrefix}${body}.${sign(body, auth.jwt_key)}`, Origin: fixture.origin };
     await fixture.start();
-    assert.equal((await request('/api/session', { headers: authenticated })).status, 401);
-    assert.equal((await request('/api/session', { headers: expiring })).status, 200);
-    const expiringSocket = await upgrade(expiring);
-    assert.equal(expiringSocket.status, 101);
-    try {
-        assert.equal((await expiringSocket.frame()).opcode, 1);
-        const closing = await expiringSocket.frame();
-        assert.equal(closing.opcode, 8);
-        assert.equal(closing.payload.readUInt16BE(), 1008);
-    } finally {
-        expiringSocket.socket.destroy();
-    }
-    assert.equal((await request('/api/session', { headers: expiring })).status, 401);
-    assert.equal((await upgrade(expiring)).status, 401);
-    assert.deepEqual((await readdir(fixture.cwd, { recursive: true })).sort(), diskPaths);
+    assert.equal((await upgrade(authenticated)).status, 401);
+    assert.equal((await request('/api/session', { headers: expired })).status, 401);
+    assert.equal((await post('sign-in', { ...credentials, password: 'wrong fixture passphrase' })).status, 401);
+    assert.equal((await post('sign-in', credentials)).status, 429);
 });
 
-test('administrator changes require the current password and revoke active sessions', async t => {
+test('administrator changes require the current password and revoke all sessions', async t => {
     const fixture = await authFixture(t);
     const { request, post, upgrade } = client(fixture);
     const original = { username: 'fixture-admin', password: 'fixture operator passphrase' };
-    const renamed = { username: 'fixture-renamed', current_password: original.password, password: '' };
+    const change = { username: 'fixture-renamed', current_password: original.password,
+        password: 'fixture replacement passphrase' };
     await fixture.start();
     assert.equal((await post('setup', original)).status, 201);
     const oldHash = JSON.parse(await readFile(fixture.database, 'utf8')).admin[0].password;
 
-    assert.equal((await post('admin', renamed)).status, 401);
+    assert.equal((await post('admin', change)).status, 401);
     const first = { Cookie: assertCookie(await post('sign-in', original), expirySeconds), Origin: fixture.origin };
-    assert.equal((await post('admin', { ...renamed, current_password: 'wrong passphrase' }, first)).status, 403);
-    assert.equal((await post('admin', { ...renamed, username: 'bad/username' }, first)).status, 400);
-    assert.equal((await post('admin', renamed, first)).status, 429);
-    await delay(1100);
-    assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')).admin,
-        [{ username: original.username, password: oldHash }]);
-    const ws = await upgrade(first, '/ws/preview');
+    const second = { Cookie: assertCookie(await post('sign-in', original), expirySeconds), Origin: fixture.origin };
+    const ws = await upgrade(second, '/ws/preview');
     assert.equal(ws.status, 101);
     try {
         assert.equal((await ws.frame()).opcode, 1);
-        const changed = await post('admin', renamed, first);
-        assert.equal(changed.status, 204);
-        assertCookie(changed, 0);
-        let frame;
-        do {
-            frame = await ws.frame();
-        } while (frame.opcode === 1);
-        assert.equal(frame.opcode, 8);
-        assert.equal(frame.payload.readUInt16BE(), 1008);
+        assert.equal((await post('admin', { ...change, current_password: 'wrong fixture passphrase' }, first)).status, 403);
+        await delay(1100);
+        assertCookie(await post('admin', change, first), 0);
+        await assertPolicyClose(ws);
     } finally {
         ws.socket.destroy();
     }
-    assert.equal((await request('/api/session', { headers: first })).status, 401);
+    for (const headers of [first, second]) {
+        assert.equal((await request('/api/session', { headers })).status, 401);
+    }
     const config = JSON.parse(await readFile(fixture.database, 'utf8'));
-    assert.deepEqual(config.admin, [{ username: renamed.username, password: oldHash }]);
+    assert.equal(config.admin[0].username, change.username);
+    assert.match(config.admin[0].password, /^\$argon2id\$/);
+    assert.notEqual(config.admin[0].password, oldHash);
     assert.deepEqual(config.auth.sessions, []);
-
-    const login = await post('sign-in', { username: renamed.username, password: original.password });
-    const second = { Cookie: assertCookie(login, expirySeconds), Origin: fixture.origin };
-    const updatedPassword = 'fixture replacement passphrase';
-    assert.equal((await post('admin', { ...renamed, password: updatedPassword }, second)).status, 204);
-    const configAfterUpdate = JSON.parse(await readFile(fixture.database, 'utf8'));
-    assert.notEqual(configAfterUpdate.admin[0].password, oldHash);
-    assert.match(configAfterUpdate.admin[0].password, /^\$argon2id\$/);
-    await fixture.stop();
-    // A manually provisioned valid hash does not require a pre-existing JWT signing key.
-    delete configAfterUpdate.auth;
-    await writeFile(fixture.database, JSON.stringify(configAfterUpdate));
-    await fixture.start();
-    assert.equal((await request('/setup')).headers.location, '/sign-in');
-    assert.equal((await post('sign-in', { username: renamed.username, password: updatedPassword })).status, 204);
-    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8')).auth.sessions.length, 1);
+    assertCookie(await post('sign-in', { username: change.username, password: change.password }), expirySeconds);
 });

@@ -1,0 +1,7 @@
+#pragma once
+
+namespace wave {
+
+inline constexpr char version[] = "@PROJECT_VERSION@";
+
+} // namespace wave

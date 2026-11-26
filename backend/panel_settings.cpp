@@ -6,6 +6,10 @@
 #include <array>
 #include <cerrno>
 #include <cstdint>
+#include <functional>
+#include <initializer_list>
+#include <iostream>
+#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string_view>
@@ -38,6 +42,13 @@ using Json = nlohmann::json;
 constexpr char default_host[] = "0.0.0.0";
 constexpr int default_port = 2045;
 constexpr char database_name[] = "wave-db.json";
+
+class DatabaseDirectorySyncError : public std::runtime_error {
+public:
+    DatabaseDirectorySyncError() : std::runtime_error("Cannot sync the wave-db.json directory after saving.")
+    {
+    }
+};
 
 fs::path executable_path([[maybe_unused]] const char* executable)
 {
@@ -297,14 +308,15 @@ class DatabaseFile {
                 }
                 remaining.remove_prefix(static_cast<std::size_t>(count));
             }
-            if (fsync(file.get()) != 0 ||
-                renameat(directory, temporary.c_str(), directory, database_name) != 0 ||
-                fsync(directory) != 0) {
+            if (fsync(file.get()) != 0 || renameat(directory, temporary.c_str(), directory, database_name) != 0) {
                 throw std::runtime_error("Cannot commit wave-db.json.");
             }
         } catch (...) {
             unlinkat(directory, temporary.c_str(), 0);
             throw;
+        }
+        if (fsync(directory) != 0) {
+            throw DatabaseDirectorySyncError();
         }
 #endif
     }
@@ -400,7 +412,7 @@ LoadedDatabase load_database(const DatabaseFile& file)
 
 struct PanelDatabase::Impl {
     Impl(const char* executable, const fs::path& site_dir, bool check_only)
-        : file(database_directory(executable, site_dir))
+        : directory(database_directory(executable, site_dir)), file(directory)
     {
         if (!check_only) {
             file.lock();
@@ -417,7 +429,27 @@ struct PanelDatabase::Impl {
         settings = std::move(loaded.settings);
     }
 
+    void save_fields(std::initializer_list<std::pair<std::string_view, std::reference_wrapper<const Json>>> fields)
+    {
+        std::lock_guard lock(write_mutex);
+        auto current = file.read_settings();
+        if (!current) {
+            throw std::runtime_error("Cannot find wave-db.json.");
+        }
+        for (const auto& [key, value] : fields) {
+            (*current)[key] = value.get();
+        }
+        try {
+            file.save(*current);
+        } catch (const DatabaseDirectorySyncError& error) {
+            // The replacement is already visible. Do not roll back its associated config files.
+            std::cerr << error.what() << '\n';
+        }
+    }
+
+    fs::path directory;
     DatabaseFile file;
+    std::mutex write_mutex;
     Json contents;
     PanelSettings settings{};
 };
@@ -429,6 +461,11 @@ PanelDatabase::PanelDatabase(const char* executable, const fs::path& site_dir, b
 
 PanelDatabase::~PanelDatabase() = default;
 
+const fs::path& PanelDatabase::directory() const
+{
+    return impl_->directory;
+}
+
 const PanelSettings& PanelDatabase::settings() const
 {
     return impl_->settings;
@@ -439,15 +476,31 @@ const Json& PanelDatabase::initial_contents() const
     return impl_->contents;
 }
 
+bool PanelDatabase::claim_waterwall_install()
+{
+    auto& contents = impl_->contents;
+    const auto attempted = contents.find("waterwall_install_attempted");
+    if (attempted != contents.end() && *attempted == true) {
+        return false;
+    }
+    contents["waterwall_install_attempted"] = true;
+    impl_->file.save(contents);
+    return true;
+}
+
 void PanelDatabase::save_auth(const Json& admins, const Json& auth)
 {
-    auto current = impl_->file.read_settings();
-    if (!current) {
-        throw std::runtime_error("Cannot find wave-db.json.");
-    }
-    (*current)["admin"] = admins;
-    (*current)["auth"] = auth;
-    impl_->file.save(*current);
+    impl_->save_fields({{"admin", admins}, {"auth", auth}});
+}
+
+void PanelDatabase::save_core_settings(const Json& settings)
+{
+    impl_->save_fields({{"core_settings", settings}});
+}
+
+void PanelDatabase::save_core_configs(const Json& configs)
+{
+    impl_->save_fields({{"core_configs", configs}});
 }
 
 } // namespace wave

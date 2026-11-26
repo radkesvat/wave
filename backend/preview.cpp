@@ -1,9 +1,13 @@
 #include "preview.h"
 
 #include "auth.h"
+#include "core_config_files.h"
 #include "core_config_name.h"
 #include "linux_metrics.h"
+#include "panel_settings.h"
 #include "preview_backup.h"
+#include "waterwall.h"
+#include "wave_version.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -19,10 +23,12 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace wave {
 namespace {
@@ -33,6 +39,8 @@ using namespace std::chrono_literals;
 constexpr auto host_sample_interval = 500ms;
 constexpr auto user_update_interval = 5s;
 constexpr std::size_t max_request_bytes = 8192;
+constexpr std::size_t max_core_settings_bytes = 16 * 1024;
+constexpr auto max_frame_bytes = std::max(max_preview_restore_request_bytes, max_core_settings_bytes + 256);
 constexpr std::size_t max_users = 128;
 constexpr std::size_t max_topology_nodes = 64;
 constexpr std::size_t max_node_name_bytes = 64;
@@ -95,18 +103,14 @@ Json make_users()
 
 Json make_core()
 {
-    return {{"state", "running"},
-            {"capabilities", {{"lifecycle", true}, {"configs", true}}},
-            {"configs", Json::array({
-                {{"id", 1}, {"name", "Default"}, {"enabled", true}, {"active", true}},
-                {{"id", 2}, {"name", "Standby"}, {"enabled", true}, {"active", false}},
-            })}};
+    return {{"capabilities", {{"lifecycle", true}, {"configs", true}}},
+            {"configs", Json::array()}};
 }
 
 Json make_server()
 {
-    return {{"version", "0.1.0-preview"},
-            {"available_panel_versions", {"0.1.0-preview", "0.2.0-preview", "0.3.0-preview"}},
+    return {{"version", version},
+            {"available_panel_versions", Json::array({version})},
             {"core", make_core()}};
 }
 
@@ -359,11 +363,20 @@ struct Reply {
     bool changed = false;
 };
 
+bool valid_core_settings(const Json& settings)
+{
+    return settings.is_object() && !settings.contains("configs") && settings.dump().size() <= max_core_settings_bytes;
+}
+
 class Preview {
 public:
-    Preview()
+    Preview(std::shared_ptr<PanelDatabase> database, bool first_install)
+        : database_(std::move(database)), config_files_(database_->directory()),
+          core_(database_->directory(), first_install)
     {
+        load_core_settings();
         host_.sample(data_["server"]);
+        sync_core();
         sync_user_counts();
         sampler_ = std::jthread([this](std::stop_token stop) {
             std::unique_lock lock(mutex_);
@@ -376,6 +389,8 @@ public:
                 }
                 sampled_at = std::chrono::steady_clock::now();
                 host_.sample(data_["server"]);
+                core_.update();
+                sync_core();
                 if (sampled_at >= next_user_update) {
                     update_sample_users();
                     next_user_update = sampled_at + user_update_interval;
@@ -425,6 +440,52 @@ public:
     }
 
 private:
+    void load_core_settings()
+    {
+        const auto& stored = database_->initial_contents();
+        auto settings = stored.value("core_settings", Json::object());
+        if (!valid_core_settings(settings)) {
+            throw std::runtime_error("core_settings in wave-db.json must be a JSON object without configs.");
+        }
+        data_["core_settings"] = std::move(settings);
+
+        const auto saved_configs = stored.value("core_configs", Json::array());
+        if (!saved_configs.is_array() || saved_configs.size() > max_core_configs) {
+            throw std::runtime_error("core_configs in wave-db.json must be an array of up to 64 configs.");
+        }
+        auto& configs = data_["server"]["core"]["configs"];
+        for (const auto& row : saved_configs) {
+            const auto name = row.find("name");
+            const auto id = row.find("id");
+            const auto enabled = row.find("enabled");
+            const auto* text = name == row.end() ? nullptr : name->get_ptr<const std::string*>();
+            if (!text || text->empty() || core_config_name(*text) != *text || id == row.end() ||
+                !integer_value(*id, 1, std::numeric_limits<int>::max() - 1) ||
+                enabled == row.end() || !enabled->is_boolean() ||
+                std::ranges::any_of(configs, [&](const Json& config) {
+                    return config["id"] == *id || config["name"] == *name;
+                })) {
+                throw std::runtime_error("core_configs in wave-db.json contains an invalid or duplicate config.");
+            }
+            configs.push_back({{"id", *id}, {"name", *name}, {"enabled", *enabled}, {"active", false}});
+            next_config_id_ = std::max(next_config_id_, id->get<int>() + 1);
+        }
+    }
+
+    bool store_configs(const Json& configs)
+    {
+        auto stored = configs;
+        for (auto& config : stored) {
+            config.erase("active");
+        }
+        try {
+            database_->save_core_configs(stored);
+        } catch (const std::runtime_error&) {
+            return false;
+        }
+        return true;
+    }
+
     Json snapshot() const
     {
         return {{"type", "snapshot"}, {"data", data_}};
@@ -444,13 +505,15 @@ private:
     std::string handle_message(std::string_view message, std::uint64_t& sent_revision)
     {
         const bool invalid_frame =
-            message.size() > max_preview_restore_request_bytes || message.find('\0') != std::string_view::npos;
+            message.size() > max_frame_bytes || message.find('\0') != std::string_view::npos;
         auto request = invalid_frame
             ? Json{}
             : Json::parse(message, nullptr, false);
         if (message.size() > max_request_bytes) {
             const auto action = request.find("action");
-            if (action == request.end() || *action != "restore_preview_backup") {
+            if (action == request.end() ||
+                (*action != "apply_core_settings" &&
+                 (*action != "restore_preview_backup" || message.size() > max_preview_restore_request_bytes))) {
                 request = nullptr;
             }
         }
@@ -463,6 +526,7 @@ private:
         const auto reply = action.empty()
             ? Reply{false, "Send a JSON preview action."}
             : dispatch(action, request);
+        sync_core();
         if (reply.changed) {
             sync_user_counts();
             ++revision_;
@@ -511,6 +575,23 @@ private:
         server["users_enabled"] = enabled;
         server["users_active"] = active;
         server["users_online"] = active;
+    }
+
+    void sync_core()
+    {
+        auto& core = data_["server"]["core"];
+        const auto state = core_.state();
+        core["state"] = state;
+        if (state != "starting" && state != "running" && state != "stopping") {
+            for (auto& config : core["configs"]) {
+                config["active"] = false;
+            }
+        }
+        if (core_.error().empty()) {
+            core.erase("error");
+        } else {
+            core["error"] = core_.error();
+        }
     }
 
     void update_rates(Json& user)
@@ -718,6 +799,21 @@ private:
         return complete("Applied sample TLS settings.");
     }
 
+    Reply apply_core_settings(const Json& input)
+    {
+        const auto settings = input.find("settings");
+        if (settings == input.end() || !valid_core_settings(*settings)) {
+            return {false, "Enter a JSON settings object up to 16 KiB. Wave supplies the configs field."};
+        }
+        try {
+            database_->save_core_settings(*settings);
+        } catch (const std::runtime_error&) {
+            return {false, "Could not save core settings in wave-db.json."};
+        }
+        data_["core_settings"] = *settings;
+        return complete("Saved core settings for the next launch.");
+    }
+
     Reply restore_backup(const Json& input)
     {
         const auto invalid = Reply{false, "Choose a valid Wave preview backup."};
@@ -735,14 +831,20 @@ private:
                 return tls->contains(field);
             }) ||
             !update_tls_settings(*tls, settings) || saved_configs == backup->end() ||
-            !saved_configs->is_array() || saved_configs->size() >= max_core_configs) {
+            !saved_configs->is_array() || saved_configs->size() > max_core_configs) {
             return invalid;
         }
 
         auto& current = data_["server"]["core"]["configs"];
-        const auto active =
-            std::ranges::find_if(current, [](const Json& config) { return config["active"] == true; });
-        auto configs = Json::array({*active});
+        auto configs = Json::array();
+        for (const auto& config : current) {
+            if (config["active"] == true) {
+                configs.push_back(config);
+            }
+        }
+        if (configs.size() + saved_configs->size() > max_core_configs) {
+            return invalid;
+        }
         int next_id = next_config_id_;
         for (const auto& config : *saved_configs) {
             const auto raw_name = config.find("name");
@@ -756,16 +858,41 @@ private:
             const auto existing =
                 std::ranges::find_if(current, [&](const Json& item) { return item["name"] == name; });
             if (existing == current.end() && next_id == std::numeric_limits<int>::max()) {
-                return {false, "The preview config list is full."};
+                return {false, "The config list is full."};
             }
             const int id = existing == current.end() ? next_id++ : (*existing)["id"].get<int>();
             configs.push_back({{"id", id}, {"name", name}, {"enabled", *enabled}, {"active", false}});
         }
 
+        std::vector<std::string_view> created;
+        std::string_view error;
+        for (const auto& config : configs) {
+            if (config["active"] == true) {
+                continue;
+            }
+            const auto& name = config["name"].get_ref<const std::string&>();
+            bool new_file;
+            if (!config_files_.create(name, true, new_file)) {
+                error = "Could not prepare the files for the restored configs.";
+                break;
+            }
+            if (new_file) {
+                created.push_back(name);
+            }
+        }
+        if (error.empty() && !store_configs(configs)) {
+            error = "Could not save restored configs in wave-db.json.";
+        }
+        if (!error.empty()) {
+            for (const auto name : created) {
+                config_files_.remove(name);
+            }
+            return {false, std::string(error)};
+        }
         data_["settings"] = std::move(settings);
         current = std::move(configs);
         next_config_id_ = next_id;
-        return complete("Restored preview TLS settings and inactive configs.");
+        return complete("Restored sample TLS settings and the inactive config list.");
     }
 
     Reply apply_bot_settings(const Json& input)
@@ -836,31 +963,53 @@ private:
 
     Reply change_core_state(std::string_view action)
     {
-        auto& state = data_["server"]["core"]["state"];
-        if (action == "start_core" && state == "stopped") {
-            state = "running";
-            return complete("Started the preview core.");
+        if (action == "install_core") {
+            auto error = core_.install();
+            return error.empty() ? complete("Installing WaterWall.", "info") : Reply{false, std::move(error)};
         }
-        if (action == "stop_core" && state == "running") {
-            state = "stopped";
-            return complete("Stopped the preview core.");
+        if (action == "start_core") {
+            return start_core();
         }
-        return {false, "That action is unavailable in the current preview core state."};
+        auto error = core_.stop();
+        return error.empty() ? complete("Stopping WaterWall.", "info") : Reply{false, std::move(error)};
+    }
+
+    Reply start_core()
+    {
+        if (core_.state() != "stopped") {
+            return {false, "WaterWall must be installed and stopped before it can be started."};
+        }
+        auto paths = Json::array();
+        auto& configs = data_["server"]["core"]["configs"];
+        for (const auto& config : configs) {
+            if (config["enabled"] == true) {
+                const auto& name = config["name"].get_ref<const std::string&>();
+                if (!config_files_.available(name)) {
+                    return {false, "Configuration file is missing or unsafe for " + name + '.'};
+                }
+                paths.push_back(CoreConfigFiles::relative_path(name).generic_string());
+            }
+        }
+        if (paths.empty()) {
+            return {false, "Enable at least one config before starting WaterWall."};
+        }
+        auto settings = data_["core_settings"];
+        settings["configs"] = std::move(paths);
+        if (auto error = core_.start(settings.dump()); !error.empty()) {
+            return {false, std::move(error)};
+        }
+        for (auto& config : configs) {
+            config["active"] = config["enabled"];
+        }
+        return complete("Starting WaterWall.", "info");
     }
 
     Reply update_panel(const Json& input)
     {
-        auto& server = data_["server"];
-        const auto version = input.find("version");
-        const auto& available = server["available_panel_versions"];
-        if (version == input.end() || std::ranges::find(available, *version) == available.end()) {
-            return {false, "Choose an available preview panel version."};
-        }
-        if (*version == server["version"]) {
-            return {false, "That preview panel version is already active."};
-        }
-        server["version"] = *version;
-        return complete("Updated the preview panel to " + version->get<std::string>() + '.');
+        const auto target = input.find("version");
+        return {false, target != input.end() && *target == version
+                           ? "That Wave version is already active."
+                           : "That Wave version is unavailable."};
     }
 
     Reply create_core_config(const Json& input)
@@ -869,50 +1018,72 @@ private:
         const auto* text = value == input.end() ? nullptr : value->get_ptr<const std::string*>();
         const auto name = text ? core_config_name(*text) : std::string_view{};
         if (name.empty()) {
-            return {false, "Enter a config name of up to 64 bytes without control characters."};
+            return {false, "Enter a valid config filename of up to 64 bytes."};
         }
 
         auto& configs = data_["server"]["core"]["configs"];
         if (configs.size() >= max_core_configs || next_config_id_ == std::numeric_limits<int>::max()) {
-            return {false, "The preview config list is full."};
+            return {false, "The config list is full."};
         }
         if (std::ranges::any_of(configs, [&](const Json& config) { return config["name"] == name; })) {
-            return {false, "A preview config already uses that name."};
+            return {false, "A config already uses that name."};
         }
-        configs.push_back({{"id", next_config_id_}, {"name", name}, {"enabled", false}, {"active", false}});
+        auto changed = configs;
+        changed.push_back({{"id", next_config_id_}, {"name", name}, {"enabled", false}, {"active", false}});
+        bool created;
+        if (!config_files_.create(name, false, created)) {
+            return {false, "Could not create the config folder and file."};
+        }
+        if (!store_configs(changed)) {
+            config_files_.remove(name);
+            return {false, "Could not save the new config in wave-db.json."};
+        }
+        configs = std::move(changed);
         ++next_config_id_;
-        return complete("Created preview config " + std::string(name) + " (disabled).");
+        return complete("Created config " + std::string(name) + " (disabled).");
     }
 
     Reply change_core_config(std::string_view action, const Json& input)
     {
         const auto id = input.find("id");
         if (id == input.end() || !integer_value(*id, 1, std::numeric_limits<int>::max())) {
-            return {false, "Choose a preview config."};
+            return {false, "Choose a config."};
         }
         auto& configs = data_["server"]["core"]["configs"];
-        const auto config = std::ranges::find_if(configs, [&](const Json& item) { return item["id"] == *id; });
-        if (config == configs.end()) {
-            return {false, "That preview config is unavailable."};
+        auto changed = configs;
+        const auto config = std::ranges::find_if(changed, [&](const Json& item) { return item["id"] == *id; });
+        if (config == changed.end()) {
+            return {false, "That config is unavailable."};
         }
         if ((*config)["active"] == true) {
-            return {false, "The active preview config is protected."};
+            return {false, "The running core is using this config. Stop it before making changes."};
         }
 
         const auto name = (*config)["name"].get<std::string>();
         if (action == "remove_core_config") {
-            configs.erase(config);
-            return complete("Removed preview config " + name + '.');
+            changed.erase(config);
+            if (!store_configs(changed)) {
+                return {false, "Could not update configs in wave-db.json."};
+            }
+            configs = std::move(changed);
+            if (!config_files_.remove(name)) {
+                return complete("Unregistered config " + name + ". Its file could not be removed.", "warning");
+            }
+            return complete("Removed config " + name + '.');
         }
         const auto enabled = input.find("enabled");
         if (enabled == input.end() || !enabled->is_boolean()) {
-            return {false, "Choose whether to enable the preview config."};
+            return {false, "Choose whether to enable the config."};
         }
         if ((*config)["enabled"] == *enabled) {
-            return {true, "The preview config already has that setting."};
+            return {true, "The config already has that setting."};
         }
         (*config)["enabled"] = *enabled;
-        return complete(std::string(*enabled == true ? "Enabled" : "Disabled") + " preview config " + name + '.');
+        if (!store_configs(changed)) {
+            return {false, "Could not save config changes in wave-db.json."};
+        }
+        configs = std::move(changed);
+        return complete(std::string(*enabled == true ? "Enabled" : "Disabled") + " config " + name + '.');
     }
 
     Reply dispatch(std::string_view action, const Json& input)
@@ -920,7 +1091,7 @@ private:
         if (action == "refresh") {
             return {true, "Sample workspace refreshed."};
         }
-        if (action == "start_core" || action == "stop_core") {
+        if (action == "install_core" || action == "start_core" || action == "stop_core") {
             return change_core_state(action);
         }
         if (action == "update_panel") {
@@ -962,6 +1133,9 @@ private:
         }
         if (action == "apply_settings") {
             return apply_settings(input);
+        }
+        if (action == "apply_core_settings") {
+            return apply_core_settings(input);
         }
         if (action == "restore_preview_backup") {
             return restore_backup(input);
@@ -1005,10 +1179,13 @@ private:
     std::mutex mutex_;
     std::condition_variable_any timer_;
     LinuxMetrics host_;
+    std::shared_ptr<PanelDatabase> database_;
+    CoreConfigFiles config_files_;
+    WaterWall core_;
     Json data_ = make_data();
     int next_user_id_ = static_cast<int>(data_["users"].size()) + 1;
     std::uint64_t next_node_id_ = 1;
-    int next_config_id_ = 3;
+    int next_config_id_ = 1;
     std::uint64_t revision_ = 1;
     std::uint64_t user_ticks_ = 0;
     unsigned log_sequence_ = 0;
@@ -1017,9 +1194,10 @@ private:
 
 } // namespace
 
-void configure_preview_routes(httplib::Server& server, std::shared_ptr<AuthStore> store)
+void configure_preview_routes(httplib::Server& server, std::shared_ptr<AuthStore> store,
+                              std::shared_ptr<PanelDatabase> database, bool first_install)
 {
-    const auto preview = std::make_shared<Preview>();
+    const auto preview = std::make_shared<Preview>(std::move(database), first_install);
     server.WebSocket("/ws/overview", [preview, store](const httplib::Request& req,
                                                      httplib::ws::WebSocket& socket) {
         if (!websocket_session(store, req)()) {

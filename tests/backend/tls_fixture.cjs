@@ -82,10 +82,11 @@ async function copyBackend(source, cwd) {
     return backend;
 }
 
-function writeTlsConfig(config, { chainPath, keyPath }, { domain = hostname, listen } = {}) {
+function writeTlsConfig(config, { chainPath, keyPath }, { domain = hostname, listen, installAttempted } = {}) {
     return writeFile(config, JSON.stringify({
         listen,
         tls: { enabled: true, domain, certificate_chain: chainPath, private_key: keyPath },
+        waterwall_install_attempted: installAttempted,
     }), { mode: 0o600 });
 }
 

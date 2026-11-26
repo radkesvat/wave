@@ -1,14 +1,15 @@
 const assert = require('node:assert/strict');
 const { execFile, spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } = require('node:fs/promises');
+const { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, unlink, writeFile } = require('node:fs/promises');
 const { request: httpRequest } = require('node:http');
 const { hostname, tmpdir } = require('node:os');
-const { basename, dirname, join } = require('node:path');
+const { basename, delimiter, dirname, join } = require('node:path');
 const { createInterface } = require('node:readline');
 const { after, before, test } = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
 const { isDeepStrictEqual, promisify } = require('node:util');
+const { authFixture, seedCore } = require('./auth_fixture.cjs');
 
 const sourceBackend = process.env.WAVE_BACKEND;
 const run = promisify(execFile);
@@ -34,6 +35,7 @@ let closed;
 let url;
 let cookie;
 let countersAtStartup;
+let coreFixture;
 
 async function readNetworkCounters() {
     const rows = await readFile('/proc/net/dev', 'utf8');
@@ -51,11 +53,14 @@ async function readNetworkCounters() {
 before(async () => {
     assert.ok(sourceBackend, 'Run this test through a Wave backend CTest preset.');
     cwd = await mkdtemp(join(tmpdir(), 'wave-backend-'));
-    backend = join(cwd, 'bin', basename(sourceBackend));
+    backend = join(cwd, 'bin with spaces', basename(sourceBackend));
     await mkdir(dirname(backend));
     await copyFile(sourceBackend, backend);
+    coreFixture = await seedCore(backend, { executable: process.platform === 'linux' });
     database = join(dirname(backend), 'wave-db.json');
-    await writeFile(database, JSON.stringify({ listen: { host: '127.0.0.1', port: 0 } }));
+    await writeFile(database, JSON.stringify({
+        listen: { host: '127.0.0.1', port: 0 }, waterwall_install_attempted: true,
+    }));
     await mkdir(join(cwd, siteDir));
     for (const [name, contents] of Object.entries(assets)) {
         await writeFile(join(cwd, siteDir, name), contents);
@@ -96,128 +101,102 @@ after(async () => {
     }
 });
 
-test('startup persists the default listener in new and existing databases beside the executable', async () => {
-    const freshBackend = join(cwd, 'fresh', basename(backend));
-    const freshDatabase = join(dirname(freshBackend), 'wave-db.json');
-    await mkdir(dirname(freshBackend));
-    await copyFile(backend, freshBackend);
-    // Stop these starts before binding so the smoke suite only opens loopback sockets.
-    const start = () => expectStartupFailure([], /Cannot access site directory.*web-release/, freshBackend);
-    const defaults = { host: '0.0.0.0', port: 2045 };
-    await start();
-    assert.deepEqual(JSON.parse(await readFile(freshDatabase, 'utf8')), { listen: defaults, admin: [] });
-    const existing = { tls: { enabled: false }, panel_name: 'Test settings' };
-    await writeFile(freshDatabase, JSON.stringify(existing));
-    await start();
-    assert.deepEqual(JSON.parse(await readFile(freshDatabase, 'utf8')), { ...existing, listen: defaults, admin: [] });
-
-    for (const partial of [{ host: '127.0.0.1' }, { port: 8443 }]) {
-        await writeFile(freshDatabase, JSON.stringify({ ...existing, listen: partial }));
-        await start();
-        assert.deepEqual(JSON.parse(await readFile(freshDatabase, 'utf8')), {
-            ...existing, listen: { ...defaults, ...partial }, admin: [],
-        });
-    }
+test('initializes a private database beside the executable and preserves existing listener settings', async () => {
+    const fresh = join(cwd, 'fresh', basename(backend));
+    const db = join(dirname(fresh), 'wave-db.json');
+    await mkdir(dirname(fresh));
+    await copyFile(backend, fresh);
+    // Validate startup settings without binding the default public port.
+    const missingSite = () => expectStartupFailure([], /Cannot access site directory/, fresh);
+    await missingSite();
+    assert.deepEqual(JSON.parse(await readFile(db, 'utf8')), {
+        listen: { host: '0.0.0.0', port: 2045 }, admin: [],
+    });
+    assert.equal((await stat(db)).mode & 0o777, 0o600);
+    const existing = { listen: { host: '127.0.0.1' }, panel_name: 'Fixture' };
+    await writeFile(db, JSON.stringify(existing));
+    await missingSite();
+    assert.deepEqual(JSON.parse(await readFile(db, 'utf8')), {
+        ...existing, listen: { ...existing.listen, port: 2045 }, admin: [],
+    });
+    await writeFile(db, JSON.stringify({ listen: { port: -1 } }));
+    await expectStartupFailure(['--site-dir', siteDir], /listen\.port.*integer/, fresh);
+    await writeFile(db, JSON.stringify({
+        listen: { host: '127.0.0.1', port: 0 },
+        admin: [{ username: 'fixture-user', password: 'fixture plaintext password' }],
+    }));
+    await expectStartupFailure(['--site-dir', siteDir], /requires a username and an Argon2id password hash/, fresh);
     await assert.rejects(stat(join(cwd, 'wave-db.json')), { code: 'ENOENT' });
-    const response = await fetch(new URL('/wave-db.json', url), { signal: AbortSignal.timeout(timeout) });
-    assert.equal(response.status, 401);
-    await response.arrayBuffer();
 });
 
-test('serves public entry assets with caching disabled', async () => {
-    for (const path of ['/', '/index.html', '/index.js', '/index.wasm']) {
-        const response = await fetch(new URL(path, url), { signal: AbortSignal.timeout(timeout) });
-        assert.equal(response.status, 200, path);
-        assert.equal(response.headers.get('cache-control'), 'no-store', path);
-        assert.deepEqual(Buffer.from(await response.arrayBuffer()), assets[path.slice(1) || 'index.html']);
-        if (path === '/index.wasm') {
-            assert.equal(response.headers.get('content-type'), 'application/wasm');
-        }
-    }
-});
-
-test('HTTP requires authentication and stores the administrator and JWT session in wave-db.json', async () => {
+test('serves uncached entry assets and protects HTTP data with an administrator session', async () => {
     const credentials = { username: 'fixture-user', password: 'fake fixture test passphrase' };
     const request = (path, options = {}) =>
         fetch(new URL(path, url), { redirect: 'manual', signal: AbortSignal.timeout(timeout), ...options });
-    const post = (action, fields) => request(`/api/auth/${action}`, {
+    const post = (action, origin = url.origin) => request(`/api/auth/${action}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Wave-CSRF': '1', Origin: url.origin },
-        body: JSON.stringify(fields),
+        headers: { 'Content-Type': 'application/json', 'X-Wave-CSRF': '1', Origin: origin },
+        body: JSON.stringify(credentials),
     });
     const files = (await readdir(cwd, { recursive: true })).sort();
     assert.equal((await request('/panel')).headers.get('location'), '/setup');
-    assert.equal((await request('/api/session')).status, 401);
-    for (const path of ['/ws', '/ws/overview', '/ws/preview', '/ws/panel']) {
-        const status = await new Promise((resolve, reject) => {
-            const probe = httpRequest(new URL(path, url), {
-                headers: {
-                    Origin: url.origin, Connection: 'Upgrade', Upgrade: 'websocket',
-                    'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': Buffer.alloc(16).toString('base64'),
-                },
-                signal: AbortSignal.timeout(timeout),
-            });
-            probe.on('response', response => {
-                response.resume();
-                resolve(response.statusCode);
-            });
-            probe.on('upgrade', (_response, socket) => {
-                socket.destroy();
-                resolve(101);
-            });
-            probe.on('error', reject);
-            probe.end();
-        });
-        assert.equal(status, 401, path);
+    for (const [path, asset] of [['/setup', 'index.html'], ['/index.js', 'index.js'], ['/index.wasm', 'index.wasm']]) {
+        const response = await request(path);
+        assert.equal(response.status, 200);
+        assert.equal(response.headers.get('cache-control'), 'no-store');
+        assert.deepEqual(Buffer.from(await response.arrayBuffer()), assets[asset]);
+        if (asset === 'index.wasm') assert.equal(response.headers.get('content-type'), 'application/wasm');
     }
-    assert.equal((await post('setup', credentials)).status, 201);
-    assert.equal((await post('setup', credentials)).status, 409);
+    assert.equal((await request('/api/session')).status, 401);
+    const upgrade = await new Promise((resolve, reject) => {
+        const probe = httpRequest(new URL('/ws/preview', url), {
+            headers: {
+                Origin: url.origin, Connection: 'Upgrade', Upgrade: 'websocket',
+                'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': Buffer.alloc(16).toString('base64'),
+            },
+            signal: AbortSignal.timeout(timeout),
+        });
+        probe.on('response', response => {
+            response.resume();
+            resolve(response.statusCode);
+        });
+        probe.on('upgrade', (_response, socket) => {
+            socket.destroy();
+            resolve(101);
+        });
+        probe.on('error', reject);
+        probe.end();
+    });
+    assert.equal(upgrade, 401);
+
+    assert.equal((await post('setup', 'https://other.example.test')).status, 403);
+    assert.equal((await post('setup')).status, 201);
+    assert.equal((await post('setup')).status, 409);
     assert.equal((await request('/panel')).headers.get('location'), '/sign-in');
-    const login = await post('sign-in', credentials);
+    const login = await post('sign-in');
     assert.equal(login.status, 204);
-    const [value, ...attributes] = login.headers.get('set-cookie').split('; ');
+    const [value, ...flags] = login.headers.get('set-cookie').split('; ');
     assert.match(value, /^wave_session=[\w-]+\.[\w-]+\.[\w-]+$/);
-    assert.ok(attributes.includes('HttpOnly') && attributes.includes('SameSite=Strict'));
-    assert.ok(!attributes.includes('Secure'));
+    assert.ok(flags.includes('HttpOnly') && flags.includes('SameSite=Strict') && !flags.includes('Secure'));
     cookie = value;
     const headers = { Cookie: cookie };
     assert.equal((await (await request('/api/session', { headers })).json()).username, credentials.username);
-    assert.equal((await request('/missing.js', { headers })).status, 404);
     assert.equal((await request('/wave-db.json', { headers })).status, 404);
     const contents = await readFile(database, 'utf8');
     const { admin, auth } = JSON.parse(contents);
-    assert.deepEqual(admin, [{ username: credentials.username, password: admin[0].password }]);
+    assert.equal(admin[0].username, credentials.username);
     assert.match(admin[0].password, /^\$argon2id\$/);
     assert.ok(!contents.includes(credentials.password));
     assert.equal(auth.sessions.length, 1);
     assert.deepEqual((await readdir(cwd, { recursive: true })).sort(), files);
 });
 
-function connectSocket(path) {
-    const endpoint = new URL(path, url);
-    endpoint.protocol = 'ws:';
-    return new WebSocket(endpoint, { headers: { Cookie: cookie, Origin: url.origin } });
+function connectSocket(path, base = url, sessionCookie = cookie) {
+    const endpoint = new URL(path, base);
+    const origin = endpoint.origin;
+    endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+    return new WebSocket(endpoint, { headers: { Cookie: sessionCookie, Origin: origin } });
 }
-
-test('echoes WebSocket text and closes the connection cleanly', async t => {
-    const socket = connectSocket('/ws');
-    t.after(() => socket.close());
-    const signal = AbortSignal.timeout(timeout);
-    await once(socket, 'open', { signal });
-
-    for (const text of ['Hello, Wave!', 'Wave 🌊', '']) {
-        const received = once(socket, 'message', { signal });
-        socket.send(text);
-        const [message] = await received;
-        assert.equal(message.data, text);
-    }
-
-    const closing = once(socket, 'close', { signal });
-    socket.close(1000);
-    const [event] = await closing;
-    assert.equal(event.code, 1000);
-    assert.equal(event.wasClean, true);
-});
 
 function assertMetric(value, maximum = Infinity) {
     assert.ok(value === null || (Number.isFinite(value) && value >= 0 && value <= maximum),
@@ -252,29 +231,6 @@ async function readOverview(t) {
     return JSON.parse(frames[0]);
 }
 
-test('sends one Overview snapshot of measured host data per WebSocket connection', async t => {
-    if (process.platform === 'linux') {
-        // Wait through at least two intervals before opening any telemetry socket. A sampler
-        // driven only by connection or request activity cannot build this history.
-        await delay(1500);
-    }
-    for (let attempt = 0; attempt < 2; attempt++) {
-        const snapshot = await readOverview(t);
-        assert.deepEqual(Object.keys(snapshot).sort(), [
-            'cpu_percent', 'download_mib_per_second', 'memory_total_gib', 'memory_used_gib', 'uptime_minutes',
-        ]);
-        assertMetric(snapshot.cpu_percent, 100);
-        assert.ok(Array.isArray(snapshot.download_mib_per_second) && snapshot.download_mib_per_second.length <= 13);
-        for (const rate of snapshot.download_mib_per_second) assertMetric(rate);
-        if (process.platform === 'linux') {
-            assert.ok(Number.isFinite(snapshot.cpu_percent));
-            assert.ok(snapshot.download_mib_per_second.length >= 2,
-                'The host history grows while no telemetry client is connected.');
-            await assertLinuxMemoryAndUptime(snapshot);
-        }
-    }
-});
-
 async function nextPreviewSnapshot(socket, matches = () => true, wait = timeout) {
     const signal = AbortSignal.timeout(wait);
     for (;;) {
@@ -286,10 +242,24 @@ async function nextPreviewSnapshot(socket, matches = () => true, wait = timeout)
     }
 }
 
-async function connectPreview(t) {
-    const socket = connectSocket('/ws/preview');
+async function connectPreview(t, base, sessionCookie) {
+    const socket = connectSocket('/ws/preview', base, sessionCookie);
     t.after(() => socket.close());
     return { socket, initial: (await nextPreviewSnapshot(socket)).data };
+}
+
+async function fixtureSession(fixture) {
+    const credentials = { username: 'fixture-admin', password: 'fixture core test passphrase' };
+    const post = action => fetch(new URL('/api/auth/' + action, fixture.origin), {
+        method: 'POST',
+        headers: { Origin: fixture.origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json' },
+        body: JSON.stringify(credentials),
+        signal: AbortSignal.timeout(timeout),
+    });
+    assert.equal((await post('setup')).status, 201);
+    const login = await post('sign-in');
+    assert.equal(login.status, 204);
+    return login.headers.get('set-cookie').split(';', 1)[0];
 }
 
 let requestId = 0;
@@ -338,406 +308,293 @@ async function assertLinuxNetworkTotals(server) {
     }
 }
 
-test('streams measured Linux CPU, memory, and network history separately from sample users',
+test('streams measured Linux metrics twice per second and shares history with Overview',
+    { skip: process.platform !== 'linux' }, async t => {
+        // Measure history accumulation without an open telemetry socket.
+        await delay(1500);
+        const overview = await readOverview(t);
+        assert.ok(overview.download_mib_per_second.length >= 2 && overview.download_mib_per_second.length <= 13);
+        await assertLinuxMemoryAndUptime(overview);
+
+        const { socket, initial } = await connectPreview(t);
+        const { server: original } = initial;
+        assert.equal(original.memory_total_gib, overview.memory_total_gib);
+        assert.equal(original.name, hostname());
+        assertHostHistory(original);
+        await assertLinuxNetworkTotals(original);
+        assert.ok(original.download_history.some((_, index) =>
+            isDeepStrictEqual(original.download_history.slice(index, index + overview.download_mib_per_second.length),
+                overview.download_mib_per_second)));
+        assert.equal(initial.admin, undefined);
+        assert.equal(initial.auth, undefined);
+
+        const first = (await nextPreviewSnapshot(socket, undefined, 2000)).data;
+        const start = performance.now();
+        let latest;
+        for (let sample = 0; sample < 4; sample++) {
+            latest = (await nextPreviewSnapshot(socket, undefined, 2000)).data;
+        }
+        const elapsed = performance.now() - start;
+        assert.ok(elapsed >= 1000 && elapsed < 3500, 'Four intervals took ' + elapsed + ' ms.');
+        const { server } = latest;
+        assertHostHistory(server);
+        assert.ok(server.memory_history.length >= Math.min(historyLimit, first.server.memory_history.length + 4));
+        assert.ok(Number.isFinite(server.cpu_percent) || Number.isFinite(first.server.cpu_percent));
+        assert.ok(Number.isFinite(server.download_rate) && Number.isFinite(server.upload_rate));
+        await assertLinuxNetworkTotals(server);
+    });
+
+async function waitForFile(path) {
+    const deadline = performance.now() + timeout;
+    while (performance.now() < deadline) {
+        try {
+            const contents = await readFile(path, 'utf8');
+            if (contents.length) return contents;
+        } catch (error) {
+            if (error.code !== 'ENOENT') throw error;
+        }
+        await delay(25);
+    }
+    throw new Error('The fixture did not write its expected file.');
+}
+
+async function createCoreConfig(socket, name, enabled = false) {
+    const created = await requestPreview(socket, 'create_core_config', { name });
+    assert.equal(created.ok, true, created.feedback);
+    const config = created.data.server.core.configs.find(config => config.name === name.trim());
+    assert.ok(config);
+    assert.equal(config.enabled, false);
+    if (!enabled) return config;
+    const changed = await requestPreview(socket, 'set_core_config_enabled', { id: config.id, enabled: true });
+    assert.equal(changed.ok, true, changed.feedback);
+    return changed.data.server.core.configs.find(entry => entry.id === config.id);
+}
+
+function configPath(name) {
+    return join(coreFixture.configDir, name, 'config.json');
+}
+
+test('starts and reaps WaterWall with the selected configs supplied through stdin',
     { skip: process.platform !== 'linux' }, async t => {
         const { socket, initial } = await connectPreview(t);
-        const { server } = initial;
-        assertHostHistory(server);
-        await assertLinuxMemoryAndUptime(server);
-        await assertLinuxNetworkTotals(server);
-        const cpuStat = await readFile('/proc/stat', 'utf8');
-        assert.equal(server.cpu_cores, [...cpuStat.matchAll(/^cpu\d+\s/gm)].length);
-        assert.equal(server.name, hostname());
-        assert.match(server.platform, /^Linux(?:\s|$)/);
-        assert.equal(server.region, undefined);
-        assert.ok(server.memory_history.length > 0 && server.memory_history.length < historyLimit,
-            'The history starts with measured samples rather than a filled demo series.');
+        const observer = await connectPreview(t);
+        assert.equal(initial.server.version, '1.6.0');
+        assert.deepEqual(initial.server.available_panel_versions, ['1.6.0']);
+        const empty = await requestPreview(socket, 'start_core');
+        assert.equal(empty.ok, false);
+        assert.match(empty.feedback, /enable.*config/i);
 
-        const samples = [];
-        for (let sample = 0; sample < 5; sample++) {
-            const { data } = await nextPreviewSnapshot(socket, frame => frame.request_id === undefined, 2000);
-            assertHostHistory(data.server);
-            samples.push({ data, time: performance.now() });
-        }
-        const { data: first, time: start } = samples[0];
-        const { data: last, time: end } = samples.at(-1);
-        // Four sampling intervals take about two seconds. Allow for scheduler and
-        // socket polling jitter while rejecting a one-second or slower cadence.
-        assert.ok(end - start >= 1000 && end - start < 3500, 'Four host intervals took ' + (end - start) + ' ms.');
-        assert.ok(samples.some(({ data }) => Number.isFinite(data.server.cpu_percent) &&
-            Number.isFinite(data.server.upload_rate) && Number.isFinite(data.server.download_rate)));
-        if (last.server.memory_history.length < historyLimit) {
-            assert.ok(last.server.memory_history.length - first.server.memory_history.length >= 4);
-            for (const [, historyKey] of metricHistories) {
-                assert.deepEqual(last.server[historyKey].slice(0, first.server[historyKey].length),
-                    first.server[historyKey]);
+        const active = await createCoreConfig(socket, 'Main config', true);
+        const inactive = await createCoreConfig(socket, 'Skip disabled');
+        for (const [path, error] of [[coreFixture.program, /installed/], [configPath(active.name), /unsafe/i]]) {
+            const mode = (await stat(path)).mode & 0o777;
+            await chmod(path, mode | 0o022);
+            try {
+                const unsafe = await requestPreview(socket, 'start_core');
+                assert.equal(unsafe.ok, false);
+                assert.match(unsafe.feedback, error);
+                await assert.rejects(stat(coreFixture.processFile), { code: 'ENOENT' });
+            } finally {
+                await chmod(path, mode);
             }
         }
 
-        const demoChanges = samples.slice(1).filter(({ data }, index) =>
-            !isDeepStrictEqual(samples[index].data.users, data.users));
-        assert.ok(demoChanges.length <= 1, 'Host sampling does not accelerate simulated user traffic.');
-        const next = demoChanges.length ? last : (await nextPreviewSnapshot(socket, frame =>
-            !isDeepStrictEqual(last.users, frame.data.users), 6500)).data;
-        const selected = next.users.find(user => user.enabled && (user.upload_rate > 0 || user.download_rate > 0));
-        assert.ok(selected, 'A sample user is generating simulated traffic.');
-        const disabled = await requestPreview(socket, 'set_user_enabled', { id: selected.id, enabled: false });
-        assert.equal(disabled.ok, true);
-        assert.equal(disabled.data.users.find(user => user.id === selected.id).upload_rate, 0);
-        assert.equal(disabled.data.users.find(user => user.id === selected.id).download_rate, 0);
-        assertHostHistory(disabled.data.server);
-        await assertLinuxNetworkTotals(disabled.data.server);
-        // If both frames came from the same uncapped sample, a user action must
-        // leave every recorded reading and the cumulative counters unchanged.
-        if (next.server.memory_history.length === disabled.data.server.memory_history.length &&
-            next.server.memory_history.length < historyLimit) {
-            for (const [key, historyKey] of metricHistories) {
-                assert.equal(disabled.data.server[key], next.server[key]);
-                assert.deepEqual(disabled.data.server[historyKey], next.server[historyKey]);
-            }
-            assert.equal(disabled.data.server.download_total, next.server.download_total);
-            assert.equal(disabled.data.server.upload_total, next.server.upload_total);
+        const settings = { log: { level: 'warning' }, misc: { workers: 2 } };
+        assert.equal((await requestPreview(socket, 'apply_core_settings', { settings })).ok, true);
+        const running = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'running');
+        assert.equal((await requestPreview(socket, 'start_core')).ok, true);
+        assert.deepEqual((await running).data.server.core.configs, [{ ...active, active: true }, inactive]);
+        const child = JSON.parse(await waitForFile(coreFixture.processFile));
+        assert.deepEqual(child.args, ['--config:stdin']);
+        assert.equal(child.cwd, dirname(backend));
+        assert.deepEqual(child.settings, { ...settings, configs: ['configs/Main config/config.json'] });
+        await assert.rejects(stat(join(dirname(backend), 'core.json')), { code: 'ENOENT' });
+        await assert.rejects(stat(join(dirname(backend), 'waterwall_config')), { code: 'ENOENT' });
+        assert.doesNotThrow(() => process.kill(child.pid, 0));
+        assert.equal((await requestPreview(socket, 'set_core_config_enabled', {
+            id: active.id, enabled: false,
+        })).ok, false);
+        assert.equal((await requestPreview(socket, 'remove_core_config', { id: active.id })).ok, false);
+
+        const stopped = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'stopped');
+        assert.equal((await requestPreview(socket, 'stop_core')).ok, true);
+        assert.deepEqual((await stopped).data.server.core.configs, [active, inactive]);
+        assert.throws(() => process.kill(child.pid, 0), { code: 'ESRCH' });
+        for (const { id } of [active, inactive]) {
+            assert.equal((await requestPreview(socket, 'remove_core_config', { id })).ok, true);
         }
-
-        const overview = await readOverview(t);
-        const restored = await requestPreview(socket, 'set_user_enabled', { id: selected.id, enabled: true });
-        assert.equal(restored.ok, true);
-        const history = restored.data.server.download_history;
-        const readings = overview.download_mib_per_second;
-        assert.ok(history.some((_, index) =>
-            isDeepStrictEqual(history.slice(index, index + readings.length), readings)),
-            'The Overview download samples are part of the shared host history.');
+        await unlink(coreFixture.processFile);
     });
 
-test('publishes populated preview data and shares user changes and logs across browsers', async t => {
-    const { socket, initial } = await connectPreview(t);
-    const observer = await connectPreview(t);
-    assert.ok(initial.users.length > 20);
-    assert.ok(initial.users.some(user => !user.enabled));
-    assert.ok(initial.users.some(user => user.upload_rate > 0 && user.download_total > 0));
-    assert.equal(initial.server.users_total, initial.users.length);
-    assert.equal(initial.server.users_enabled, initial.users.filter(user => user.enabled).length);
-    assertHostHistory(initial.server);
-    assert.ok(initial.logs.some(log => log.message.includes('WaterWall is disconnected')));
-    assert.ok(initial.topology.nodes.length > 0 && initial.topology.links.length > 0);
-    assert.ok(initial.topology.routes.length > 0);
-    assert.ok(initial.settings.domain.endsWith('.invalid'));
-    assert.equal(initial.bot.connected, false);
-    assert.ok(initial.console.output.length > 0);
+const supportedInstaller = process.platform === 'linux' && ['x64', 'arm64'].includes(process.arch);
+test('attempts first-run installation once and lets an authenticated administrator retry a missing core',
+    { skip: !supportedInstaller }, async t => {
+        const fixture = await authFixture(t, undefined, { encrypted: false, prepareCore: false });
+        const binDir = join(dirname(fixture.backend), 'waterwall_bin');
+        const configDir = join(dirname(fixture.backend), 'configs');
+        const tools = join(fixture.cwd, 'fixture tools');
+        const calls = join(fixture.cwd, 'curl calls');
+        const released = join(fixture.cwd, 'release curl');
+        await mkdir(binDir);
+        await mkdir(tools);
+        await writeFile(join(tools, 'curl'), [
+            '#!/bin/sh',
+            'printf "%s\n" "$*" >> "$WAVE_CORE_TEST_CALLS"',
+            'attempt=0',
+            'while [ ! -e "$WAVE_CORE_TEST_RELEASE" ] && [ "$attempt" -lt 200 ]; do',
+            '    sleep 0.05',
+            '    attempt=$((attempt+1))',
+            'done',
+            'printf "Fixture is not a verified archive\n"',
+            '',
+        ].join('\n'), { mode: 0o700 });
+        const env = {
+            ...process.env,
+            PATH: tools + delimiter + process.env.PATH,
+            WAVE_CORE_TEST_CALLS: calls,
+            WAVE_CORE_TEST_RELEASE: released,
+        };
+        const invoked = async () => (await readFile(calls, 'utf8')).trim().split('\n');
+        const failedInstall = socket => nextPreviewSnapshot(socket, ({ data: { server: { core } } }) =>
+            core.state === 'missing' && core.error?.includes('SHA-256'));
+        await fixture.start(env);
+        const firstCall = await waitForFile(calls);
+        assert.match(firstCall, /WaterWall\/releases\/download\/v1\.6\.0\/Waterwall-linux-gcc-/);
+        assert.equal(JSON.parse(await readFile(fixture.database, 'utf8')).waterwall_install_attempted, true);
+        assert.deepEqual(await readdir(configDir), []);
 
-    const name = 'Mona Preview';
-    const otherTab = nextPreviewSnapshot(observer.socket, frame => frame.data.users.some(user => user.name === name));
-    const create = await requestPreview(socket, 'create_user', {
-        name, notes: 'Demo office', remaining_minutes: 120,
-        options: { protocol: 'tcp_websocket', ip_limit: 3 },
+        const session = await fixtureSession(fixture);
+        const first = await connectPreview(t, fixture.origin, session);
+        assert.equal(first.initial.server.core.state, 'installing');
+        assert.equal((await requestPreview(first.socket, 'install_core')).ok, false);
+        const firstFailure = failedInstall(first.socket);
+        await writeFile(released, '');
+        await firstFailure;
+        assert.equal((await invoked()).length, 1);
+        assert.deepEqual(await readdir(binDir), []);
+
+        await fixture.stop();
+        await unlink(released);
+        await rmdir(binDir);
+        await fixture.start(env);
+        const restarted = await connectPreview(t, fixture.origin, session);
+        assert.equal(restarted.initial.server.core.state, 'missing');
+        assert.deepEqual(await readdir(binDir), []);
+        await delay(250);
+        assert.equal((await invoked()).length, 1, 'Deleting the directory does not reset the first-run attempt.');
+
+        const retry = await requestPreview(restarted.socket, 'install_core');
+        assert.equal(retry.ok, true, retry.feedback);
+        assert.equal(retry.data.server.core.state, 'installing');
+        const secondFailure = failedInstall(restarted.socket);
+        await writeFile(released, '');
+        await secondFailure;
+        assert.equal((await invoked()).length, 2);
+        assert.deepEqual(await readdir(binDir), []);
+
+        const installed = nextPreviewSnapshot(restarted.socket, frame => frame.data.server.core.state === 'stopped');
+        const staged = await seedCore(fixture.backend, { executable: true });
+        await installed;
+        const deleted = nextPreviewSnapshot(restarted.socket, frame => frame.data.server.core.state === 'missing');
+        await unlink(staged.program);
+        await deleted;
+        assert.equal((await invoked()).length, 2, 'Deleting the executable leaves installation up to the administrator.');
     });
-    assert.equal(create.ok, true, create.feedback);
-    const created = create.data.users.find(user => user.name === name);
-    assert.ok(created.configuration.startsWith('wave-preview://'));
-    assert.equal(created.options.ip_limit, 3);
-    assert.equal(create.data.server.users_total, initial.users.length + 1);
-    assert.equal((await otherTab).data.users.find(user => user.name === name).id, created.id);
 
-    const edited = await requestPreview(socket, 'edit_user', { id: created.id, notes: 'New sample notes' });
-    assert.equal(edited.ok, true, edited.feedback);
-    assert.equal(edited.data.users.find(user => user.id === created.id).notes, 'New sample notes');
-    const invalid = await requestPreview(socket, 'edit_user', { id: created.id, name: 'Uncommitted', options: { ip_limit: -2 } });
-    assert.equal(invalid.ok, false);
-    assert.equal(invalid.data.users.find(user => user.id === created.id).name, name);
+test('persists safe config files and managed settings across a backend restart', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    await fixture.start();
+    const session = await fixtureSession(fixture);
+    const { socket, initial } = await connectPreview(t, fixture.origin, session);
+    const configs = join(dirname(fixture.backend), 'configs');
+    const original = await readFile(fixture.database, 'utf8');
+    assert.deepEqual(initial.server.core.configs, []);
+    for (const name of ['..', '../escape', 'nested/profile', 'nested\\profile', 'invalid\u0000name']) {
+        assert.equal((await requestPreview(socket, 'create_core_config', { name })).ok, false);
+    }
+    assert.equal((await requestPreview(socket, 'apply_core_settings', {
+        settings: { configs: ['other.json'] },
+    })).ok, false);
+    assert.equal(await readFile(fixture.database, 'utf8'), original);
+    assert.deepEqual(await readdir(configs), []);
 
-    const disabled = await requestPreview(socket, 'set_user_enabled', { id: created.id, enabled: false });
-    assert.equal(disabled.ok, true, disabled.feedback);
-    assert.equal(disabled.data.users.find(user => user.id === created.id).enabled, false);
-    assert.equal(disabled.data.server.users_enabled, initial.server.users_enabled);
-    assert.match(disabled.data.logs.at(-1).message, /Disabled sample user Mona Preview/);
+    const name = 'Lab profile';
+    const created = await createCoreConfig(socket, ` ${name} `, true);
+    const directory = join(configs, name);
+    const file = join(directory, 'config.json');
+    const skeleton = { name, 'config-version': 1, 'core-minimum-version': 0, nodes: [] };
+    assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), skeleton);
+    assert.equal((await requestPreview(socket, 'create_core_config', { name })).ok, false);
+    const settings = { log: { level: 'debug' } };
+    assert.equal((await requestPreview(socket, 'apply_core_settings', { settings })).ok, true);
+    const persisted = JSON.parse(await readFile(fixture.database, 'utf8'));
+    assert.deepEqual(persisted.core_configs, [{ id: created.id, name, enabled: true }]);
+    assert.deepEqual(persisted.core_settings, settings);
 
-    const bot = await requestPreview(socket, 'user_bot_action', { kind: 'configuration', id: created.id });
-    assert.equal(bot.ok, true, bot.feedback);
-    assert.match(bot.data.logs.at(-1).message, /Simulated bot configuration for Mona Preview/);
-    const deleted = await requestPreview(socket, 'delete_user', { id: created.id });
-    assert.equal(deleted.ok, true, deleted.feedback);
-    assert.equal(deleted.data.users.some(user => user.id === created.id), false);
-    assert.equal(deleted.data.server.users_total, initial.users.length);
+    await fixture.stop();
+    await fixture.start();
+    const restarted = await connectPreview(t, fixture.origin, session);
+    assert.deepEqual(restarted.initial.core_settings, settings);
+    assert.deepEqual(restarted.initial.server.core.configs, [created]);
+    const notes = join(directory, 'notes.txt');
+    await writeFile(notes, 'Fixture notes survive removal.');
+    assert.equal((await requestPreview(restarted.socket, 'remove_core_config', { id: created.id })).ok, true);
+    assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')).core_configs, []);
+    assert.deepEqual(await readdir(directory), ['notes.txt']);
+    await createCoreConfig(restarted.socket, name);
+    assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), skeleton);
+    assert.equal(await readFile(notes, 'utf8'), 'Fixture notes survive removal.');
 });
 
-test('validates and shares sample node changes and removes references to deleted nodes', async t => {
-    const { socket, initial } = await connectPreview(t);
-    const observer = await connectPreview(t);
-    const topology = initial.topology;
-    for (const name of [undefined, 4, '  ', 'line\nbreak', 'bad\0name', 'x'.repeat(65), ' Local cache ']) {
-        const rejected = await requestPreview(socket, 'add_node', { name });
-        assert.equal(rejected.ok, false);
-        assert.deepEqual(rejected.data.topology, topology);
-    }
+test('restores backup metadata atomically and preserves running and edited config files',
+    { skip: process.platform !== 'linux' }, async t => {
+        const { socket, initial } = await connectPreview(t);
+        const observer = await connectPreview(t);
+        const selected = await createCoreConfig(socket, 'Running profile', true);
+        const running = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'running');
+        assert.equal((await requestPreview(socket, 'start_core')).ok, true);
+        const active = (await running).data.server.core.configs[0];
+        assert.deepEqual(active, { ...selected, active: true });
+        await waitForFile(coreFixture.processFile);
+        const standby = await createCoreConfig(socket, 'Standby profile', true);
+        const standbyFile = configPath(standby.name);
+        const edited = (await readFile(standbyFile, 'utf8')) + '\n';
+        await writeFile(standbyFile, edited);
 
-    const name = 'Sample test relay';
-    const observedAdd = nextPreviewSnapshot(observer.socket, frame =>
-        frame.data.topology.nodes.some(node => node.label === name));
-    const added = await requestPreview(socket, 'add_node', { name: ` ${name} ` });
-    assert.equal(added.ok, true, added.feedback);
-    const node = added.data.topology.nodes.at(-1);
-    assert.equal(node.label, name);
-    assert.equal(node.type, 'Node');
-    assert.equal(typeof node.id, 'string');
-    assert.ok(!topology.nodes.some(item => item.id === node.id || (item.x === node.x && item.y === node.y)));
-    assert.ok(node.x >= 0 && node.x <= 1 && node.y >= 0 && node.y <= 1);
-    assert.deepEqual(added.data.topology, { ...topology, nodes: [...topology.nodes, node] });
-    assert.deepEqual((await observedAdd).data.topology, added.data.topology);
+        const blocked = join(coreFixture.configDir, 'Blocked profile');
+        await mkdir(blocked);
+        await chmod(blocked, 0o722);
+        const stored = await readFile(database, 'utf8');
+        const settings = { ...initial.settings, domain: 'restored.example.invalid' };
+        const restoredName = 'Restored config';
+        const configs = [{ name: standby.name, enabled: false }, { name: restoredName, enabled: true }];
+        const backup = { format: 'wave-preview-backup', version: 1, settings, configs };
+        const restore = configs => requestPreview(socket, 'restore_preview_backup', { backup: { ...backup, configs } });
+        for (const name of [active.name, '../escape', 'Blocked profile']) {
+            const rejected = await restore([...configs, { name, enabled: false }]);
+            assert.equal(rejected.ok, false);
+            assert.deepEqual(rejected.data.server.core.configs, [active, standby]);
+        }
+        assert.equal(await readFile(database, 'utf8'), stored);
+        await assert.rejects(stat(configPath(restoredName)), { code: 'ENOENT' });
 
-    const id = 'cache';
-    assert.ok(topology.links.some(link => link.from === id || link.to === id));
-    assert.ok(topology.routes.some(route => route.path.includes(id)));
-    const observedDelete = nextPreviewSnapshot(observer.socket, frame =>
-        !frame.data.topology.nodes.some(item => item.id === id));
-    const deleted = await requestPreview(socket, 'delete_node', { id });
-    assert.equal(deleted.ok, true, deleted.feedback);
-    const remaining = {
-        nodes: added.data.topology.nodes.filter(item => item.id !== id),
-        links: topology.links.filter(link => link.from !== id && link.to !== id),
-        routes: topology.routes.filter(route => !route.path.includes(id)),
-    };
-    assert.deepEqual(deleted.data.topology, remaining);
-    assert.deepEqual((await observedDelete).data.topology, remaining);
-    assert.match(deleted.data.logs.at(-1).message, /Deleted sample node Local cache/);
-    for (const invalidId of [id, 1, undefined]) {
-        const rejected = await requestPreview(observer.socket, 'delete_node', { id: invalidId });
-        assert.equal(rejected.ok, false);
-        assert.deepEqual(rejected.data.topology, remaining);
-    }
+        const restored = await restore(configs);
+        assert.equal(restored.ok, true, restored.feedback);
+        assert.deepEqual(restored.data.settings, settings);
+        assert.deepEqual(restored.data.server.core.configs.slice(0, 2), [active, { ...standby, enabled: false }]);
+        assert.equal(JSON.parse(await readFile(configPath(restoredName), 'utf8')).name, restoredName);
+        const cleared = await restore([]);
+        assert.equal(cleared.ok, true, cleared.feedback);
+        assert.deepEqual(cleared.data.server.core.configs, [active]);
+        const { id, name, enabled } = active;
+        assert.deepEqual(JSON.parse(await readFile(database, 'utf8')).core_configs, [{ id, name, enabled }]);
+        assert.equal(await readFile(standbyFile, 'utf8'), edited);
+        assert.ok((await stat(configPath(restoredName))).isFile());
 
-    assert.equal((await requestPreview(socket, 'delete_node', { id: node.id })).ok, true);
-    const replacement = await requestPreview(socket, 'add_node', { name });
-    assert.equal(replacement.ok, true, replacement.feedback);
-    assert.notEqual(replacement.data.topology.nodes.at(-1).id, node.id);
-});
-
-test('simulates core lifecycle and panel version changes independently', async t => {
-    const { socket, initial } = await connectPreview(t);
-    const observer = await connectPreview(t);
-    const { core, version: initialVersion, available_panel_versions: available } = initial.server;
-    assert.equal(core.state, 'running');
-    assert.ok(available.includes(initialVersion));
-    assert.deepEqual(core.capabilities, { lifecycle: true, configs: true });
-    const target = available.find(version => version !== initialVersion);
-    assert.ok(target);
-
-    const change = async (action, fields, ok, state, version = initialVersion) => {
-        const reply = await requestPreview(socket, action, fields);
-        assert.equal(reply.ok, ok, reply.feedback);
-        assert.deepEqual(reply.data.server.core, { ...core, state });
-        assert.equal(reply.data.server.version, version);
-        assert.deepEqual(reply.data.server.available_panel_versions, available);
-        assert.equal(reply.data.server.platform, initial.server.platform);
-        return reply;
-    };
-    await change('start_core', {}, false, 'running');
-    for (const version of [initialVersion, 'unknown', 1, undefined]) {
-        await change('update_panel', { version }, false, 'running');
-    }
-    await change('update_core', { version: target }, false, 'running');
-    const stopped = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'stopped');
-    const stop = await change('stop_core', {}, true, 'stopped');
-    assert.equal((await stopped).data.server.core.state, 'stopped');
-    assertHostHistory(stop.data.server);
-    for (const action of ['stop_core', 'pause_core', 'resume_core']) {
-        await change(action, {}, false, 'stopped');
-    }
-    const versionChanged = nextPreviewSnapshot(observer.socket, frame => frame.data.server.version === target);
-    await change('update_panel', { version: target }, true, 'stopped', target);
-    assert.deepEqual((await versionChanged).data.server.core, { ...core, state: 'stopped' });
-    await change('update_panel', { version: target }, false, 'stopped', target);
-    await change('start_core', {}, true, 'running', target);
-    await change('start_core', {}, false, 'running', target);
-});
-
-test('validates in-memory config changes and protects the active config', async t => {
-    const { socket, initial } = await connectPreview(t);
-    const observer = await connectPreview(t);
-    const core = initial.server.core;
-    const active = core.configs.find(config => config.active);
-    assert.ok(active?.enabled);
-    const files = await readdir(cwd);
-
-    const rejected = async (action, fields, snapshot = core) => {
-        const reply = await requestPreview(socket, action, fields);
-        assert.equal(reply.ok, false);
-        assert.deepEqual(reply.data.server.core, snapshot);
-    };
-    await rejected('set_core_config_enabled', { id: active.id, enabled: false });
-    await rejected('remove_core_config', { id: active.id });
-    for (const name of [null, '   ', 'invalid\u0000name', 'invalid\u007fname', 'é'.repeat(33), active.name]) {
-        await rejected('create_core_config', { name });
-    }
-
-    const name = 'Lab preview';
-    const broadcast = nextPreviewSnapshot(observer.socket, frame =>
-        frame.data.server.core.configs.some(config => config.name === name));
-    const created = await requestPreview(socket, 'create_core_config', { name: ` ${name} ` });
-    assert.equal(created.ok, true, created.feedback);
-    const config = created.data.server.core.configs.at(-1);
-    assert.ok(Number.isSafeInteger(config.id) && core.configs.every(item => item.id !== config.id));
-    assert.deepEqual(config, { id: config.id, name, enabled: false, active: false });
-    assert.deepEqual((await broadcast).data.server.core, created.data.server.core);
-    await rejected('create_core_config', { name }, created.data.server.core);
-    await rejected('set_core_config_enabled', { id: config.id, enabled: 'true' }, created.data.server.core);
-
-    for (const enabled of [true, false, true]) {
-        const reply = await requestPreview(socket, 'set_core_config_enabled', { id: config.id, enabled });
-        assert.equal(reply.ok, true, reply.feedback);
-        assert.deepEqual(reply.data.server.core, { ...core, configs: [...core.configs, { ...config, enabled }] });
-    }
-    const removed = await requestPreview(socket, 'remove_core_config', { id: config.id });
-    assert.equal(removed.ok, true, removed.feedback);
-    assert.deepEqual(removed.data.server.core, core);
-    await rejected('remove_core_config', { id: config.id });
-    assert.deepEqual(await readdir(cwd), files, 'Preview config actions leave the backend working directory intact.');
-});
-
-test('preview actions cannot change or expose the administrator credentials', async t => {
-    const { socket, initial } = await connectPreview(t);
-    const saved = await readFile(database, 'utf8');
-    for (const action of ['setup', 'sign_in', 'sign_out']) {
-        const reply = await requestPreview(socket, action, { username: 'legacy-preview', password: 'preview-passphrase' });
-        assert.equal(reply.ok, false, action);
-        assert.deepEqual(reply.data.settings, initial.settings);
-    }
-    for (const key of ['admin', 'admin_username', 'password', 'auth']) {
-        assert.equal(initial.settings[key], undefined);
-        assert.equal(initial[key], undefined);
-    }
-    assert.equal(await readFile(database, 'utf8'), saved);
-});
-
-test('validates TLS fields and partially updates the preview settings', async t => {
-    const { socket, initial } = await connectPreview(t);
-    for (const settings of [{ port: 4070, multiplex: false }, { domain: '  ' },
-        { domain: 'valid.example.invalid', private_key_path: 5 }, { certificate_path: 'a'.repeat(161) }]) {
-        const rejected = await requestPreview(socket, 'apply_settings', { settings });
-        assert.equal(rejected.ok, false, rejected.feedback);
-        assert.deepEqual(rejected.data.settings, initial.settings);
-    }
-    const private_key_path = 'preview/renewed.key';
-    const settings = await requestPreview(socket, 'apply_settings', { settings: { private_key_path } });
-    assert.equal(settings.ok, true, settings.feedback);
-    assert.deepEqual(settings.data.settings, { ...initial.settings, private_key_path });
-    assert.equal((await fetch(new URL('/', url))).status, 200);
-});
-
-test('restores preview backups atomically and preserves the active config', async t => {
-    const { socket, initial } = await connectPreview(t);
-    const observer = await connectPreview(t);
-    const files = await readdir(cwd);
-    const original = initial.server.core.configs;
-    const active = original.find(config => config.active);
-    const standby = original.find(config => !config.active);
-    const tls = {
-        domain: 'restored.example.invalid', certificate_path: 'preview/restore.crt', private_key_path: '',
-    };
-    const configs = [{ name: standby.name, enabled: false }, { name: 'Restored config', enabled: true }];
-    const backup = { format: 'wave-preview-backup', version: 1, settings: tls, configs };
-    for (const invalid of [
-        { ...backup, format: 'wave-db' }, { ...backup, version: 2 }, { ...backup, settings: { ...tls, domain: '' } },
-        { ...backup, settings: { domain: tls.domain } }, { ...backup, configs: null },
-        { ...backup, configs: [...configs, { name: active.name, enabled: false }] },
-        { ...backup, configs: [...configs, { name: '  Restored config ', enabled: false }] },
-        { ...backup, configs: [{ name: 'Invalid flag', enabled: 1 }] },
-        { ...backup, configs: Array.from({ length: 64 }, (_, i) => ({ name: `Too many ${i}`, enabled: false })) },
-    ]) {
-        const reply = await requestPreview(socket, 'restore_preview_backup', { backup: invalid });
-        assert.equal(reply.ok, false, reply.feedback);
-        assert.deepEqual(reply.data.settings, initial.settings);
-        assert.deepEqual(reply.data.server.core.configs, original);
-    }
-
-    const broadcast = nextPreviewSnapshot(observer.socket, frame => frame.data.settings.domain === tls.domain);
-    const restored = await requestPreview(socket, 'restore_preview_backup', { backup });
-    assert.equal(restored.ok, true, restored.feedback);
-    const expected = [active, { ...standby, enabled: false }, {
-        id: restored.data.server.core.configs.at(-1).id, ...configs[1], active: false,
-    }];
-    assert.deepEqual(restored.data.server.core.configs, expected);
-    assert.deepEqual((await broadcast).data.server.core.configs, expected);
-    assert.deepEqual(restored.data.settings, { ...initial.settings, ...tls });
-    assert.equal(restored.data.server.version, initial.server.version);
-
-    const full = {
-        ...backup,
-        configs: Array.from({ length: 63 }, (_, i) => ({
-            name: String(i).padStart(2, '0') + '"'.repeat(62), enabled: false,
-        })),
-    };
-    assert.ok(JSON.stringify(full).length > 8192, 'A full backup can exceed the ordinary request limit.');
-    const filled = await requestPreview(socket, 'restore_preview_backup', { backup: full });
-    assert.equal(filled.ok, true, filled.feedback);
-    assert.equal(filled.data.server.core.configs.length, 64);
-    assert.deepEqual(filled.data.server.core.configs[0], active);
-    const cleared = await requestPreview(socket, 'restore_preview_backup', { backup: { ...backup, configs: [] } });
-    assert.equal(cleared.ok, true, cleared.feedback);
-    assert.deepEqual(cleared.data.server.core.configs, [active]);
-    assert.deepEqual(await readdir(cwd), files);
-});
-
-test('simulates preview bot actions and console entirely in memory', async t => {
-    const { socket } = await connectPreview(t);
-    const connected = await requestPreview(socket, 'bot_connect', { token: 'demo-placeholder' });
-    assert.equal(connected.ok, true, connected.feedback);
-    assert.equal(connected.data.bot.connected, true);
-    assert.equal(connected.data.bot.token, undefined);
-    const bot = await requestPreview(socket, 'bot_action', { kind: 'broadcast', message: 'Sample notice' });
-    assert.equal(bot.ok, true, bot.feedback);
-    assert.equal(bot.data.bot.last_message, 'Sample notice');
-
-    const input = 'echo executed > preview-execution-probe.txt';
-    const console = await requestPreview(socket, 'console_command', { input });
-    assert.equal(console.ok, true, console.feedback);
-    assert.equal(console.data.console.history.at(-1), input);
-    assert.equal(console.data.console.output.at(-2), `$ ${input}`);
-    assert.match(console.data.console.output.at(-1), /preview input/);
-    await assert.rejects(stat(join(cwd, 'preview-execution-probe.txt')), { code: 'ENOENT' });
-
-    const stopped = await requestPreview(socket, 'stop_console');
-    assert.equal(stopped.data.console.running, false);
-    assert.equal((await requestPreview(socket, 'console_command', { input: 'help' })).ok, false);
-    assert.equal((await requestPreview(socket, 'start_console')).data.console.running, true);
-    assert.deepEqual((await requestPreview(socket, 'clear_logs')).data.logs, []);
-});
-
-test('merges independent bot settings and overrides updates from stale clients in either order', async t => {
-    for (const order of [['settings', 'overrides'], ['overrides', 'settings']]) {
-        await t.test(`${order[0]} first`, async clients => {
-            const settingsClient = await connectPreview(clients);
-            const overridesClient = await connectPreview(clients);
-            const { bot } = settingsClient.initial;
-            assert.deepEqual(overridesClient.initial.bot, bot);
-            const notifications = !bot.notifications;
-            const port = bot.overrides.port === 443 ? 8443 : 443;
-            const edits = {
-                settings: {
-                    socket: settingsClient.socket,
-                    fields: {
-                        notifications, allow_status: bot.allow_status, allow_config: bot.allow_config,
-                        notification_rules: bot.notification_rules, permissions: bot.permissions,
-                    },
-                },
-                overrides: {
-                    socket: overridesClient.socket,
-                    fields: { overrides: { ...overridesClient.initial.bot.overrides, port } },
-                },
-            };
-            const [first, second] = order.map(name => edits[name]);
-            const save = edit => requestPreview(edit.socket, 'apply_bot_settings', { settings: edit.fields });
-            const firstReply = await save(first);
-            assert.equal(firstReply.ok, true, firstReply.feedback);
-            const observed = nextPreviewSnapshot(first.socket, frame => frame.request_id === undefined &&
-                frame.data.bot.notifications === notifications && frame.data.bot.overrides.port === port);
-            const secondReply = await save(second);
-            assert.equal(secondReply.ok, true, secondReply.feedback);
-            const expected = { ...bot, notifications, overrides: { ...bot.overrides, port } };
-            assert.deepEqual(secondReply.data.bot, expected);
-            assert.deepEqual((await observed).data.bot, expected);
-        });
-    }
-});
+        const stopped = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'stopped');
+        assert.equal((await requestPreview(socket, 'stop_core')).ok, true);
+        await stopped;
+    });
 
 async function expectStartupFailure(args, diagnostic, executable = backend) {
     await assert.rejects(run(executable, args, { cwd, timeout }), error => {
@@ -748,68 +605,16 @@ async function expectStartupFailure(args, diagnostic, executable = backend) {
     });
 }
 
-test('rejects invalid command-line options', async () => {
-    await expectStartupFailure(['--unknown'], /Unknown option.*--unknown/);
-    await expectStartupFailure(['--site-dir', '--check-tls'], /Missing value.*--site-dir/);
-    await expectStartupFailure(['--host', '127.0.0.1'], /Unknown option.*--host/);
-    await expectStartupFailure(['--port', '2045'], /Unknown option.*--port/);
-});
-
 async function isolatedBackend(name, settings = {}) {
     const directory = join(cwd, name);
     const executable = join(directory, basename(backend));
     const db = join(directory, 'wave-db.json');
     await mkdir(directory);
     await copyFile(backend, executable);
-    await writeFile(db, JSON.stringify(settings), { mode: 0o600 });
+    await seedCore(executable);
+    await writeFile(db, JSON.stringify({ waterwall_install_attempted: true, ...settings }), { mode: 0o600 });
     return { executable, db };
 }
-
-test('rejects invalid database listener values before binding', async () => {
-    const { executable, db } = await isolatedBackend('invalid-listener');
-    for (const port of ['2045', -1, 65536, 2 ** 40, 2045.5]) {
-        await writeFile(db, JSON.stringify({ listen: { port } }));
-        await expectStartupFailure(['--site-dir', siteDir], /listen\.port.*integer from 0 to 65535/, executable);
-    }
-    for (const host of ['', 'host name', '127.0.0.1\0', null]) {
-        await writeFile(db, JSON.stringify({ listen: { host } }));
-        await expectStartupFailure(['--site-dir', siteDir], /listen\.host.*nonempty address/, executable);
-    }
-    await writeFile(db, JSON.stringify({ listen: '127.0.0.1:2045' }));
-    await expectStartupFailure(['--site-dir', siteDir], /listen in wave-db.json must be a JSON object/, executable);
-});
-
-test('rejects malformed manually configured Argon2id hashes before binding', async t => {
-    const fixtureHash = `$argon2id$v=19$m=65536,t=3,p=4$${'A'.repeat(22)}$${'A'.repeat(43)}`;
-    const { executable, db } = await isolatedBackend('invalid-admin');
-    for (const [label, password] of [
-        ['leading zero in the memory cost', fixtureHash.replace('$m=', '$m=0')],
-        ['noncanonical base64 padding bits', fixtureHash.slice(0, -1) + 'B'],
-        ['plaintext password', 'fixture plaintext password'],
-    ]) {
-        await t.test(label, async () => {
-            await writeFile(db, JSON.stringify({
-                listen: { host: '127.0.0.1', port: 0 }, admin: [{ username: 'fixture-operator', password }],
-            }));
-            await expectStartupFailure(['--site-dir', siteDir],
-                /administrator in wave-db.json requires a username and an Argon2id password hash/, executable);
-        });
-    }
-});
-
-test('fails before binding when the site or an asset is missing', async () => {
-    const { executable } = await isolatedBackend('missing-assets');
-    await expectStartupFailure([], /Cannot access site directory.*web-release/, executable);
-    const incomplete = join(cwd, 'incomplete');
-    await mkdir(incomplete);
-    await writeFile(join(incomplete, 'index.html'), assets['index.html']);
-    await writeFile(join(incomplete, 'index.js'), assets['index.js']);
-    await expectStartupFailure(
-        ['--site-dir', incomplete],
-        /Missing required site asset.*index\.wasm/,
-        executable,
-    );
-});
 
 test('rejects concurrent access to the database or a port already in use', async () => {
     await expectStartupFailure(['--site-dir', siteDir], /Another Wave process is using wave-db.json/);

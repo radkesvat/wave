@@ -7,6 +7,7 @@
 #include "views/about_view.h"
 #include "views/server_status_view.h"
 #include "views/view_helpers.h"
+#include "wave_version.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -26,7 +27,7 @@ using theme::packed;
 constexpr std::array navigation{
     PanelNavigationItem{"Server Status", PanelPage::server},
     PanelNavigationItem{"Users", PanelPage::users},
-    PanelNavigationItem{"Panel Settings", PanelPage::settings},
+    PanelNavigationItem{"Settings", PanelPage::settings},
     PanelNavigationItem{"Console", PanelPage::console},
     PanelNavigationItem{"Nodes & Routers", PanelPage::topology},
     PanelNavigationItem{"About", PanelPage::about},
@@ -315,7 +316,7 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
 
 std::string_view displayed_panel_version(const PreviewSession& session)
 {
-    return view::string_field(view::field(session.data(), "server"), "version", "0.1.0-preview");
+    return view::string_field(view::field(session.data(), "server"), "version", wave::version);
 }
 
 const char* dialog_title(PanelDialog dialog)
@@ -487,7 +488,8 @@ void render_dialogs(PanelState& state, PreviewSession& session)
 void render_view(PanelState& state, PreviewSession& session, bool narrow, bool stacked_status)
 {
     const bool has_server = state.page == PanelPage::server && session.data().contains("server");
-    if (!session.ready() && !has_server && state.page != PanelPage::about) {
+    if (!session.ready() && !has_server && state.page != PanelPage::about &&
+        state.page != PanelPage::settings) {
         ImGui::TextUnformatted(panel_page_name(state.page));
         ImGui::Separator();
         if (session.status() == PreviewStatus::loading) {
@@ -500,8 +502,6 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
         }
         if (state.page == PanelPage::users && state.users.dialog) {
             render_users_dialog(state.users, session);
-        } else if (state.page == PanelPage::settings) {
-            render_settings_dialogs(state.settings, session);
         } else if (state.page == PanelPage::topology) {
             render_topology_dialogs(state.topology, session);
         }
@@ -520,7 +520,7 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
         break;
     }
     case PanelPage::settings:
-        render_settings(state.settings, session, narrow);
+        render_settings(state.settings, state.auth, session, narrow);
         break;
     case PanelPage::console:
         render_console(state.console, session, narrow);
@@ -626,9 +626,6 @@ void render_panel(PanelState& state, PreviewSession& session, float viewport_wid
             stacked_status ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0;
         if (begin_pane("View", {width, work_height}, Color::canvas, view_flags)) {
             render_view(state, session, layout.narrow, stacked_status);
-            if (state.page == PanelPage::settings) {
-                render_administrator_settings(state.settings, state.auth);
-            }
         }
         ImGui::EndChild();
         ImGui::PopID();
@@ -654,14 +651,7 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
     }
     auto description = std::format("Wave {}. Preview. WaterWall disconnected.", panel_page_name(state.page));
     if (state.page == PanelPage::settings) {
-        description += " Administrator settings.";
-        if (state.auth.action() == AuthSession::Action::update_administrator) {
-            if (state.auth.pending()) {
-                description += " Saving the administrator…";
-            } else if (!state.auth.error().empty()) {
-                description += ' ' + state.auth.error();
-            }
-        }
+        description += ' ' + describe_settings(state.settings, state.auth);
     }
     const bool controls_dialog = state.panel_controls.dialog != PanelControlsState::Dialog::none;
     const bool has_server = state.page == PanelPage::server && session.data().contains("server");
@@ -685,9 +675,11 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
         }
     }
     const auto action = session.feedback_action();
-    if (!session.feedback().empty() && ((!has_server && !controls_dialog) ||
-                                        (action != "update_panel" && action != "restore_preview_backup" &&
-                                         action.find("_core") == std::string_view::npos))) {
+    const bool core_settings_feedback = state.page == PanelPage::settings && action == "apply_core_settings";
+    if (!session.feedback().empty() && !core_settings_feedback &&
+        ((!has_server && !controls_dialog) ||
+         (action != "update_panel" && action != "restore_preview_backup" &&
+          action.find("_core") == std::string_view::npos))) {
         result += " ";
         result += session.feedback();
     }

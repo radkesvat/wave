@@ -3,3 +3,6 @@
 /tests/frontend/node_modules/
 wave-db.json
 .wave-db-*
+waterwall_bin/
+waterwall_config/
+/configs/

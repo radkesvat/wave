@@ -10,7 +10,22 @@ namespace wave {
 
 class AuthSession;
 
+struct CoreSettingsDraft {
+    nlohmann::json source;
+    std::string text;
+    bool dirty = false;
+    std::optional<std::uint64_t> request;
+    std::optional<PreviewReply> reply;
+};
+
 struct SettingsViewState {
+    enum class Tab {
+        panel,
+        core
+    };
+
+    Tab tab = Tab::panel;
+    CoreSettingsDraft core;
     nlohmann::json source;
     std::array<char, 161> domain{};
     std::array<char, 161> certificate_path{};
@@ -24,8 +39,7 @@ struct SettingsViewState {
     std::array<char, 257> new_password{};
 };
 
-void render_settings(SettingsViewState& state, PreviewSession& session, bool narrow);
-void render_settings_dialogs(SettingsViewState& state, PreviewSession& session);
-void render_administrator_settings(SettingsViewState& state, AuthSession& auth);
+void render_settings(SettingsViewState& state, AuthSession& auth, PreviewSession& session, bool narrow);
+std::string describe_settings(const SettingsViewState& state, const AuthSession& auth);
 
 } // namespace wave

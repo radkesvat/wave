@@ -37,14 +37,17 @@ add_library(wave-argon2 STATIC
 target_include_directories(wave-argon2 PUBLIC "${argon2_SOURCE_DIR}/include")
 target_link_libraries(wave-argon2 PRIVATE Threads::Threads)
 
-add_executable(wave-backend main.cpp panel_settings.cpp preview.cpp linux_metrics.cpp auth.cpp auth_store.cpp)
+add_executable(wave-backend
+    main.cpp panel_settings.cpp preview.cpp linux_metrics.cpp auth.cpp auth_store.cpp
+    waterwall.cpp waterwall_install.cpp core_config_files.cpp
+)
 set_target_properties(wave-backend PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
     CXX_EXTENSIONS NO
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
-target_include_directories(wave-backend PRIVATE "${PROJECT_SOURCE_DIR}/common")
+target_include_directories(wave-backend PRIVATE "${PROJECT_SOURCE_DIR}/common" "${PROJECT_BINARY_DIR}/generated")
 target_link_libraries(wave-backend PRIVATE
     httplib::httplib nlohmann_json::nlohmann_json OpenSSL::Crypto Threads::Threads wave-argon2
 )
