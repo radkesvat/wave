@@ -4,10 +4,12 @@
 
 namespace wave {
 
-void render_about()
+void render_about(bool authenticated)
 {
     ImGui::TextColored(theme::rgba(theme::Color::accent), "Wave 0.1.0");
-    ImGui::TextWrapped("Wave is a browser panel for the WaterWall core. This workspace uses sample data.");
+    ImGui::TextWrapped(
+        authenticated ? "Wave is a browser panel for the WaterWall core."
+                      : "Wave is a browser panel for the WaterWall core. This workspace uses sample data.");
     ImGui::SeparatorText("Projects");
     ImGui::TextLinkOpenURL("Wave source", "https://github.com/radkesvat/wave");
     ImGui::TextLinkOpenURL("WaterWall core", "https://github.com/radkesvat/WaterWall");

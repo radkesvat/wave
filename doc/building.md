@@ -126,6 +126,9 @@ The backend needs CMake 3.24 or newer, Ninja, and a host C++20 compiler. The
 first configure downloads cpp-httplib v0.67.0 and nlohmann/json v3.12.0 and
 verifies their pinned archive checksums. [cpp-httplib release](https://github.com/yhirose/cpp-httplib/releases/tag/v0.67.0), [nlohmann/json release](https://github.com/nlohmann/json/releases/tag/v3.12.0)
 
+Linux builds include TLS by default and require the system OpenSSL 3
+development package. Use `-DWAVE_ENABLE_AUTH=OFF` for a demo-only build.
+
 Run these commands from the Wave root with the native compiler on `PATH`.
 Use `backend-debug` in both commands for a debug build.
 
@@ -140,17 +143,23 @@ If an existing backend build directory was configured from `backend/`, add
 The executable is `build/backend-release/wave-backend` or
 `build/backend-debug/wave-backend`. After building the frontend with the
 `web-release` preset, start the backend from the Wave root and open
-[the local Wave preview](http://127.0.0.1:2030/).
+[the local Wave preview](http://127.0.0.1:2045/).
+
+Wave creates `wave-db.json` beside its executable on first launch and fills
+in any missing listener settings. The default is `0.0.0.0:2045`, which binds
+to all IPv4 interfaces. Wave starts the HTTP preview with demo credentials
+until you configure [authenticated HTTPS mode](authentication.md).
 
 ```sh
 ./build/backend-release/wave-backend
 ```
 
-Use the Users toolbar to search, sort, create, or pause sample records. Open
-a row's Options for edits, notes, QR sharing, and simulated bot actions. The
-Logs pane records demo changes and provides search, auto-scroll, copy, and
-clear controls. Menu opens version information, demo sign-in, first-run setup,
-and demo sign-out. Tools opens diagnostics and input helpers.
+Use Users to search, sort, and create sample records or pause live data.
+Open a row's **Options** to edit the user, read notes, share a configuration
+by QR code, reset traffic totals, or delete the user. The Logs pane records
+demo changes and provides search, auto-scroll, copy, and clear controls.
+Menu opens version information, demo sign-in, first-run setup, and demo
+sign-out. Tools opens diagnostics and input helpers.
 
 Preview dialogs share a square-cornered frame, a dark title strip, and a
 right-aligned action row below the body. Workspace dialogs center in the
@@ -173,11 +182,14 @@ details**. **Use example** fills the initial demo credentials, `demo` and
 preview process. The dialog shows the request status and keeps the draft
 available after a rejection, timeout, or disconnect. When the server
 confirms, select **Open workspace**. Use your saved credentials from
-**Menu → Demo sign-in**. Set the domain and the paths to the certificate and
-private key in **Panel Settings**.
+**Menu → Demo sign-in**. The domain and PEM path fields in **Panel Settings**
+are for sample values. Supply deployment credentials and TLS settings through
+the authenticated installation flow. [Authenticated HTTPS installation](authentication.md)
 
 ### Preview controls and server options
 
+The sidebar contains **Server Status**, **Users**, **Panel Settings**,
+**Console**, **Nodes & Routers**, and **About**.
 Tab goes from **Menu** and **Tools** into the workspace. Press Enter on a
 focused pane, then use Tab to move between its controls.
 
@@ -185,9 +197,16 @@ The Users table switches to a paginated layout when the work pane lacks room
 for the desktop columns and names. Drag a desktop column divider to resize
 it for the current session. The enabled switch follows the latest preview
 state. Successful user changes appear in Logs while the Users table stays
-in place. Swipe the panel to reach Logs. Swiping
-along a pane's right edge scrolls its contents. Drag directly on a topology
-map to pan it, or tap a node or link to inspect it.
+in place. Swipe the panel to reach Logs. Swiping along a pane's right edge
+scrolls its contents.
+
+**Nodes & Routers** shows the sample topology on one canvas. Drag to pan,
+use the zoom buttons and **Fit map** to adjust the view, and select a node or
+connection to see its details. **Inspect items** also lists the routes. Use
+**Add node** to place a named sample node. Select a node and use **Delete node**
+to confirm removal of the node and its connections and routes. On narrow
+screens, swipe outside the canvas to reach Logs. Changes are shared in the
+preview and reset when the preview process restarts.
 
 Wave's scrollable panes use inset, rounded scrollbar thumbs and share the
 same track, hover, and drag colors in each contrast mode. Classic page
@@ -196,7 +215,9 @@ supported. Overlay scrollbars use the browser's native appearance.
 
 Server Status shows CPU and Memory above Server Information and Traffic
 when the work pane can fit two columns. When space is tight, all four cards
-stack in that order. On a phone, swipe through the cards to reach Logs.
+stack in that order. The Server Information card places device details beside
+Core Controls in the grid and above them in the stacked layout.
+On a phone, swipe through the cards to reach Logs.
 At short desktop heights, scroll inside the work pane to see the rest of
 the grid. Server Status reserves the browser scrollbar gutter on platforms
 with a classic scrollbar, so the column count stays consistent as the page
@@ -204,10 +225,12 @@ starts or stops scrolling.
 
 `--site-dir` selects a frontend build directory relative to the current
 working directory or by absolute path. It defaults to `build/web-release/site`
-and must contain `index.html`, `index.js`, and `index.wasm`. `--host` and
-`--port` default to `127.0.0.1` and `2030`. Pass `--port 0` to let the operating
-system choose a free port. The server prints its address and bound port at
-startup. The `/ws` endpoint echoes text messages over the same port.
+and must contain `index.html`, `index.js`, and `index.wasm`. Set `listen.host`
+and `listen.port` in `wave-db.json` to choose the bind address and port. Use
+`127.0.0.1` for local-only access. For the HTTP preview, port `0` lets the
+operating system choose a free port. The preview prints its address and
+bound port at startup. The `/ws` endpoint echoes text messages over the same
+port.
 
 The workspace opens `/ws/preview` on the same host and port. A JSON frame with
 `type` set to `snapshot` carries Users, Logs, server metrics, settings,
@@ -230,14 +253,19 @@ User edits send the user ID and changed fields. Connection and limit options
 are updated individually so changes from other browsers to untouched fields
 are preserved.
 
-Both Telegram Bot forms use `apply_bot_settings`. Settings sends
-`notifications`, `allow_status`, `allow_config`, `notification_rules`, and
-`permissions`. Overrides sends `overrides` alone. The server merges the
-submitted fields so saves from the two forms can arrive in either order.
+Topology edits use `add_node` with a `name` or `delete_node` with a node `id`.
+The preview accepts up to 64 nodes. Names are limited to 64 UTF-8 bytes and
+must be nonblank, unique after trimming surrounding spaces, and free of
+ASCII control characters. The server assigns the new node's ID and position.
+Deleting a node removes links with that endpoint and routes containing it.
 
-Other connected browsers receive the shared updates. Overview and Server
-Status use the same server metrics. Server Status plots CPU on a 0–100%
-scale, memory usage against capacity in GiB, and upload and download
+The backend preview API merges the fields submitted with `apply_bot_settings`
+into `bot`. Requests can update `notifications`, `allow_status`,
+`allow_config`, `notification_rules`, and `permissions` independently of
+`overrides`.
+
+Other connected browsers receive the shared updates. Server Status plots CPU
+on a 0–100% scale, memory usage against capacity in GiB, and upload and download
 together in MiB/s. The charts keep up to 19 samples in time order. The
 preview adds a sample about every five seconds and draws the latest one
 at **Now**. Hover over a plot for its sample values. User changes that affect
@@ -250,13 +278,47 @@ the connection. Its fixed fixture contains `cpu_percent`, `memory_used_gib`,
 `memory_total_gib`, `uptime_minutes`, and `download_mib_per_second`. The last
 field contains 13 samples taken five minutes apart, oldest first.
 
-For a remote preview, bind to `0.0.0.0` and open `http://<server-ip>:2030/`
-from the other machine.
+With the default listener, open `http://<server-ip>:2045/` from another
+machine to reach the preview.
 
-```sh
-./build/backend-release/wave-backend \
-  --site-dir build/web-release/site --host 0.0.0.0 --port 2030
-```
+### Preview core controls
+
+Server Status reports the preview core's lifecycle and active version separately
+from the Wave version in Server Information. **Start** is available while
+stopped, and **Stop** is available while running. Stop requires confirmation.
+These actions change the simulated lifecycle state in memory. Live WaterWall
+starts its executable with a core JSON input and loads the listed node configs
+during startup. Live start and stop are unimplemented in Wave.
+
+Picking a target version is local to the browser. Confirm **Update core** to
+apply a different version from the preview's fixed catalog. That changes the
+reported preview version immediately. The lifecycle state and sample charts
+continue through the change. A live version install or restart is outside this
+preview workflow.
+
+**Create config** saves an in-memory entry by name with its enabled checkbox
+clear. Names are case-sensitive, can contain up to 64 UTF-8 bytes, and must be
+unique after trimming surrounding spaces. Blank names and ASCII control
+characters are invalid. **Manage configs** can enable or disable an entry, or
+remove it after confirmation. The active entry is protected against both
+changes, including while the preview core is stopped. Enabling an entry only
+changes its preview flag. Live config-file writes, activation, and reload are
+unimplemented. Core control changes are shared by connected browsers and reset
+with the preview backend.
+
+The preview snapshot reports `server.core` with `state`, `active_version`,
+`available_versions`, `configs`, and the `lifecycle`, `versions`, and `configs`
+capability flags. Requests use the existing `request_id` and snapshot reply.
+While a reply is pending, the controls block duplicate submissions. If the
+connection closes, Server Status shows the last snapshot and offers to reconnect.
+
+| Action | Additional request fields |
+| --- | --- |
+| `start_core`, `stop_core` | None |
+| `update_core` | `version` from `available_versions` |
+| `create_core_config` | `name` |
+| `set_core_config_enabled` | Config `id` and boolean `enabled` |
+| `remove_core_config` | Config `id` |
 
 ### Backend tests
 

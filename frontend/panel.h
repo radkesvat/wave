@@ -1,7 +1,8 @@
 #pragma once
 
-#include "views/bot_view.h"
+#include "auth_session.h"
 #include "views/console_view.h"
+#include "views/core_controls_view.h"
 #include "views/entry_view.h"
 #include "views/logs_view.h"
 #include "views/settings_view.h"
@@ -13,7 +14,6 @@
 
 namespace wave {
 
-struct OverviewData;
 class PreviewSession;
 
 enum class PanelPage {
@@ -22,9 +22,7 @@ enum class PanelPage {
     settings = 102,
     console = 103,
     topology = 104,
-    bot = 105,
     about = 106,
-    overview = 107,
 };
 enum class PanelDialog {
     none,
@@ -44,13 +42,14 @@ struct PanelNavigationItem {
 
 struct PanelState {
     PanelPage page = PanelPage::users;
+    AuthSession auth;
     EntryViewState entry;
     UsersViewState users;
     LogsViewState logs;
     TopologyViewState topology;
     SettingsViewState settings;
     ConsoleViewState console;
-    BotViewState bot;
+    CoreControlsState core_controls;
     float stacked_server_status_height = 0;
     bool navigation_open = true;
     bool menu_open = false;
@@ -65,9 +64,7 @@ struct PanelState {
 const char* panel_page_name(PanelPage page);
 std::span<const PanelNavigationItem> panel_navigation();
 float panel_height(float viewport_width, float canvas_width, const PanelState& state);
-void render_panel(PanelState& state, PreviewSession& session, const OverviewData* overview,
-                  bool overview_loading, float viewport_width, int browser_focus);
-std::string describe_panel(const PanelState& state, const PreviewSession& session,
-                           const OverviewData* overview, bool overview_loading);
+void render_panel(PanelState& state, PreviewSession& session, float viewport_width, int browser_focus);
+std::string describe_panel(const PanelState& state, const PreviewSession& session);
 
 } // namespace wave

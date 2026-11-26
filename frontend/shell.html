@@ -184,7 +184,7 @@
           touch = {
             id: event.pointerId, x: event.clientX, y: event.clientY,
             lastX: event.clientX, lastY: event.clientY, panning: false,
-            map: Module['_wave_topology_map_at'](event.clientX - bounds.left, event.clientY - bounds.top),
+            topology: Module['_wave_topology_at'](event.clientX - bounds.left, event.clientY - bounds.top),
             pageScroll: usesDocumentScroll(event, bounds)
           };
         });
@@ -194,8 +194,8 @@
           if (!touch.panning) return;
           const dx = touch.lastX - event.clientX;
           const dy = touch.lastY - event.clientY;
-          if (touch.map) {
-            Module['_wave_pan_topology'](touch.map, -dx, -dy);
+          if (touch.topology) {
+            Module['_wave_pan_topology'](-dx, -dy);
           } else if (touch.pageScroll && Math.abs(event.clientY - touch.y) >= Math.abs(event.clientX - touch.x)) {
             window.scrollBy(0, dy);
           } else {
@@ -275,7 +275,7 @@
 
         function showStartupError() {
           if (canvas.hasAttribute("data-ready")) return;
-          startup.textContent = "Wave could not start. Load the page over HTTP in a browser with WebGL 2 enabled.";
+          startup.textContent = "Wave could not start. Use the configured Wave URL and a browser with WebGL 2 enabled.";
         }
 
         function showPanel() {

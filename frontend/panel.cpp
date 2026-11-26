@@ -4,8 +4,8 @@
 #include "preview_session.h"
 #include "theme.h"
 #include "views/about_view.h"
-#include "views/overview.h"
 #include "views/server_status_view.h"
+#include "views/view_helpers.h"
 
 #include <imgui.h>
 
@@ -26,9 +26,7 @@ constexpr std::array navigation{
     PanelNavigationItem{"Panel Settings", PanelPage::settings},
     PanelNavigationItem{"Console", PanelPage::console},
     PanelNavigationItem{"Nodes & Routers", PanelPage::topology},
-    PanelNavigationItem{"Telegram Bot", PanelPage::bot},
     PanelNavigationItem{"About", PanelPage::about},
-    PanelNavigationItem{"Overview", PanelPage::overview},
 };
 
 constexpr float margin = 10;
@@ -96,7 +94,7 @@ bool begin_pane(const char* name, ImVec2 size, Color surface, ImGuiWindowFlags f
     return visible;
 }
 
-float draw_header(const PanelLayout& layout, ImVec2 viewport)
+float draw_header(const PanelLayout& layout, ImVec2 viewport, bool authenticated)
 {
     auto& draw = *ImGui::GetWindowDrawList();
     draw.AddRectFilled({0, 0}, {viewport.x, layout.header_height}, packed(Color::header));
@@ -114,6 +112,15 @@ float draw_header(const PanelLayout& layout, ImVec2 viewport)
     const float menu_x = title_x + ImGui::CalcTextSize("Wave").x + 8;
     ImGui::PopFont();
 
+    if (authenticated) {
+        constexpr char label[] = "Secure panel";
+        ImGui::PushFont(nullptr, theme::secondary_font_size);
+        const float x = layout.narrow ? 12 : viewport.x - 24 - ImGui::CalcTextSize(label).x;
+        const float y = (layout.narrow ? 64 : desktop_header / 2) - ImGui::GetFontSize() / 2;
+        draw.AddText({x, std::floor(y)}, packed(Color::accent), label);
+        ImGui::PopFont();
+        return menu_x;
+    }
     constexpr char status[] = "WaterWall disconnected";
     constexpr char preview[] = "Preview";
     float status_size = theme::secondary_font_size;
@@ -250,24 +257,31 @@ void render_menus(PanelState& state, float x, int focus, PreviewSession& session
             state.requested_dialog = PanelDialog::version;
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Demo sign-in")) {
-            open_workspace_entry(state, EntryPage::sign_in, session);
-        }
-        if (ImGui::MenuItem("First-run setup")) {
-            open_workspace_entry(state, EntryPage::setup, session);
-        }
-        if (ImGui::MenuItem("Demo sign-out")) {
-            state.requested_dialog = PanelDialog::sign_out;
+        if (state.auth.enabled()) {
+            if (ImGui::MenuItem("Sign out")) {
+                state.auth.clear_error();
+                state.requested_dialog = PanelDialog::sign_out;
+            }
+        } else {
+            if (ImGui::MenuItem("Demo sign-in")) {
+                open_workspace_entry(state, EntryPage::sign_in, session);
+            }
+            if (ImGui::MenuItem("First-run setup")) {
+                open_workspace_entry(state, EntryPage::setup, session);
+            }
+            if (ImGui::MenuItem("Demo sign-out")) {
+                state.requested_dialog = PanelDialog::sign_out;
+            }
         }
         ImGui::EndPopup();
     }
 
     if (begin_header_popup(tools, tools_trigger)) {
-        if (ImGui::MenuItem("Connection diagnostics")) {
+        if (!state.auth.enabled() && ImGui::MenuItem("Connection diagnostics")) {
             state.requested_dialog = PanelDialog::diagnostics;
         }
         ImGui::MenuItem("Renderer metrics", nullptr, &state.metrics_open);
-        if (ImGui::MenuItem("Mini keyboard")) {
+        if (!state.auth.enabled() && ImGui::MenuItem("Mini keyboard")) {
             state.requested_dialog = PanelDialog::input;
         }
         ImGui::EndPopup();
@@ -329,11 +343,11 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
     ImGui::EndChild();
 }
 
-const char* dialog_title(PanelDialog dialog)
+const char* dialog_title(PanelDialog dialog, bool authenticated)
 {
     switch (dialog) {
     case PanelDialog::sign_out:
-        return "Demo sign-out";
+        return authenticated ? "Sign out of Wave" : "Demo sign-out";
     case PanelDialog::version:
         return "Wave version";
     case PanelDialog::diagnostics:
@@ -396,20 +410,21 @@ void mini_keyboard(PanelState& state)
 void render_dialogs(PanelState& state, PreviewSession& session)
 {
     if (state.requested_dialog != PanelDialog::none) {
-        ImGui::OpenPopup(dialog_title(state.requested_dialog));
+        ImGui::OpenPopup(dialog_title(state.requested_dialog, state.auth.enabled()));
         state.requested_dialog = PanelDialog::none;
     }
     for (const auto dialog :
          {PanelDialog::sign_out, PanelDialog::version, PanelDialog::diagnostics, PanelDialog::input}) {
-        const char* title = dialog_title(dialog);
+        const char* title = dialog_title(dialog, state.auth.enabled());
         if (!ImGui::IsPopupOpen(title)) {
             continue;
         }
         const bool sign_out = dialog == PanelDialog::sign_out;
         const bool diagnostics = dialog == PanelDialog::diagnostics;
         const float width = sign_out ? 350 : (diagnostics || dialog == PanelDialog::input ? 440 : 365);
-        const std::array actions = {DialogAction{sign_out ? "Cancel" : "Close"},
-                                    DialogAction{sign_out ? "Sign out" : "Refresh sample data"}};
+        const bool pending = sign_out && state.auth.pending();
+        const std::array actions = {DialogAction{sign_out ? "Cancel" : "Close", pending},
+                                    DialogAction{sign_out ? "Sign out" : "Refresh sample data", pending}};
         const auto count = sign_out || diagnostics ? 2 : 1;
         Dialog frame(title, width, std::span(actions).first(count));
         if (!frame) {
@@ -417,10 +432,18 @@ void render_dialogs(PanelState& state, PreviewSession& session)
         }
         switch (dialog) {
         case PanelDialog::sign_out:
-            ImGui::TextWrapped("Return to the demo sign-in screen?");
+            if (state.auth.enabled()) {
+                ImGui::TextWrapped(pending ? "Ending this session…"
+                                           : "End this session and return to sign-in?");
+                if (!state.auth.error().empty()) {
+                    view::wrapped(state.auth.error(), Color::error);
+                }
+            } else {
+                ImGui::TextWrapped("Return to the demo sign-in screen?");
+            }
             break;
         case PanelDialog::version:
-            ImGui::TextUnformatted("Wave 0.1.0 preview");
+            ImGui::TextUnformatted(state.auth.enabled() ? "Wave 0.1.0" : "Wave 0.1.0 preview");
             ImGui::TextWrapped("Dear ImGui %s / WebAssembly / WebGL 2", IMGUI_VERSION);
             ImGui::TextLinkOpenURL("Project releases", "https://github.com/radkesvat/wave/releases");
             break;
@@ -448,9 +471,13 @@ void render_dialogs(PanelState& state, PreviewSession& session)
         if (action == 0) {
             ImGui::CloseCurrentPopup();
         } else if (action == 1 && sign_out) {
-            session.send({{"action", "sign_out"}});
-            open_workspace_entry(state, EntryPage::sign_in, session);
-            ImGui::CloseCurrentPopup();
+            if (state.auth.enabled()) {
+                state.auth.submit(AuthSession::Action::sign_out, nlohmann::json::object());
+            } else {
+                session.send({{"action", "sign_out"}});
+                open_workspace_entry(state, EntryPage::sign_in, session);
+                ImGui::CloseCurrentPopup();
+            }
         } else if (action == 1 && diagnostics && !session.send({{"action", "refresh"}})) {
             session.start();
         }
@@ -462,10 +489,25 @@ void render_dialogs(PanelState& state, PreviewSession& session)
     }
 }
 
-void render_view(PanelState& state, PreviewSession& session, bool narrow, bool stacked_status,
-                 const OverviewData* overview, bool overview_loading)
+void render_view(PanelState& state, PreviewSession& session, bool narrow, bool stacked_status)
 {
-    if (!session.ready() && state.page != PanelPage::about && state.page != PanelPage::overview) {
+    if (state.auth.enabled()) {
+        if (state.page == PanelPage::about && !state.auth.username().empty()) {
+            render_about(true);
+        } else {
+            ImGui::TextUnformatted(panel_page_name(state.page));
+            ImGui::Separator();
+            if (state.auth.username().empty()) {
+                ImGui::TextWrapped("Checking the session…");
+            } else {
+                ImGui::TextWrapped("Signed in as %s.", state.auth.username().c_str());
+                ImGui::TextWrapped("Workspace data is unavailable in this deployment.");
+            }
+        }
+        return;
+    }
+    const bool has_server = state.page == PanelPage::server && session.data().contains("server");
+    if (!session.ready() && !has_server && state.page != PanelPage::about) {
         ImGui::TextUnformatted(panel_page_name(state.page));
         ImGui::Separator();
         if (session.status() == PreviewStatus::loading) {
@@ -480,8 +522,8 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
             render_users_dialog(state.users, session);
         } else if (state.page == PanelPage::settings) {
             render_settings_dialogs(state.settings, session);
-        } else if (state.page == PanelPage::bot) {
-            render_bot_dialogs(state.bot, session);
+        } else if (state.page == PanelPage::topology) {
+            render_topology_dialogs(state.topology, session);
         }
         return;
     }
@@ -490,7 +532,8 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
         render_users(state.users, session);
         break;
     case PanelPage::server: {
-        const float height = render_server_status(session.data()["server"], stacked_status);
+        const float height = render_server_status(session.data()["server"], state.core_controls, session,
+                                                  stacked_status);
         if (stacked_status) {
             state.stacked_server_status_height = height + 2 * theme::window_padding.y;
         }
@@ -503,16 +546,10 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
         render_console(state.console, session, narrow);
         break;
     case PanelPage::topology:
-        render_topology(state.topology, session.data()["topology"], narrow);
-        break;
-    case PanelPage::bot:
-        render_bot(state.bot, session, narrow);
+        render_topology(state.topology, session, narrow);
         break;
     case PanelPage::about:
         render_about();
-        break;
-    case PanelPage::overview:
-        render_overview(overview, overview_loading);
         break;
     }
 }
@@ -535,6 +572,9 @@ float panel_height(float viewport_width, float canvas_width, const PanelState& s
     if (state.entry.page != EntryPage::workspace) {
         return layout.header_height + welcome_height;
     }
+    if (state.auth.enabled()) {
+        return layout.workspace.y + server_min_work_height + 2 * margin;
+    }
     if (layout.stack_server_status(state, canvas_width)) {
         return layout.workspace.y + std::max(narrow_work_height, state.stacked_server_status_height) +
                narrow_logs_height + 2 * margin;
@@ -547,10 +587,9 @@ float panel_height(float viewport_width, float canvas_width, const PanelState& s
                : 666;
 }
 
-void render_panel(PanelState& state, PreviewSession& session, const OverviewData* overview,
-                  bool overview_loading, float viewport_width, int browser_focus)
+void render_panel(PanelState& state, PreviewSession& session, float viewport_width, int browser_focus)
 {
-    state.topology.visible_map = TopologyViewState::Tab::none;
+    state.topology.visible_bounds = {};
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     if (state.browser_control && state.navigation_open && state.entry.page == EntryPage::workspace) {
         const auto selected = std::ranges::find(navigation, static_cast<PanelPage>(state.browser_control),
@@ -570,8 +609,10 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
     ImGui::PopStyleVar(2);
 
     PanelLayout layout(viewport_width, state);
-    const float menu_x = draw_header(layout, viewport);
-    render_menus(state, menu_x, browser_focus, session);
+    const float menu_x = draw_header(layout, viewport, state.auth.enabled());
+    if (!state.auth.enabled() || state.entry.page == EntryPage::workspace) {
+        render_menus(state, menu_x, browser_focus, session);
+    }
     state.browser_control = 0;
     layout = PanelLayout(viewport_width, state);
     if (state.entry.page != EntryPage::workspace) {
@@ -580,54 +621,65 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
             draw_welcome(top, viewport.x);
             top += welcome_height;
         }
-        render_entry(state.entry, session, top);
+        if (state.auth.enabled()) {
+            render_authenticated_entry(state.entry, state.auth, top);
+        } else {
+            render_entry(state.entry, session, top);
+        }
     } else {
         render_navigation(state, layout, viewport);
         const float width = layout.work_width(viewport.x);
-        const bool stacked_status = layout.stack_server_status(state, viewport.x);
-        const float logs_height =
-            layout.narrow || stacked_status
-                ? narrow_logs_height
-                : std::floor(std::clamp(viewport.y * 0.25f, desktop_logs_min_height, 244.0f));
+        const bool stacked_status = !state.auth.enabled() && layout.stack_server_status(state, viewport.x);
+        float logs_height = 0;
+        if (!state.auth.enabled()) {
+            logs_height = layout.narrow || stacked_status
+                              ? narrow_logs_height
+                              : std::floor(std::clamp(viewport.y * 0.25f, desktop_logs_min_height, 244.0f));
+        }
         const float work_height =
-            stacked_status  ? std::max(narrow_work_height, state.stacked_server_status_height)
-            : layout.narrow ? narrow_work_height
-                            : std::max(1.0f, viewport.y - layout.workspace.y - logs_height - 2 * margin);
+            stacked_status ? std::max(narrow_work_height, state.stacked_server_status_height)
+            : layout.narrow && !state.auth.enabled()
+                ? narrow_work_height
+                : std::max(1.0f, viewport.y - layout.workspace.y - logs_height - 2 * margin);
         ImGui::PushID(static_cast<int>(state.page));
         ImGui::SetCursorScreenPos(layout.workspace);
         const auto view_flags =
             stacked_status ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0;
         if (begin_pane("View", {width, work_height}, Color::canvas, view_flags)) {
-            render_view(state, session, layout.narrow, stacked_status, overview, overview_loading);
+            render_view(state, session, layout.narrow, stacked_status);
         }
         ImGui::EndChild();
         ImGui::PopID();
 
-        ImGui::SetCursorScreenPos({layout.workspace.x, layout.workspace.y + work_height + margin});
-        if (begin_pane("Logs pane", {width, logs_height}, Color::pane)) {
-            render_logs(state.logs, session, layout.narrow);
+        if (!state.auth.enabled()) {
+            ImGui::SetCursorScreenPos({layout.workspace.x, layout.workspace.y + work_height + margin});
+            if (begin_pane("Logs pane", {width, logs_height}, Color::pane)) {
+                render_logs(state.logs, session, layout.narrow);
+            }
+            ImGui::EndChild();
         }
-        ImGui::EndChild();
     }
     render_dialogs(state, session);
     if (ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
-        state.topology.visible_map = TopologyViewState::Tab::none;
+        state.topology.visible_bounds = {};
     }
     ImGui::End();
 }
 
-std::string describe_panel(const PanelState& state, const PreviewSession& session,
-                           const OverviewData* overview, bool overview_loading)
+std::string describe_panel(const PanelState& state, const PreviewSession& session)
 {
     if (state.entry.page != EntryPage::workspace) {
-        return describe_entry(state.entry);
+        return describe_entry(state.entry, state.auth.enabled());
     }
-    if (state.page == PanelPage::overview) {
-        return describe_overview(overview, overview_loading);
+    if (state.auth.enabled()) {
+        const auto description = std::format("Wave {}.", panel_page_name(state.page));
+        return description + (state.auth.username().empty() ? " Checking the session."
+                                                            : " Signed in as " + state.auth.username() + '.');
     }
     const auto description =
         std::format("Wave {}. Preview. WaterWall disconnected.", panel_page_name(state.page));
-    if (!session.ready()) {
+    const bool has_server = state.page == PanelPage::server && session.data().contains("server");
+    if (!session.ready() && !has_server) {
         return description + (session.status() == PreviewStatus::loading ? " Loading sample data."
                                                                          : " Sample data unavailable.");
     }
@@ -641,12 +693,16 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
             result += " Latest log: " + message->get_ref<const std::string&>();
         }
     }
-    if (!session.feedback().empty()) {
+    if (!session.feedback().empty() &&
+        (state.page != PanelPage::server || session.feedback_action().find("_core") == std::string_view::npos)) {
         result += " ";
         result += session.feedback();
     }
     if (state.page == PanelPage::server) {
         result += ' ' + describe_server_status(session.data()["server"]);
+        result += ' ' + describe_core_controls(state.core_controls, session);
+    } else if (state.page == PanelPage::topology) {
+        result += ' ' + describe_topology(state.topology, session.data()["topology"]);
     }
     return result;
 }

@@ -11,6 +11,7 @@
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl2.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -18,6 +19,7 @@
 namespace {
 
 std::string clipboard_text;
+std::string credential_paste;
 
 // clang-format off
 EM_JS(void, set_panel_height, (int height), {
@@ -165,7 +167,9 @@ struct Application {
         platform.Platform_SetImeDataFn = [](ImGuiContext*, ImGuiViewport*, ImGuiPlatformImeData* data) {
             show_text_input(data->WantTextInput, data->InputPos.x, data->InputPos.y);
         };
-        platform.Platform_GetClipboardTextFn = [](ImGuiContext*) { return clipboard_text.c_str(); };
+        platform.Platform_GetClipboardTextFn = [](ImGuiContext*) {
+            return credential_paste.empty() ? clipboard_text.c_str() : credential_paste.c_str();
+        };
         platform.Platform_SetClipboardTextFn = [](ImGuiContext*, const char* text) {
             clipboard_text = text;
             copy_text(text);
@@ -179,7 +183,14 @@ struct Application {
         for (const auto& item : wave::panel_navigation()) {
             register_panel_page(static_cast<int>(item.page), item.label);
         }
-        session.start();
+        panel.auth.start();
+        if (!panel.auth.enabled()) {
+            session.start();
+        } else if (panel.auth.page() != wave::AuthSession::Page::panel) {
+            panel.entry.page = panel.auth.page() == wave::AuthSession::Page::setup ? wave::EntryPage::setup
+                                                                                   : wave::EntryPage::sign_in;
+            panel.entry.username[0] = '\0';
+        }
         return true;
     }
 
@@ -235,8 +246,6 @@ struct Application {
     void frame()
     {
         session.update();
-        const auto* data = session.overview();
-        const bool loading = session.status() == wave::PreviewStatus::loading;
         // The responsive layout uses the viewport width even when a document scrollbar is present.
         const int viewport_width = browser_viewport_width();
         if (!fit_canvas(viewport_width)) {
@@ -258,7 +267,9 @@ struct Application {
         ImGui::NewFrame();
         const auto previous_page = panel.page;
         const auto previous_entry = panel.entry.page;
-        wave::render_panel(panel, session, data, loading, viewport_width, browser_panel_focus());
+        wave::render_panel(panel, session, viewport_width, browser_panel_focus());
+        std::ranges::fill(credential_paste, '\0');
+        credential_paste.clear();
         if (panel.page != previous_page || panel.entry.page != previous_entry) {
             scroll_to_top();
         }
@@ -274,7 +285,7 @@ struct Application {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
 
-        auto description = wave::describe_panel(panel, session, data, loading);
+        auto description = wave::describe_panel(panel, session);
         if (description != displayed_description) {
             update_panel_description(description.c_str());
             displayed_description = std::move(description);
@@ -327,14 +338,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE bool wave_dialog_at(float x, float y)
     return wave::dialog_at(x, y);
 }
 
-extern "C" EMSCRIPTEN_KEEPALIVE int wave_topology_map_at(float x, float y)
+extern "C" EMSCRIPTEN_KEEPALIVE bool wave_topology_at(float x, float y)
 {
-    return static_cast<int>(application.panel.topology.map_at(x, y));
+    return application.panel.topology.canvas_at(x, y);
 }
 
-extern "C" EMSCRIPTEN_KEEPALIVE void wave_pan_topology(int map, float dx, float dy)
+extern "C" EMSCRIPTEN_KEEPALIVE void wave_pan_topology(float dx, float dy)
 {
-    application.panel.topology.pan(static_cast<wave::TopologyViewState::Tab>(map), dx, dy);
+    application.panel.topology.pan(dx, dy);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void wave_input_text(const char* text, bool paste)
@@ -342,7 +353,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wave_input_text(const char* text, bool past
     auto& io = ImGui::GetIO();
     if (paste) {
         // Use the text widget's paste path so it replaces the selection even while Ctrl is held.
-        clipboard_text = text;
+        if (application.panel.auth.enabled() && application.panel.entry.page != wave::EntryPage::workspace) {
+            credential_paste = text;
+        } else {
+            clipboard_text = text;
+        }
         io.AddKeyEvent(ImGuiMod_Ctrl, true);
         io.AddKeyEvent(ImGuiKey_V, true);
         io.AddKeyEvent(ImGuiKey_V, false);

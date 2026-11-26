@@ -1,14 +1,14 @@
 const assert = require('node:assert/strict');
 const { execFile, spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { mkdir, mkdtemp, rm, stat, writeFile } = require('node:fs/promises');
+const { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
-const { join } = require('node:path');
+const { basename, dirname, join } = require('node:path');
 const { createInterface } = require('node:readline');
 const { after, before, test } = require('node:test');
 const { promisify } = require('node:util');
 
-const backend = process.env.WAVE_BACKEND;
+const sourceBackend = process.env.WAVE_BACKEND;
 const run = promisify(execFile);
 const timeout = 5000;
 const siteDir = 'fixture site';
@@ -18,19 +18,26 @@ const assets = {
     'index.wasm': Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
 };
 let cwd;
+let backend;
+let database;
 let server;
 let closed;
 let url;
 
 before(async () => {
-    assert.ok(backend, 'Run this test through a Wave backend CTest preset.');
+    assert.ok(sourceBackend, 'Run this test through a Wave backend CTest preset.');
     cwd = await mkdtemp(join(tmpdir(), 'wave-backend-'));
+    backend = join(cwd, 'bin', basename(sourceBackend));
+    await mkdir(dirname(backend));
+    await copyFile(sourceBackend, backend);
+    database = join(dirname(backend), 'wave-db.json');
+    await writeFile(database, JSON.stringify({ listen: { host: '127.0.0.1', port: 0 } }));
     await mkdir(join(cwd, siteDir));
     for (const [name, contents] of Object.entries(assets)) {
         await writeFile(join(cwd, siteDir, name), contents);
     }
 
-    server = spawn(backend, ['--site-dir', siteDir, '--port', '0'], {
+    server = spawn(backend, ['--site-dir', siteDir], {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -64,6 +71,34 @@ after(async () => {
     }
 });
 
+test('startup persists the default listener in new and existing databases beside the executable', async () => {
+    const freshBackend = join(cwd, 'fresh', basename(backend));
+    const freshDatabase = join(dirname(freshBackend), 'wave-db.json');
+    await mkdir(dirname(freshBackend));
+    await copyFile(sourceBackend, freshBackend);
+    // Stop these starts before binding so the smoke suite only opens loopback sockets.
+    const start = () => expectStartupFailure([], /Cannot access site directory.*web-release/, freshBackend);
+    const defaults = { host: '0.0.0.0', port: 2045 };
+    await start();
+    assert.deepEqual(JSON.parse(await readFile(freshDatabase, 'utf8')), { listen: defaults });
+    const existing = { tls: { enabled: false }, panel_name: 'Test settings' };
+    await writeFile(freshDatabase, JSON.stringify(existing));
+    await start();
+    assert.deepEqual(JSON.parse(await readFile(freshDatabase, 'utf8')), { ...existing, listen: defaults });
+
+    for (const partial of [{ host: '127.0.0.1' }, { port: 8443 }]) {
+        await writeFile(freshDatabase, JSON.stringify({ ...existing, listen: partial }));
+        await start();
+        assert.deepEqual(JSON.parse(await readFile(freshDatabase, 'utf8')), {
+            ...existing, listen: { ...defaults, ...partial },
+        });
+    }
+    await assert.rejects(stat(join(cwd, 'wave-db.json')), { code: 'ENOENT' });
+    const response = await fetch(new URL('/wave-db.json', url), { signal: AbortSignal.timeout(timeout) });
+    assert.equal(response.status, 404);
+    await response.arrayBuffer();
+});
+
 test('serves the site assets and returns 404 for a missing file', async () => {
     for (const path of ['/', '/index.html', '/index.js', '/index.wasm']) {
         const response = await fetch(new URL(path, url), { signal: AbortSignal.timeout(timeout) });
@@ -77,6 +112,23 @@ test('serves the site assets and returns 404 for a missing file', async () => {
     const missing = await fetch(new URL('/missing.js', url), { signal: AbortSignal.timeout(timeout) });
     assert.equal(missing.status, 404);
     await missing.arrayBuffer();
+});
+
+test('the HTTP demo serves no authenticated API or session cookie', async () => {
+    for (const action of ['setup', 'sign-in', 'sign-out']) {
+        const response = await fetch(new URL(`/api/auth/${action}`, url), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Wave-CSRF': '1', Origin: url.origin },
+            body: JSON.stringify({ username: 'fixture-user', password: 'fake demo test passphrase' }),
+            signal: AbortSignal.timeout(timeout),
+        });
+        assert.equal(response.status, 404);
+        assert.equal(response.headers.get('set-cookie'), null);
+        await response.arrayBuffer();
+    }
+    const session = await fetch(new URL('/api/session', url), { signal: AbortSignal.timeout(timeout) });
+    assert.equal(session.status, 404);
+    await session.arrayBuffer();
 });
 
 test('echoes WebSocket text and closes the connection cleanly', async t => {
@@ -213,6 +265,135 @@ test('publishes populated preview data and shares user changes and logs across b
     assert.equal(deleted.data.server.users_total, initial.users.length);
 });
 
+test('validates and shares sample node changes and removes references to deleted nodes', async t => {
+    const { socket, initial } = await connectPreview(t);
+    const observer = await connectPreview(t);
+    const topology = initial.topology;
+    for (const name of [undefined, 4, '  ', 'line\nbreak', 'bad\0name', 'x'.repeat(65), ' Local cache ']) {
+        const rejected = await requestPreview(socket, 'add_node', { name });
+        assert.equal(rejected.ok, false);
+        assert.deepEqual(rejected.data.topology, topology);
+    }
+
+    const name = 'Sample test relay';
+    const observedAdd = nextPreviewSnapshot(observer.socket, frame =>
+        frame.data.topology.nodes.some(node => node.label === name));
+    const added = await requestPreview(socket, 'add_node', { name: ` ${name} ` });
+    assert.equal(added.ok, true, added.feedback);
+    const node = added.data.topology.nodes.at(-1);
+    assert.equal(node.label, name);
+    assert.equal(node.type, 'Node');
+    assert.equal(typeof node.id, 'string');
+    assert.ok(!topology.nodes.some(item => item.id === node.id || (item.x === node.x && item.y === node.y)));
+    assert.ok(node.x >= 0 && node.x <= 1 && node.y >= 0 && node.y <= 1);
+    assert.deepEqual(added.data.topology, { ...topology, nodes: [...topology.nodes, node] });
+    assert.deepEqual((await observedAdd).data.topology, added.data.topology);
+
+    const id = 'cache';
+    assert.ok(topology.links.some(link => link.from === id || link.to === id));
+    assert.ok(topology.routes.some(route => route.path.includes(id)));
+    const observedDelete = nextPreviewSnapshot(observer.socket, frame =>
+        !frame.data.topology.nodes.some(item => item.id === id));
+    const deleted = await requestPreview(socket, 'delete_node', { id });
+    assert.equal(deleted.ok, true, deleted.feedback);
+    const remaining = {
+        nodes: added.data.topology.nodes.filter(item => item.id !== id),
+        links: topology.links.filter(link => link.from !== id && link.to !== id),
+        routes: topology.routes.filter(route => !route.path.includes(id)),
+    };
+    assert.deepEqual(deleted.data.topology, remaining);
+    assert.deepEqual((await observedDelete).data.topology, remaining);
+    assert.match(deleted.data.logs.at(-1).message, /Deleted sample node Local cache/);
+    for (const invalidId of [id, 1, undefined]) {
+        const rejected = await requestPreview(observer.socket, 'delete_node', { id: invalidId });
+        assert.equal(rejected.ok, false);
+        assert.deepEqual(rejected.data.topology, remaining);
+    }
+
+    assert.equal((await requestPreview(socket, 'delete_node', { id: node.id })).ok, true);
+    const replacement = await requestPreview(socket, 'add_node', { name });
+    assert.equal(replacement.ok, true, replacement.feedback);
+    assert.notEqual(replacement.data.topology.nodes.at(-1).id, node.id);
+});
+
+test('simulates core lifecycle and version changes in preview snapshots', async t => {
+    const { socket, initial } = await connectPreview(t);
+    const observer = await connectPreview(t);
+    const core = initial.server.core;
+    assert.equal(core.state, 'running');
+    assert.ok(core.available_versions.includes(core.active_version));
+    assert.deepEqual(core.capabilities, { lifecycle: true, versions: true, configs: true });
+    const target = core.available_versions.find(version => version !== core.active_version);
+    assert.ok(target);
+
+    const change = async (action, fields, ok, state, version = core.active_version) => {
+        const reply = await requestPreview(socket, action, fields);
+        assert.equal(reply.ok, ok, reply.feedback);
+        assert.deepEqual(reply.data.server.core, { ...core, state, active_version: version });
+        assert.equal(reply.data.server.version, initial.server.version, 'Wave reports its own version separately.');
+        assert.equal(reply.data.server.platform, initial.server.platform);
+        return reply;
+    };
+    await change('start_core', {}, false, 'running');
+    await change('update_core', { version: 'unknown' }, false, 'running');
+    const stopped = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'stopped');
+    const stop = await change('stop_core', {}, true, 'stopped');
+    assert.equal((await stopped).data.server.core.state, 'stopped');
+    for (const series of ['cpu', 'memory', 'upload', 'download']) {
+        assert.equal(stop.data.server[`${series}_history`].length, 19, 'Preview charts still report samples.');
+    }
+    for (const action of ['stop_core', 'pause_core', 'resume_core']) {
+        await change(action, {}, false, 'stopped');
+    }
+    await change('update_core', { version: target }, true, 'stopped', target);
+    await change('update_core', { version: target }, false, 'stopped', target);
+    await change('start_core', {}, true, 'running', target);
+    await change('start_core', {}, false, 'running', target);
+});
+
+test('validates in-memory config changes and protects the active config', async t => {
+    const { socket, initial } = await connectPreview(t);
+    const observer = await connectPreview(t);
+    const core = initial.server.core;
+    const active = core.configs.find(config => config.active);
+    assert.ok(active?.enabled);
+    const files = await readdir(cwd);
+
+    const rejected = async (action, fields, snapshot = core) => {
+        const reply = await requestPreview(socket, action, fields);
+        assert.equal(reply.ok, false);
+        assert.deepEqual(reply.data.server.core, snapshot);
+    };
+    await rejected('set_core_config_enabled', { id: active.id, enabled: false });
+    await rejected('remove_core_config', { id: active.id });
+    for (const name of [null, '   ', 'invalid\u0000name', 'invalid\u007fname', 'é'.repeat(33), active.name]) {
+        await rejected('create_core_config', { name });
+    }
+
+    const name = 'Lab preview';
+    const broadcast = nextPreviewSnapshot(observer.socket, frame =>
+        frame.data.server.core.configs.some(config => config.name === name));
+    const created = await requestPreview(socket, 'create_core_config', { name: ` ${name} ` });
+    assert.equal(created.ok, true, created.feedback);
+    const config = created.data.server.core.configs.at(-1);
+    assert.ok(Number.isSafeInteger(config.id) && core.configs.every(item => item.id !== config.id));
+    assert.deepEqual(config, { id: config.id, name, enabled: false, active: false });
+    assert.deepEqual((await broadcast).data.server.core, created.data.server.core);
+    await rejected('create_core_config', { name }, created.data.server.core);
+    await rejected('set_core_config_enabled', { id: config.id, enabled: 'true' }, created.data.server.core);
+
+    for (const enabled of [true, false, true]) {
+        const reply = await requestPreview(socket, 'set_core_config_enabled', { id: config.id, enabled });
+        assert.equal(reply.ok, true, reply.feedback);
+        assert.deepEqual(reply.data.server.core, { ...core, configs: [...core.configs, { ...config, enabled }] });
+    }
+    const removed = await requestPreview(socket, 'remove_core_config', { id: config.id });
+    assert.equal(removed.ok, true, removed.feedback);
+    assert.deepEqual(removed.data.server.core, core);
+    await rejected('remove_core_config', { id: config.id });
+    assert.deepEqual(await readdir(cwd), files, 'Preview config actions leave the backend working directory intact.');
+});
+
 test('validates preview setup and updates only the panel name and demo credentials', async t => {
     const { socket } = await connectPreview(t);
     const saved = await requestPreview(socket, 'apply_settings', { settings: {
@@ -330,8 +511,8 @@ test('merges independent bot settings and overrides updates from stale clients i
     }
 });
 
-async function expectStartupFailure(args, diagnostic) {
-    await assert.rejects(run(backend, args, { cwd, timeout }), error => {
+async function expectStartupFailure(args, diagnostic, executable = backend) {
+    await assert.rejects(run(executable, args, { cwd, timeout }), error => {
         assert.ok(Number.isInteger(error.code) && error.code !== 0, error);
         assert.match(error.stderr, diagnostic);
         assert.equal(error.stdout, '');
@@ -341,26 +522,44 @@ async function expectStartupFailure(args, diagnostic) {
 
 test('rejects invalid command-line options', async () => {
     await expectStartupFailure(['--unknown'], /Unknown option.*--unknown/);
-    await expectStartupFailure(['--site-dir', '--port', '0'], /Missing value.*--site-dir/);
-    await expectStartupFailure(['--port', '2030extra'], /Invalid port.*2030extra/);
-    await expectStartupFailure(['--port', '65536'], /Invalid port.*65536/);
+    await expectStartupFailure(['--site-dir', '--check-tls'], /Missing value.*--site-dir/);
+    await expectStartupFailure(['--host', '127.0.0.1'], /Unknown option.*--host/);
+    await expectStartupFailure(['--port', '2045'], /Unknown option.*--port/);
+});
+
+test('rejects invalid database listener values before binding', async t => {
+    const original = await readFile(database);
+    t.after(() => writeFile(database, original));
+    for (const port of ['2045', -1, 65536, 2 ** 40, 2045.5]) {
+        await writeFile(database, JSON.stringify({ listen: { port } }));
+        await expectStartupFailure(['--site-dir', siteDir], /listen\.port.*integer from 0 to 65535/);
+    }
+    for (const host of ['', 'host name', '127.0.0.1\0', null]) {
+        await writeFile(database, JSON.stringify({ listen: { host } }));
+        await expectStartupFailure(['--site-dir', siteDir], /listen\.host.*nonempty address/);
+    }
+    await writeFile(database, JSON.stringify({ listen: '127.0.0.1:2045' }));
+    await expectStartupFailure(['--site-dir', siteDir], /listen in wave-db.json must be a JSON object/);
 });
 
 test('fails before binding when the site or an asset is missing', async () => {
-    await expectStartupFailure(['--port', '0'], /Cannot access site directory.*web-release/);
+    await expectStartupFailure([], /Cannot access site directory.*web-release/);
     const incomplete = join(cwd, 'incomplete');
     await mkdir(incomplete);
     await writeFile(join(incomplete, 'index.html'), assets['index.html']);
     await writeFile(join(incomplete, 'index.js'), assets['index.js']);
     await expectStartupFailure(
-        ['--site-dir', incomplete, '--port', '0'],
+        ['--site-dir', incomplete],
         /Missing required site asset.*index\.wasm/,
     );
 });
 
-test('fails to bind to the port of an already running backend', async () => {
+test('fails to bind to the configured port of an already running backend', async t => {
+    const original = await readFile(database);
+    t.after(() => writeFile(database, original));
+    await writeFile(database, JSON.stringify({ listen: { host: url.hostname, port: Number(url.port) } }));
     await expectStartupFailure(
-        ['--site-dir', siteDir, '--host', url.hostname, '--port', url.port],
+        ['--site-dir', siteDir],
         new RegExp(`Could not bind to 127\\.0\\.0\\.1:${url.port}`),
     );
 });

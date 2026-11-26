@@ -1,5 +1,7 @@
 #include "preview.h"
 
+#include "core_config_name.h"
+
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
@@ -26,6 +28,9 @@ using namespace std::chrono_literals;
 constexpr auto update_interval = 5s;
 constexpr std::size_t max_request_bytes = 8192;
 constexpr std::size_t max_users = 128;
+constexpr std::size_t max_topology_nodes = 64;
+constexpr std::size_t max_node_name_bytes = 64;
+constexpr std::size_t max_core_configs = 64;
 constexpr std::size_t max_logs = 100;
 constexpr std::size_t max_console_lines = 80;
 constexpr std::size_t max_console_history = 32;
@@ -82,6 +87,17 @@ Json make_users()
     return users;
 }
 
+Json make_core()
+{
+    return {{"state", "running"}, {"active_version", "1.0.0-preview"},
+            {"available_versions", {"1.0.0-preview", "1.1.0-preview", "1.2.0-preview"}},
+            {"capabilities", {{"lifecycle", true}, {"versions", true}, {"configs", true}}},
+            {"configs", Json::array({
+                {{"id", 1}, {"name", "Default"}, {"enabled", true}, {"active", true}},
+                {{"id", 2}, {"name", "Standby"}, {"enabled", true}, {"active", false}},
+            })}};
+}
+
 Json make_server()
 {
     const Json cpu = {21, 24, 23, 30, 28, 37, 31, 44, 42, 35, 33, 46, 37, 30, 34, 39, 35, 32, 28};
@@ -96,7 +112,8 @@ Json make_server()
             {"memory_total_gib", 8.0}, {"memory_used_gib", memory.back()}, {"cpu_percent", cpu.back()},
             {"upload_rate", upload.back()}, {"download_rate", download.back()},
             {"upload_total", 845.2}, {"download_total", 3342.7}, {"cpu_history", cpu},
-            {"memory_history", memory}, {"upload_history", upload}, {"download_history", download}};
+            {"memory_history", memory}, {"upload_history", upload}, {"download_history", download},
+            {"core", make_core()}};
 }
 
 Json make_settings()
@@ -195,6 +212,34 @@ bool text_value(const Json& value, std::size_t limit, bool required = false)
     const auto* text = value.get_ptr<const std::string*>();
     return text && text->size() <= limit && text->find('\0') == std::string::npos &&
            (!required || text->find_first_not_of(" \t\r\n") != std::string::npos);
+}
+
+std::pair<double, double> sample_node_position(const Json& nodes)
+{
+    if (nodes.empty()) {
+        return {0.5, 0.5};
+    }
+
+    // Place the new node in the grid slot farthest from its nearest neighbor.
+    std::pair<double, double> position;
+    double best_distance = -1;
+    for (int row = 1; row <= 9; ++row) {
+        for (int column = 1; column <= 9; ++column) {
+            const double x = column / 10.0;
+            const double y = row / 10.0;
+            double distance = 2;
+            for (const auto& node : nodes) {
+                const double dx = x - node["x"].get<double>();
+                const double dy = y - node["y"].get<double>();
+                distance = std::min(distance, dx * dx + dy * dy);
+            }
+            if (distance > best_distance) {
+                best_distance = distance;
+                position = {x, y};
+            }
+        }
+    }
+    return position;
 }
 
 bool integer_value(const Json& value, int minimum, int maximum)
@@ -576,6 +621,59 @@ private:
         return complete(std::move(message));
     }
 
+    Reply add_node(const Json& input)
+    {
+        const auto value = input.find("name");
+        if (value == input.end() || !text_value(*value, max_node_name_bytes, true)) {
+            return {false, "Enter a sample node name of up to 64 bytes."};
+        }
+        auto name = value->get<std::string>();
+        if (std::ranges::any_of(name, [](unsigned char c) { return c < ' ' || c == 0x7f; })) {
+            return {false, "Enter a sample node name without control characters."};
+        }
+        const auto start = name.find_first_not_of(' ');
+        name = name.substr(start, name.find_last_not_of(' ') - start + 1);
+
+        auto& nodes = data_["topology"]["nodes"];
+        if (nodes.size() >= max_topology_nodes || next_node_id_ == std::numeric_limits<std::uint64_t>::max()) {
+            return {false, "The sample node list is full."};
+        }
+        if (std::ranges::any_of(nodes, [&](const Json& node) { return node["label"] == name; })) {
+            return {false, "A sample node already uses that name."};
+        }
+        const auto [x, y] = sample_node_position(nodes);
+        const auto id = "sample-node-" + std::to_string(next_node_id_);
+        nodes.push_back({{"id", id}, {"label", name}, {"type", "Node"}, {"address", ""},
+                         {"description", ""}, {"x", x}, {"y", y}, {"map", "both"}});
+        ++next_node_id_;
+        return complete("Added sample node " + name + '.');
+    }
+
+    Reply delete_node(const Json& input)
+    {
+        const auto id = input.find("id");
+        if (id == input.end() || !text_value(*id, 64, true)) {
+            return {false, "Select a sample node to delete."};
+        }
+        auto& topology = data_["topology"];
+        auto& nodes = topology["nodes"];
+        const auto node = std::ranges::find_if(nodes, [&](const Json& item) { return item["id"] == *id; });
+        if (node == nodes.end()) {
+            return {false, "That sample node is unavailable."};
+        }
+
+        const auto name = (*node)["label"].get<std::string>();
+        std::erase_if(topology["links"].get_ref<Json::array_t&>(), [&](const Json& link) {
+            return link["from"] == *id || link["to"] == *id;
+        });
+        std::erase_if(topology["routes"].get_ref<Json::array_t&>(), [&](const Json& route) {
+            const auto& path = route["path"];
+            return std::ranges::find(path, *id) != path.end();
+        });
+        nodes.erase(node);
+        return complete("Deleted sample node " + name + '.');
+    }
+
     Reply user_bot_action(const Json& input)
     {
         const auto kind = input.find("kind");
@@ -716,10 +814,109 @@ private:
         return complete("Completed first-run preview setup.");
     }
 
+    Reply change_core_state(std::string_view action)
+    {
+        auto& state = data_["server"]["core"]["state"];
+        if (action == "start_core" && state == "stopped") {
+            state = "running";
+            return complete("Started the preview core.");
+        }
+        if (action == "stop_core" && state == "running") {
+            state = "stopped";
+            return complete("Stopped the preview core.");
+        }
+        return {false, "That action is unavailable in the current preview core state."};
+    }
+
+    Reply update_core(const Json& input)
+    {
+        auto& core = data_["server"]["core"];
+        const auto version = input.find("version");
+        const auto& available = core["available_versions"];
+        if (version == input.end() || std::ranges::find(available, *version) == available.end()) {
+            return {false, "Choose an available preview core version."};
+        }
+        if (*version == core["active_version"]) {
+            return {false, "That preview core version is already active."};
+        }
+        core["active_version"] = *version;
+        return complete("Updated the preview core to " + version->get<std::string>() + '.');
+    }
+
+    Reply create_core_config(const Json& input)
+    {
+        const auto value = input.find("name");
+        const auto* text = value == input.end() ? nullptr : value->get_ptr<const std::string*>();
+        const auto name = text ? core_config_name(*text) : std::string_view{};
+        if (name.empty()) {
+            return {false, "Enter a config name of up to 64 bytes without control characters."};
+        }
+
+        auto& configs = data_["server"]["core"]["configs"];
+        if (configs.size() >= max_core_configs || next_config_id_ == std::numeric_limits<int>::max()) {
+            return {false, "The preview config list is full."};
+        }
+        if (std::ranges::any_of(configs, [&](const Json& config) { return config["name"] == name; })) {
+            return {false, "A preview config already uses that name."};
+        }
+        configs.push_back({{"id", next_config_id_}, {"name", name}, {"enabled", false}, {"active", false}});
+        ++next_config_id_;
+        return complete("Created preview config " + std::string(name) + " (disabled).");
+    }
+
+    Reply change_core_config(std::string_view action, const Json& input)
+    {
+        const auto id = input.find("id");
+        if (id == input.end() || !integer_value(*id, 1, std::numeric_limits<int>::max())) {
+            return {false, "Choose a preview config."};
+        }
+        auto& configs = data_["server"]["core"]["configs"];
+        const auto config = std::ranges::find_if(configs, [&](const Json& item) { return item["id"] == *id; });
+        if (config == configs.end()) {
+            return {false, "That preview config is unavailable."};
+        }
+        if ((*config)["active"] == true) {
+            return {false, "The active preview config is protected."};
+        }
+
+        const auto name = (*config)["name"].get<std::string>();
+        if (action == "remove_core_config") {
+            configs.erase(config);
+            return complete("Removed preview config " + name + '.');
+        }
+        const auto enabled = input.find("enabled");
+        if (enabled == input.end() || !enabled->is_boolean()) {
+            return {false, "Choose whether to enable the preview config."};
+        }
+        if ((*config)["enabled"] == *enabled) {
+            return {true, "The preview config already has that setting."};
+        }
+        (*config)["enabled"] = *enabled;
+        return complete(std::string(*enabled == true ? "Enabled" : "Disabled") + " preview config " + name + '.');
+    }
+
     Reply dispatch(std::string_view action, const Json& input)
     {
         if (action == "refresh") {
             return {true, "Sample workspace refreshed."};
+        }
+        if (action == "start_core" || action == "stop_core") {
+            return change_core_state(action);
+        }
+        if (action == "update_core") {
+            return update_core(input);
+        }
+        if (action == "create_core_config") {
+            return create_core_config(input);
+        }
+        if (action == "set_core_config_enabled" || action == "remove_core_config") {
+            return change_core_config(action, input);
+        }
+        if (action == "add_node") {
+            return add_node(input);
+        }
+        if (action == "delete_node") {
+            return delete_node(input);
         }
         if (action == "create_user") {
             return create_user(input);
@@ -797,6 +994,8 @@ private:
     std::mutex mutex_;
     Json data_ = make_data();
     int next_user_id_ = static_cast<int>(data_["users"].size()) + 1;
+    std::uint64_t next_node_id_ = 1;
+    int next_config_id_ = 3;
     std::uint64_t revision_ = 1;
     std::uint64_t tick_count_ = 0;
     unsigned log_sequence_ = 0;

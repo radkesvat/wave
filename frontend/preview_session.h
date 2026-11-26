@@ -1,6 +1,5 @@
 #pragma once
 
-#include "overview_data.h"
 #include "users_data.h"
 
 #include <emscripten/websocket.h>
@@ -45,7 +44,7 @@ struct PreviewReply {
 
 class PreviewSession {
   public:
-    void start();
+    void start(bool keep_snapshot = false);
     void stop();
     void update();
     bool send(nlohmann::json request);
@@ -64,10 +63,6 @@ class PreviewSession {
     const nlohmann::json& data() const
     {
         return data_;
-    }
-    const OverviewData* overview() const
-    {
-        return ready() && overview_ ? &*overview_ : nullptr;
     }
     const UsersData& users() const
     {
@@ -103,7 +98,6 @@ class PreviewSession {
     double deadline_ = 0;
     PreviewStatus status_ = PreviewStatus::loading;
     nlohmann::json data_ = nlohmann::json::object();
-    std::optional<OverviewData> overview_;
     UsersData users_;
     std::string feedback_;
     std::string feedback_action_;

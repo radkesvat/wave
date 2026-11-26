@@ -71,7 +71,6 @@ void open_dialog(UsersViewState& state, PreviewSession& session, UserDialog dial
     state.dialog = dialog;
     state.open_dialog = true;
     state.draft = {};
-    state.message = {};
     state.configuration.clear();
     state.qr.reset();
     state.local_feedback.clear();
@@ -142,20 +141,6 @@ void row_options(UsersViewState& state, PreviewSession& session, const UserRecor
     }
     if (ImGui::MenuItem("Reset traffic")) {
         open_user_dialog(state, session, UserDialog::reset_traffic, user);
-    }
-    if (ImGui::BeginMenu("Bot actions")) {
-        if (ImGui::MenuItem("Copy demo invite")) {
-            ImGui::SetClipboardText(std::format("wave-preview://workspace/bot/invite/{}", user.id).c_str());
-            state.local_feedback = "Demo invite copied.";
-            state.local_feedback_color = Color::success;
-        }
-        if (ImGui::MenuItem("Send configuration")) {
-            open_user_dialog(state, session, UserDialog::configuration, user);
-        }
-        if (ImGui::MenuItem("Send message")) {
-            open_user_dialog(state, session, UserDialog::message, user);
-        }
-        ImGui::EndMenu();
     }
     ImGui::Separator();
     if (ImGui::MenuItem("Delete")) {
@@ -736,14 +721,6 @@ DialogSpec dialog_spec(UserDialog dialog)
         return {"Reset traffic", 350, "Cancel", "Reset totals"};
     case UserDialog::remove:
         return {"Delete user", 340, "Cancel", "Delete user"};
-    case UserDialog::broadcast:
-        return {"Broadcast preview message", 480, "Cancel", "Simulate send"};
-    case UserDialog::bulk_configuration:
-        return {"Send configurations to all", 420, "Cancel", "Simulate send"};
-    case UserDialog::configuration:
-        return {"Send preview configuration", 420, "Cancel", "Simulate send"};
-    case UserDialog::message:
-        return {"Send preview message", 460, "Cancel", "Simulate send"};
     }
     return {"User action", 350, "Cancel", "Confirm"};
 }
@@ -768,23 +745,6 @@ void user_dialog_body(UsersViewState& state, UserDialog dialog, bool opening)
     case UserDialog::reset_traffic:
         ImGui::TextWrapped("Reset upload and download totals for %s?", state.draft.name.data());
         break;
-    case UserDialog::broadcast:
-    case UserDialog::message:
-        if (dialog == UserDialog::broadcast) {
-            ImGui::TextUnformatted("Preview audience: all users");
-        } else {
-            ImGui::TextWrapped("Preview recipient: %s", state.draft.name.data());
-        }
-        ImGui::InputTextMultiline("##preview-message", state.message.data(), state.message.size(), {-1, 105});
-        break;
-    case UserDialog::bulk_configuration:
-    case UserDialog::configuration:
-        if (dialog == UserDialog::bulk_configuration) {
-            ImGui::TextWrapped("Simulate sending the latest configuration to all users.");
-        } else {
-            ImGui::TextWrapped("Simulate sending a configuration to %s.", state.draft.name.data());
-        }
-        break;
     }
 }
 
@@ -808,30 +768,6 @@ void apply_user_dialog(UsersViewState& state, PreviewSession& session, UserDialo
         submit(state, session, dialog == UserDialog::remove ? "delete_user" : "reset_user_traffic",
                {{"id", state.draft.id}});
         break;
-    case UserDialog::broadcast:
-    case UserDialog::message: {
-        if (std::string_view(state.message.data()).find_first_not_of(" \r\n\t") == std::string_view::npos) {
-            state.local_feedback = "Enter a message to send.";
-            state.local_feedback_color = Color::error;
-            break;
-        }
-        Json request = {{"kind", dialog == UserDialog::broadcast ? "broadcast" : "message"},
-                        {"message", state.message.data()}};
-        if (dialog == UserDialog::message) {
-            request["id"] = state.draft.id;
-        }
-        submit(state, session, "user_bot_action", std::move(request));
-        break;
-    }
-    case UserDialog::bulk_configuration:
-    case UserDialog::configuration: {
-        Json request = {{"kind", "configuration"}};
-        if (dialog == UserDialog::configuration) {
-            request["id"] = state.draft.id;
-        }
-        submit(state, session, "user_bot_action", std::move(request));
-        break;
-    }
     }
 }
 
@@ -916,29 +852,12 @@ void render_users(UsersViewState& state, PreviewSession& session)
     if (theme::button(live_label, {live_width, 0})) {
         send(state, session, {{"action", "set_users_live"}, {"live", !users.live}});
     }
-    const auto& style = ImGui::GetStyle();
-    if (width >=
-        button_width("Create user") + live_width + button_width("Bot actions") + 2 * style.ItemSpacing.x) {
-        ImGui::SameLine();
-    }
-    if (theme::button("Bot actions")) {
-        ImGui::OpenPopup("User bot actions");
-    }
-    if (ImGui::BeginPopup("User bot actions")) {
-        if (ImGui::MenuItem("Send configurations to all")) {
-            open_dialog(state, session, UserDialog::bulk_configuration);
-        }
-        if (ImGui::MenuItem("Broadcast message")) {
-            open_dialog(state, session, UserDialog::broadcast);
-        }
-        ImGui::EndPopup();
-    }
     ImGui::EndDisabled();
 
     if (!compact) {
         ImGui::SameLine();
     }
-    const float search_label_width = ImGui::CalcTextSize("Search").x + style.ItemInnerSpacing.x;
+    const float search_label_width = ImGui::CalcTextSize("Search").x + ImGui::GetStyle().ItemInnerSpacing.x;
     ImGui::SetNextItemWidth(compact ? -search_label_width : ImGui::GetFontSize() * 11);
     if (state.search.DrawWithHint("Search##users", "Name")) {
         state.compact_page = 0;

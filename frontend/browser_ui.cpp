@@ -19,6 +19,18 @@ EM_JS(void, read_visible_canvas, (float* left, float* top, float* width, float* 
         Math.max(y, canvas.top));
 });
 
+EM_JS(void, reveal_canvas_item_in_document, (float top, float bottom), {
+    const canvas = Module['canvas'].getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const viewportTop = viewport?.offsetTop ?? 0;
+    const viewportHeight = viewport?.height ?? innerHeight;
+    if (canvas.height <= viewportHeight) return;
+    const itemTop = canvas.top + top - viewportTop;
+    const itemBottom = canvas.top + bottom - viewportTop;
+    if (itemTop < 0) window.scrollBy(0, itemTop - 8);
+    else if (itemBottom > viewportHeight) window.scrollBy(0, itemBottom - viewportHeight + 8);
+});
+
 EM_JS(void, download_file, (const char* filename, const char* contents, int length, const char* media_type), {
     const file = new Blob([UTF8ToString(contents, length)], { type: UTF8ToString(media_type) });
     const url = URL.createObjectURL(file);
@@ -37,6 +49,11 @@ CanvasViewport visible_canvas()
     CanvasViewport viewport{};
     read_visible_canvas(&viewport.left, &viewport.top, &viewport.width, &viewport.height);
     return viewport;
+}
+
+void reveal_canvas_item(float top, float bottom)
+{
+    reveal_canvas_item_in_document(top, bottom);
 }
 
 void download_preview_file(const char* filename, std::string_view contents, const char* media_type)

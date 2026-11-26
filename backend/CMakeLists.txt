@@ -1,6 +1,12 @@
 include(FetchContent)
-# Keep the preview build independent of system TLS and compression libraries.
+set(wave_auth_default OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(wave_auth_default ON)
+endif()
+option(WAVE_ENABLE_AUTH "Build the HTTPS authenticated mode on Linux" ${wave_auth_default})
+# Demo-only builds need neither system TLS nor compression libraries.
 set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF)
+set(HTTPLIB_REQUIRE_OPENSSL ${WAVE_ENABLE_AUTH})
 set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF)
 set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF)
 set(HTTPLIB_USE_ZSTD_IF_AVAILABLE OFF)
@@ -11,7 +17,7 @@ FetchContent_Declare(httplib
 )
 FetchContent_MakeAvailable(httplib)
 
-add_executable(wave-backend main.cpp preview.cpp)
+add_executable(wave-backend main.cpp panel_settings.cpp preview.cpp)
 set_target_properties(wave-backend PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
@@ -20,3 +26,11 @@ set_target_properties(wave-backend PROPERTIES
 )
 target_include_directories(wave-backend PRIVATE "${PROJECT_SOURCE_DIR}/common")
 target_link_libraries(wave-backend PRIVATE httplib::httplib nlohmann_json::nlohmann_json)
+
+if(WAVE_ENABLE_AUTH)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "Wave authenticated mode requires Linux private state storage")
+    endif()
+    target_sources(wave-backend PRIVATE auth.cpp auth_store.cpp tls.cpp)
+    target_compile_definitions(wave-backend PRIVATE WAVE_ENABLE_AUTH)
+endif()

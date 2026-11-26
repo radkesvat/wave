@@ -1,34 +1,19 @@
 #pragma once
 
-#include <nlohmann/json_fwd.hpp>
+#include "preview_session.h"
 
+#include <array>
+#include <cstdint>
+#include <optional>
 #include <string>
 
 namespace wave {
 
 struct TopologyViewState {
-    enum class Tab {
-        none,
-        inside,
-        outside
-    };
-
-    struct Map {
-        enum class Selection {
-            node,
-            link,
-            route
-        };
-        Selection selection = Selection::node;
-        std::string selected;
-        float zoom = 1.0f;
-        float offset_x = 0;
-        float offset_y = 0;
-        float width = 0;
-        float height = 0;
-        bool graph_dragged = false;
-
-        void pan(float dx, float dy);
+    enum class Selection {
+        node,
+        link,
+        route
     };
 
     struct Bounds {
@@ -38,15 +23,24 @@ struct TopologyViewState {
         float bottom = 0;
     };
 
-    Map inside_map;
-    Map outside_map;
-    Tab visible_map = Tab::none;
     Bounds visible_bounds;
+    Selection selection = Selection::node;
+    std::string selected;
+    float zoom = 1.0f;
+    float offset_x = 0;
+    float offset_y = 0;
+    bool graph_dragged = false;
+    std::array<char, 129> node_name{};
+    std::string delete_id;
+    std::optional<std::uint64_t> request_id;
+    std::optional<PreviewReply> reply;
 
-    Tab map_at(float x, float y) const;
-    void pan(Tab map, float dx, float dy);
+    bool canvas_at(float x, float y) const;
+    void pan(float dx, float dy);
 };
 
-void render_topology(TopologyViewState& state, const nlohmann::json& topology, bool narrow);
+void render_topology(TopologyViewState& state, PreviewSession& session, bool narrow);
+void render_topology_dialogs(TopologyViewState& state, PreviewSession& session);
+std::string describe_topology(const TopologyViewState& state, const nlohmann::json& topology);
 
 } // namespace wave

@@ -1,5 +1,6 @@
 #include "entry_view.h"
 
+#include "auth_session.h"
 #include "dialog.h"
 #include "view_helpers.h"
 
@@ -17,12 +18,15 @@ constexpr char entry_popup[] = "###Entry dialog";
 constexpr std::array setup_titles{"Welcome to Wave", "Preview notes", "Panel details"};
 constexpr double entry_timeout_ms = 5000;
 
-const char* title(const EntryViewState& state)
+const char* title(const EntryViewState& state, bool authenticated = false)
 {
     if (state.page == EntryPage::setup) {
+        if (authenticated && state.step == 1) {
+            return "Project acknowledgments";
+        }
         return state.complete ? "Setup complete" : setup_titles[state.step];
     }
-    return state.complete ? "Sign-in complete" : "Demo sign-in";
+    return state.complete ? "Sign-in complete" : authenticated ? "Sign in to Wave" : "Demo sign-in";
 }
 
 std::string step_progress(const EntryViewState& state)
@@ -124,7 +128,7 @@ void render_form(EntryViewState& state)
         ImGui::TextWrapped("Use your saved demo credentials or the default example.");
     }
     field(username, state.username, sizeof(state.username), label_width);
-    field(password, state.password, sizeof(state.password), label_width, ImGuiInputTextFlags_Password);
+    field(password, state.password, 97, label_width, ImGuiInputTextFlags_Password);
     if (ImGui::Button("Use example")) {
         std::snprintf(state.username, sizeof(state.username), "demo");
         std::snprintf(state.password, sizeof(state.password), "wave-demo");
@@ -248,9 +252,91 @@ void render_entry(EntryViewState& state, PreviewSession& session, float entry_to
     }
 }
 
-std::string describe_entry(const EntryViewState& state)
+void render_authenticated_entry(EntryViewState& state, AuthSession& session, float entry_top)
 {
-    std::string result = title(state);
+    if (!ImGui::IsPopupOpen(entry_popup)) {
+        ImGui::OpenPopup(entry_popup);
+    }
+    const bool setup = state.page == EntryPage::setup;
+    std::string caption = title(state, true);
+    if (setup) {
+        caption += " · " + step_progress(state);
+    }
+    caption += entry_popup;
+    if (setup && state.step == 0) {
+        Dialog dialog(caption.c_str(), 590, {{"Continue"}}, nullptr, entry_top);
+        if (dialog) {
+            ImGui::TextWrapped("Create the administrator account for this Wave installation.");
+            ImGui::TextWrapped("You’ll need the one-time bootstrap token from the server administrator.");
+            if (dialog.footer() == 0) {
+                ++state.step;
+            }
+        }
+        return;
+    }
+    if (setup && state.step == 1) {
+        Dialog dialog(caption.c_str(), 690, {{"Back"}, {"Continue", !state.acknowledged}}, nullptr,
+                      entry_top);
+        if (dialog) {
+            ImGui::TextWrapped("Wave is a web panel for the WaterWall core. The WaterWall project and its "
+                               "contributors maintain the core.");
+            ImGui::TextWrapped("Wave uses Dear ImGui, Emscripten, and other open source projects.");
+            ImGui::Checkbox("I acknowledge these projects", &state.acknowledged);
+            const int action = dialog.footer();
+            if (action >= 0) {
+                state.step += action == 0 ? -1 : 1;
+            }
+        }
+        return;
+    }
+
+    const bool pending = session.pending();
+    const std::array actions{DialogAction{"Back", pending},
+                             DialogAction{setup ? "Finish setup" : "Sign in", pending}};
+    Dialog dialog(caption.c_str(), 500, std::span(actions).subspan(setup ? 0 : 1), nullptr, entry_top);
+    if (!dialog) {
+        return;
+    }
+    ImGui::BeginDisabled(pending);
+    if (setup) {
+        ImGui::TextWrapped("Use up to 64 letters, digits, dots, underscores, or hyphens for the username. "
+                           "Choose a password of at least 15 characters.");
+    }
+    field("Username", state.username, sizeof(state.username), 0);
+    field("Password", state.password, sizeof(state.password), 0, ImGuiInputTextFlags_Password);
+    if (setup) {
+        field("Bootstrap token", state.bootstrap, sizeof(state.bootstrap), 0, ImGuiInputTextFlags_Password);
+    }
+    ImGui::EndDisabled();
+    const std::string_view feedback =
+        pending ? (setup ? "Creating the account…" : "Signing in…") : std::string_view(session.error());
+    if (!feedback.empty()) {
+        view::wrapped(feedback, pending ? Color::info : Color::error);
+        if (feedback != state.message) {
+            ImGui::SetScrollHereY(1);
+        }
+    }
+    state.message = feedback;
+    const int action = dialog.footer();
+    if (setup && action == 0) {
+        session.clear_error();
+        state.message.clear();
+        --state.step;
+    } else if (action >= 0) {
+        nlohmann::json input{{"username", state.username}, {"password", state.password}};
+        if (setup) {
+            input["bootstrap"] = state.bootstrap;
+            input["acknowledged"] = state.acknowledged;
+        }
+        session.submit(setup ? AuthSession::Action::setup : AuthSession::Action::sign_in, input);
+        std::fill(std::begin(state.password), std::end(state.password), '\0');
+        std::fill(std::begin(state.bootstrap), std::end(state.bootstrap), '\0');
+    }
+}
+
+std::string describe_entry(const EntryViewState& state, bool authenticated)
+{
+    std::string result = title(state, authenticated);
     result += '.';
     if (state.page == EntryPage::setup && !state.complete) {
         result += ' ' + step_progress(state) + '.';

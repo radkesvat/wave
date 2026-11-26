@@ -8,7 +8,7 @@ const { chromium } = require('playwright-core');
 
 const desktop = { width: 1280, height: 800 };
 const portrait = { width: 390, height: 844 };
-const overviewSnapshot = {
+const serverSnapshot = {
     cpu_percent: 63,
     memory_used_gib: 4.5,
     memory_total_gib: 16,
@@ -69,7 +69,7 @@ function fixture() {
         users: [{ ...user, id: 1, name: 'Avery Brooks' }, { ...user, id: 2, name: 'Bella Chen' }],
         users_live: true,
         logs: [{ ts: '09:41:02', level: 'info', message: 'Preview fixture is ready.' }],
-        server: overviewSnapshot,
+        server: serverSnapshot,
         settings: {
             name: 'Wave Preview', admin_username: 'demo', domain: 'wave.example.invalid', port: 2030,
             websocket_path: '/ws/preview', site_template: 'Wave Standard', certificate_path: 'preview/server.crt',
@@ -77,18 +77,17 @@ function fixture() {
         },
         topology: {
             nodes: [
-                { id: 'inside', label: 'Office', type: 'Client', address: '192.0.2.10', x: 0.5, y: 0.5, map: 'inside' },
-                { id: 'outside', label: 'Relay', type: 'Router', address: '192.0.2.20', x: 0.5, y: 0.5, map: 'outside' },
+                { id: 'office', label: 'Office', type: 'Client', address: '192.0.2.10', x: 0.22, y: 0.3, map: 'inside' },
+                { id: 'gateway', label: 'Gateway', type: 'Router', x: 0.54, y: 0.47, map: 'both' },
+                { id: 'relay', label: 'Relay', type: 'Router', address: '192.0.2.20', x: 0.76, y: 0.72, map: 'outside' },
             ],
-            links: [], routes: [],
+            links: [
+                { id: 'lan', label: 'Office LAN', type: 'LAN', from: 'office', to: 'gateway', map: 'inside' },
+                { id: 'wan', label: 'Relay uplink', type: 'WAN', from: 'gateway', to: 'relay', map: 'outside' },
+            ],
+            routes: [{ id: 'route', name: 'Office to Relay', path: ['office', 'gateway', 'relay'] }],
         },
-        bot: {
-            connected: false, name: 'Wave Preview Bot', admin_link: 'wave-preview://bot/admin',
-            notifications: true, allow_status: true, allow_config: false,
-            notification_rules: { high_cpu: { enabled: true, sound: false } },
-            permissions: { status: true },
-            overrides: { domain: 'relay.example.invalid', sni: 'tls.example.invalid', ws_host: '', port: 443 },
-        },
+        bot: {},
         console: {},
     };
 }
@@ -190,8 +189,8 @@ async function openSetup(page, click = (x, y) => canvasClick(page, x, y)) {
     await page.getByRole('img', { name: 'Welcome to Wave. Step 1 of 3.' }).waitFor();
 }
 
-// Entry feedback changes the height of the centered dialog. Locate its thin outline before clicking.
-async function entryFrame(page) {
+// Feedback can resize a centered dialog. Locate its outline before clicking.
+async function dialogFrame(page) {
     await settleCanvas(page);
     const { width, height } = page.viewportSize();
     const start = 114;
@@ -202,12 +201,12 @@ async function entryFrame(page) {
         const [r, g, b] = pixels.slice(i, i + 3);
         if (r === 138 && g === 132 && b === 149) edge.push(start + i / 4);
     }
-    assert.ok(edge.length >= 2, 'Expected an entry dialog outline');
+    assert.ok(edge.length >= 2, 'Expected a dialog outline');
     return { top: edge[0], bottom: edge.at(-1) };
 }
 
 async function clickEntryFooter(page, x) {
-    const { bottom } = await entryFrame(page);
+    const { bottom } = await dialogFrame(page);
     await canvasClick(page, x, bottom - 25);
 }
 
@@ -220,7 +219,7 @@ async function openPanelDetails(page) {
 }
 
 async function useExampleCredentials(page) {
-    const { top } = await entryFrame(page);
+    const { top } = await dialogFrame(page);
     await canvasClick(page, 460, top + 149);
 }
 
@@ -413,8 +412,7 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
         await page.getByRole('img', { name: /Wave Users.*Loading sample data/ }).waitFor();
         releaseSnapshot();
         await page.getByRole('img', { name: /Wave Users.*WaterWall disconnected.*2 users.*Preview fixture is ready/ }).waitFor();
-        const pages = ['Server Status', 'Users', 'Panel Settings', 'Console',
-            'Nodes & Routers', 'Telegram Bot', 'About', 'Overview'];
+        const pages = ['Server Status', 'Users', 'Panel Settings', 'Console', 'Nodes & Routers', 'About'];
         const currentLink = page.locator('#navigation [aria-current="page"]');
         const assertPage = async name => {
             await page.getByRole('img', { name: new RegExp(`^Wave ${name}\\.`) }).waitFor();
@@ -463,7 +461,7 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
             'Tab passes the sidebar inside the canvas.');
         await page.keyboard.press('Enter');
         await settleCanvas(page);
-        for (let step = 0; step < 3; step++) {
+        for (let step = 0; step < 2; step++) {
             await page.keyboard.press('Tab');
             await settleCanvas(page);
         }
@@ -492,14 +490,17 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
             await canvasClick(page, 65, 76 + 34 * index);
             await assertPage(name);
         }
-        await page.getByRole('img', { name: /CPU utilization 63 percent.*Memory 4\.5 of 16\.0 GiB.*Latest 9\.6 MiB/ }).waitFor();
 
         await page.setViewportSize(portrait);
         await waitForCanvas(page, portrait, true);
         await canvasClick(page, 225, 110);
         await assertPage('Users');
-        await canvasClick(page, 225, 212);
-        await assertPage('Overview');
+        await canvasClick(page, 225, 178);
+        await assertPage('About');
+        for (const x of [65, 225]) {
+            await canvasClick(page, x, 212);
+            assert.equal(await currentLink.textContent(), 'About', 'The fourth row has no navigation tiles.');
+        }
         await canvasClick(page, 225, 110);
         await assertPage('Users');
         assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -514,6 +515,7 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
         assert.equal(await page.evaluate(() => scrollY), 0);
         await canvasClick(page, 65, 76);
         await assertPage('Server Status');
+        await page.getByRole('img', { name: /Wave Server Status.*CPU 63\.0%.*Memory 4\.5 \/ 16\.0 GiB.*Download 9\.6 MiB\/s/ }).waitFor();
         assert.deepEqual(errors, []);
         assert.deepEqual(requests, new Set([url, `${url}index.js`, `${url}index.wasm`]));
     } finally {
@@ -536,7 +538,12 @@ function statusFixture() {
         memory_used_gib: 4, memory_total_gib: 16, users_total: 2, users_enabled: 2, users_online: 1,
         upload_rate: 2, download_rate: 6, upload_total: 12.5, download_total: 55.8,
         cpu_history: [15, 35, 25], memory_history: [1, 6, 4], upload_history: [1, 2, 2],
-        download_history: [8, 4, 6] };
+        download_history: [8, 4, 6], core: {
+            state: 'running', active_version: '1.0.0-preview',
+            available_versions: ['1.0.0-preview', '1.1.0-preview', '1.2.0-preview'],
+            capabilities: { lifecycle: true, versions: true, configs: true },
+            configs: [{ id: 1, name: 'Default', enabled: true, active: true }],
+        } };
     return data;
 }
 
@@ -625,22 +632,30 @@ test('Server Status aligns both grid rows, updates a live plot, and reflows both
             name: /CPU 25\.0%. Memory 4\.0 \/ 16\.0 GiB. Upload 2\.0 MiB\/s. Download 6\.0 MiB\/s\./,
         }).waitFor();
         await settleCanvas(page);
-        await desktopStatusGrid(page, wide);
+        const wideGrid = await desktopStatusGrid(page, wide);
+        const wideInfo = wideGrid.cards[1];
+        const trafficClip = { x: wideGrid.columns[1][0] + 60, y: wideInfo.titleEnd + 46, width: 20,
+            height: wideInfo.bottom - wideInfo.titleEnd - 52 };
+        assert.ok((await plotColors(page, trafficClip)).every(y => y >= 0),
+            'Upload and download have distinct lines inside the same plot.');
 
         await page.setViewportSize(desktop);
         await waitForCanvas(page, desktop, false);
         await settleCanvas(page);
         const initial = await desktopStatusGrid(page, desktop);
         const [cpu, info] = initial.cards;
-        const [cpuColumn, trafficColumn] = initial.columns;
+        const [cpuColumn] = initial.columns;
+        const center = Math.floor((cpuColumn[0] + cpuColumn[1]) / 2);
+        const divider = await screenshotPixels(page, { x: center - 2, y: info.titleEnd + 12, width: 5, height: 72 });
+        for (let y = 0; y < divider.height; y++) {
+            assert.ok(Array.from({ length: divider.width }, (_, x) => x).some(x =>
+                pixelMatches(divider.pixels, (y * divider.width + x) * 4, statusOutlineColor)),
+            'A vertical divider separates device information and Core Controls.');
+        }
         const cpuClip = { x: cpuColumn[1] - 120, y: cpu.titleEnd + 35, width: 115,
             height: cpu.bottom - cpu.titleEnd - 38 };
-        const trafficClip = { x: trafficColumn[0] + 60, y: info.titleEnd + 40, width: 20,
-            height: info.bottom - info.titleEnd - 46 };
         const [, cpuBefore] = await plotColors(page, cpuClip);
         assert.ok(cpuBefore >= 0, 'The CPU line is visible near the current sample.');
-        assert.ok((await plotColors(page, trafficClip)).every(y => y >= 0),
-            'Upload and download have distinct lines inside the same plot.');
 
         data.server.cpu_percent = 75;
         data.server.cpu_history.push(75);
@@ -706,7 +721,7 @@ test('Server Status stacks the four cards in reading order and swipes through to
         const titles = new Set();
         for (let swipe = 0; swipe < 5; swipe++) {
             const { offset, height } = await page.evaluate(() => ({ offset: scrollY, height: document.body.scrollHeight }));
-            const top = Math.max(0, 244 - offset);
+            const top = Math.max(0, 210 - offset);
             const bottom = Math.min(portrait.height, height - offset - 250);
             const cards = await statusCards(page, 28, top, bottom);
             for (const card of cards) {
@@ -791,6 +806,206 @@ test('Server Status keeps the Traffic plot and Logs in place when phone legends 
     }
 });
 
+const coreDesktop = { width: 1280, height: 960 };
+
+async function coreDesktopControls(page) {
+    const { cards: [, info], columns: [[left, right]] } = await desktopStatusGrid(page, coreDesktop);
+    const x = Math.floor((left + right) / 2) + 12;
+    const y = info.titleEnd + 74;
+    return {
+        start: [x + 22, y], stop: [x + 80, y],
+        target: [x + 30, y + 91], secondVersion: [x + 30, y + 165], update: [x + 42, y + 136],
+    };
+}
+
+async function pressCoreFooter(page, activate, primary = true) {
+    const { width } = page.viewportSize();
+    const { bottom } = await dialogFrame(page);
+    const right = (width + Math.min(380, width - 24)) / 2 - 12;
+    await activate(right - (primary ? 42 : 147), bottom - 25);
+}
+
+test('Server Status selects locally and confirms preview updates and Stop before Start becomes available', async () => {
+    const page = await browser.newPage({ viewport: coreDesktop });
+    const data = statusFixture();
+    const core = data.server.core;
+    const preview = await mockPreview(page, { data, handle() {} });
+    const status = name => page.getByRole('img', { name }).waitFor();
+    const click = (x, y) => canvasClick(page, x, y);
+    const confirm = () => pressCoreFooter(page, click);
+    try {
+        await page.goto(url);
+        await openView(page, 'Server Status');
+        await status(/Preview core running\. Active version 1\.0\.0-preview/);
+        const controls = await coreDesktopControls(page);
+        await click(...controls.start);
+        await click(...controls.update);
+        await click(...controls.target);
+        await click(...controls.secondVersion);
+        await status(/Active version 1\.0\.0-preview\. Target version 1\.1\.0-preview/);
+        assert.equal(preview.actions.length, 0, 'Choosing a version sends no mutation.');
+
+        await click(...controls.update);
+        await status(/Confirm update to 1\.1\.0-preview/);
+        await pressCoreFooter(page, click, false);
+        await status(/Target version 1\.1\.0-preview\.$/);
+        assert.equal(preview.actions.length, 0);
+        await click(...controls.update);
+        await confirm();
+        const failed = await preview.action(0);
+        assertRequest(failed.request, { action: 'update_core', version: '1.1.0-preview' });
+        await status(/Active version 1\.0\.0-preview.*Applying to preview/);
+        await confirm();
+        assert.equal(preview.actions.length, 1, 'A pending confirmation cannot submit again.');
+        failed.reply({ ok: false, feedback: 'Preview update rejected.' });
+        await status(/Active version 1\.0\.0-preview.*Confirm update to 1\.1\.0-preview.*Preview update rejected/);
+        await confirm();
+        const updated = await preview.action(1);
+        const retryId = assertRequest(updated.request, { action: 'update_core', version: '1.1.0-preview' });
+        assert.notEqual(retryId, failed.request.request_id);
+        core.active_version = '1.1.0-preview';
+        updated.reply({ feedback: 'Preview version updated.' });
+        await status(/Preview core running\. Active version 1\.1\.0-preview.*Preview version updated/);
+
+        await click(...controls.stop);
+        await status(/Confirm stop/);
+        await page.keyboard.press('Tab');
+        await settleCanvas(page);
+        await page.keyboard.press('Space');
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        assert.equal(preview.actions.length, 2, 'Keyboard cancellation leaves the running core alone.');
+        await click(...controls.stop);
+        await confirm();
+        const stopped = await preview.action(2);
+        assertRequest(stopped.request, { action: 'stop_core' });
+        core.state = 'stopped';
+        stopped.reply();
+        await status(/Preview core stopped/);
+        await click(...controls.stop);
+        assert.equal(preview.actions.length, 3, 'Stop is unavailable while stopped.');
+        await click(...controls.start);
+        const started = await preview.action(3);
+        assertRequest(started.request, { action: 'start_core' });
+        await status(/Preview core stopped.*Applying to preview/);
+        core.state = 'running';
+        started.reply({ feedback: 'Started the preview core.' });
+        await status(/Preview core running.*Started the preview core/);
+    } finally {
+        await page.close();
+    }
+});
+
+test('Server Status stacks controls and edits preview configs by touch', async () => {
+    const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
+    const data = statusFixture();
+    const core = data.server.core;
+    const preview = await mockPreview(page, { data, handle() {} });
+    const status = name => page.getByRole('img', { name }).waitFor();
+    const tap = async (x, y) => {
+        await page.touchscreen.tap(x, y);
+        await settleCanvas(page);
+    };
+    const footer = (primary = true) => pressCoreFooter(page, tap, primary);
+    const configRow = async index => (await dialogFrame(page)).top + 78 + 80 * index;
+    try {
+        await page.goto(url);
+        await status(/Wave Users.*Sample data/);
+        await tap(70, 105);
+        await status(/Wave Server Status.*Preview core running/);
+        await waitForCanvas(page, portrait, true);
+        const info = (await statusCards(page, 28, 210, portrait.height))[2];
+        assert.ok(info, 'The information card follows the CPU and Memory charts.');
+        await page.evaluate(y => window.scrollTo(0, y - 40), info.top);
+        await settleCanvas(page);
+        const y = info.titleEnd - await page.evaluate(() => scrollY) + 10;
+        const { pixels } = await screenshotPixels(page, { x: 35, y, width: 1, height: 650 });
+        const buttons = colorRuns(pixels, [[69, 64, 79], [89, 80, 103]], 20);
+        assert.equal(buttons.length, 1, 'Config creation appears below the disabled Start button.');
+        const configY = y + Math.floor((buttons[0][0] + buttons[0][1]) / 2);
+        const strip = await screenshotPixels(page, { x: 34, y: configY - 239, width: 310, height: 45 });
+        assert.ok(Array.from({ length: strip.height }, (_, row) => row).some(row =>
+            Array.from({ length: strip.width }, (_, x) => x).every(x =>
+                pixelMatches(strip.pixels, (row * strip.width + x) * 4, statusOutlineColor))),
+        'The narrow card separates the information and controls with a horizontal divider.');
+
+        await tap(83, configY);
+        await status(/Create new config/);
+        await footer();
+        assert.equal(preview.actions.length, 0, 'A blank form cannot submit.');
+        await tap(80, (await dialogFrame(page)).top + 69);
+        await page.locator('#wave-text-input').waitFor({ state: 'visible' });
+        await page.keyboard.insertText('Lab preview');
+        await settleCanvas(page);
+        await footer();
+        const created = await preview.action(0);
+        assertRequest(created.request, { action: 'create_core_config', name: 'Lab preview' });
+        const config = { id: 3, name: 'Lab preview', enabled: false, active: false };
+        core.configs.push(config);
+        created.reply({ feedback: 'Created preview config Lab preview (disabled).' });
+        await status(/Created preview config Lab preview \(disabled\)/);
+        await tap(200, configY);
+        await status(/Manage configs\. Default enabled, active and protected\. Lab preview disabled/);
+        await tap(45, await configRow(0));
+        await tap(160, await configRow(0));
+        assert.equal(preview.actions.length, 1, 'The active config controls are disabled.');
+
+        for (const [index, enabled] of [true, false, true].entries()) {
+            await tap(45, await configRow(1));
+            const toggled = await preview.action(index + 1);
+            assertRequest(toggled.request, { action: 'set_core_config_enabled', id: 3, enabled });
+            await status(new RegExp(`Lab preview ${enabled ? 'disabled' : 'enabled'}\\. Applying to preview`));
+            config.enabled = enabled;
+            toggled.reply({ feedback: 'Preview config changed.' });
+            await status(new RegExp(`Lab preview ${enabled ? 'enabled' : 'disabled'}\\. Preview config changed`));
+        }
+
+        await tap(160, await configRow(1));
+        await status(/Confirm removal of Lab preview/);
+        await footer(false);
+        await status(/Manage configs.*Lab preview enabled/);
+        assert.equal(preview.actions.length, 4);
+        await tap(160, await configRow(1));
+        await footer();
+        const removed = await preview.action(4);
+        assertRequest(removed.request, { action: 'remove_core_config', id: 3 });
+        core.configs.pop();
+        removed.reply({ feedback: 'Removed preview config Lab preview.' });
+        await status(/Manage configs\. Default enabled, active and protected\. Removed preview config/);
+        core.configs = [];
+        await preview.broadcast();
+        await status(/Manage configs\. No preview configs/);
+    } finally {
+        await page.close();
+    }
+});
+
+test('Server Status explains unavailable controls and retains the last snapshot after disconnect', async () => {
+    const page = await browser.newPage({ viewport: coreDesktop });
+    const data = statusFixture();
+    data.server.core.state = 'stopped';
+    data.server.core.capabilities.lifecycle = false;
+    const preview = await mockPreview(page, { data, handle() {} });
+    try {
+        await page.goto(url);
+        await openView(page, 'Server Status');
+        await page.getByRole('img', { name: /Lifecycle controls are unavailable/ }).waitFor();
+        const controls = await coreDesktopControls(page);
+        await canvasClick(page, ...controls.start);
+        assert.equal(preview.actions.length, 0);
+        data.server.core.capabilities.lifecycle = true;
+        await preview.broadcast();
+        await page.getByRole('img', { name: /Target version 1\.0\.0-preview\.$/ }).waitFor();
+        await canvasClick(page, ...controls.start);
+        assertRequest((await preview.action(0)).request, { action: 'start_core' });
+        await preview.close();
+        await page.getByRole('img', { name: /CPU 25\.0%.*Preview core stopped.*Active version 1\.0\.0-preview.*Preview disconnected.*closed before confirming the change/ }).waitFor();
+        await canvasClick(page, ...controls.start);
+        assert.equal(preview.actions.length, 1);
+    } finally {
+        await page.close();
+    }
+});
+
 test('pastes into user search and toggles the matching switch without shifting the table header', async () => {
     const page = await browser.newPage({ viewport: desktop });
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: url });
@@ -808,7 +1023,7 @@ test('pastes into user search and toggles the matching switch without shifting t
     try {
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
-        await page.mouse.click(610, 104);
+        await page.mouse.click(500, 104);
         await page.locator('#wave-text-input').waitFor({ state: 'visible' });
         await page.keyboard.type('unmatched');
         await page.keyboard.press('Control+a');
@@ -896,7 +1111,7 @@ test('resizes a Users column across rows and keeps its width through sorting and
         await canvasClick(page, resizedName + 33, 171);
         assertRequest((await preview.action(0)).request,
             { action: 'set_user_enabled', id: 2, enabled: false });
-        await replaceText(page, 610, 104, 'Avery');
+        await replaceText(page, 500, 104, 'Avery');
         data.logs.push({ ts: '09:41:03', level: 'info', message: 'Received the latest rates.' });
         await preview.broadcast();
         await page.getByRole('img', { name: /Received the latest rates/ }).waitFor();
@@ -954,7 +1169,7 @@ test('keeps an open Users edit draft while replacing rows and their configuratio
         await page.goto(url);
         await description(/Wave Users.*4 users/).waitFor();
         await canvasClick(page, 270, 137);
-        await replaceText(page, 610, 104, 'Al');
+        await replaceText(page, 500, 104, 'Al');
         await canvasClick(page, 590, 171);
         await canvasClick(page, 610, 188);
         await replaceText(page, 495, 220, 'Albright local');
@@ -975,6 +1190,22 @@ test('keeps an open Users edit draft while replacing rows and their configuratio
         await canvasClick(page, 625, 235);
         await canvasClick(page, 710, 572);
         await page.waitForFunction(async text => (await navigator.clipboard.readText()) === text, configuration);
+    } finally {
+        await page.close();
+    }
+});
+
+test('deletes a sample user directly from row Options', async () => {
+    const page = await browser.newPage({ viewport: { width: 1320, height: 840 } });
+    const preview = await mockPreview(page);
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await canvasClick(page, 590, 171);
+        await canvasClick(page, 625, 284);
+        await page.waitForFunction(() => document.getElementById('panel-controls').inert);
+        await canvasClick(page, 755, 447);
+        assertRequest((await preview.action(0)).request, { action: 'delete_user', id: 1 });
     } finally {
         await page.close();
     }
@@ -1088,10 +1319,10 @@ test('paginates the compact Users table and targets the replacement row', async 
         data.logs.push({ ts: '09:41:03', level: 'info', message: 'Replaced a compact row.' });
         await preview.broadcast();
         await page.getByRole('img', { name: /Replaced a compact row/ }).waitFor();
-        await canvasClick(page, 144, 289);
+        await canvasClick(page, 144, 255);
         assert.deepEqual((await preview.action(0)).request, { action: 'set_users_live', live: true });
-        await canvasClick(page, 121, 423);
-        await canvasClick(page, 234, 496);
+        await canvasClick(page, 121, 356);
+        await canvasClick(page, 234, 429);
         assertRequest((await preview.action(1)).request, { action: 'set_user_enabled', id: 8, enabled: true });
     } finally {
         await page.close();
@@ -1111,7 +1342,7 @@ test('narrow touch activates a switch and header controls and scrolls on a swipe
         await page.touchscreen.tap(230, 105);
         await page.getByRole('img', { name: /Wave Users/ }).waitFor();
 
-        await page.touchscreen.tap(318, 463);
+        await page.touchscreen.tap(318, 429);
         assertRequest((await preview.action(0)).request,
             { action: 'set_user_enabled', id: 1, enabled: false });
         for (const [id, x] of [['menu', 130], ['tools', 182]]) {
@@ -1146,11 +1377,11 @@ test('first-run setup validates input, preserves the draft, and completes throug
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
         await openPanelDetails(page);
-        const { top } = await entryFrame(page);
+        const { top } = await dialogFrame(page);
         await replaceText(page, 700, top + 49, '');
         await clickEntryFooter(page, 830);
         await page.getByRole('img', { name: /Enter a panel name/ }).waitFor();
-        await replaceText(page, 700, (await entryFrame(page)).top + 49, 'Demo Control Panel');
+        await replaceText(page, 700, (await dialogFrame(page)).top + 49, 'Demo Control Panel');
         await clickEntryFooter(page, 830);
         await page.getByRole('img', { name: /Enter a demo username and password/ }).waitFor();
         assert.equal(preview.actions.length, 0);
@@ -1294,11 +1525,11 @@ test('setup fits a narrow phone and supports touch and keyboard form navigation'
         await settleCanvas(page);
     }
     async function next() {
-        const { bottom } = await entryFrame(page);
+        const { bottom } = await dialogFrame(page);
         await tap(248, bottom - 29);
     }
     async function expectFeedbackColor(red, green, blue) {
-        const { top, bottom } = await entryFrame(page);
+        const { top, bottom } = await dialogFrame(page);
         const start = top + 26;
         const { pixels } = await screenshotPixels(page,
             { x: 24, y: start, width: 272, height: bottom - start - 91 });
@@ -1310,14 +1541,14 @@ test('setup fits a narrow phone and supports touch and keyboard form navigation'
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
         await openSetup(page, tap);
-        const welcome = await entryFrame(page);
+        const welcome = await dialogFrame(page);
         assert.ok(Math.abs((welcome.top + welcome.bottom) / 2 - (phone.height + 107) / 2) <= 2);
         await next();
         await page.getByRole('img', { name: 'Preview notes. Step 2 of 3.' }).waitFor();
         await next();
         await page.getByRole('img', { name: 'Panel details. Step 3 of 3.' }).waitFor();
 
-        const details = await entryFrame(page);
+        const details = await dialogFrame(page);
         assert.ok(details.bottom < phone.height - 12, 'Wrapped footer stays inside the viewport');
         await tap(90, details.top + 72);
         const input = page.locator('#wave-text-input');
@@ -1362,7 +1593,7 @@ test('setup fields and actions are reachable at 320 × 256', async () => {
         await settleCanvas(page);
     }
     async function tapFooter(x) {
-        const { top, bottom } = await entryFrame(page);
+        const { top, bottom } = await dialogFrame(page);
         for (let swipe = 0; swipe < 4; swipe++) {
             await touch.send('Input.dispatchTouchEvent', {
                 type: 'touchStart', touchPoints: [{ x: 160, y: bottom - 20 }],
@@ -1385,7 +1616,7 @@ test('setup fields and actions are reachable at 320 × 256', async () => {
             await description(title).waitFor();
         }
 
-        const { top } = await entryFrame(page);
+        const { top } = await dialogFrame(page);
         await tap(90, top + 72);
         const input = page.locator('#wave-text-input');
         await input.waitFor({ state: 'visible', timeout: 5000 });
@@ -1483,136 +1714,89 @@ test('a later Settings save preserves a remote change received while the page wa
     }
 });
 
-for (const order of [['Settings', 'Overrides'], ['Overrides', 'Settings']]) {
-    test(`both bot edits survive stale snapshots when ${order[0]} saves first`, async () => {
-        const data = fixture();
-        const initial = structuredClone(data.bot);
-        const tabs = new Map();
-        let rejected = false;
-
-        try {
-            for (const name of order) {
-                const page = await browser.newPage({ viewport: desktop });
-                tabs.set(name, { page });
-                const preview = await mockPreview(page, { data, handle(current, request, reply) {
-                    if (name === 'Overrides' && order[0] === name && !rejected) {
-                        rejected = true;
-                        reply({ ok: false, feedback: 'Rejected the sample overrides.' });
-                        return;
-                    }
-                    Object.assign(current.bot, request.settings);
-                    reply({ feedback: `Saved sample bot ${name}.` });
-                } });
-                tabs.get(name).preview = preview;
-                await page.goto(url);
-                await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
-                await openView(page, 'Telegram Bot');
-            }
-
-            // Both pages received the same initial snapshot. The fixture publishes no
-            // intermediate broadcast, so the other page saves from that snapshot too.
-            for (const name of order) {
-                const { page, preview } = tabs.get(name);
-                await page.bringToFront();
-                if (name === 'Settings') {
-                    await canvasClick(page, 320, 80);
-                    await canvasClick(page, 212, 113);
-                    await canvasClick(page, 220, 211);
-                    await canvasClick(page, 250, 278);
-                } else {
-                    await canvasClick(page, 404, 80);
-                    await replaceText(page, 230, 326, '8443');
-                    await canvasClick(page, 250, 360);
-                    if (order[0] === name) {
-                        await page.getByRole('img', { name: /Rejected the sample overrides/ }).waitFor();
-                        await canvasClick(page, 250, 360);
-                        const first = (await preview.action(0)).request;
-                        const retry = (await preview.action(1)).request;
-                        assert.deepEqual(retry.settings, first.settings);
-                        assert.notEqual(retry.request_id, first.request_id);
-                    }
-                }
-
-                await page.getByRole('img', { name: new RegExp(`Saved sample bot ${name}`) }).waitFor();
-                const { request } = preview.actions.at(-1);
-                if (name === 'Settings') {
-                    assert.deepEqual(Object.keys(request.settings).sort(), [
-                        'allow_config', 'allow_status', 'notification_rules', 'notifications', 'permissions',
-                    ]);
-                    assert.equal(request.settings.notifications, false);
-                    assert.equal(request.settings.allow_status, initial.allow_status);
-                    assert.equal(request.settings.allow_config, initial.allow_config);
-                    assert.deepEqual(request.settings.notification_rules.high_cpu, initial.notification_rules.high_cpu);
-                    assert.equal(request.settings.permissions.status, initial.permissions.status);
-                    assertRequest(request, { action: 'apply_bot_settings', settings: request.settings });
-                } else {
-                    assertRequest(request, {
-                        action: 'apply_bot_settings', settings: { overrides: { ...initial.overrides, port: 8443 } },
-                    });
-                }
-            }
-
-            assert.equal(data.bot.notifications, false);
-            assert.equal(data.bot.overrides.port, 8443);
-        } finally {
-            await Promise.all([...tabs.values()].map(({ page }) => page.close()));
-        }
+async function topologyCanvas(page) {
+    await settleCanvas(page);
+    const bounds = await page.evaluate(() => {
+        const { width, height } = document.querySelector('canvas').getBoundingClientRect();
+        const hit = Module['_wave_topology_at'];
+        const xs = Array.from({ length: width }, (_, x) => x).filter(x => hit(x, height / 2));
+        const ys = Array.from({ length: height }, (_, y) => y).filter(y => hit(width / 2, y));
+        return { x: xs[0], y: ys[0], width: xs.length, height: ys.length };
     });
+    assert.ok(bounds.width > 0 && bounds.height > 0, 'The unified topology canvas accepts gestures.');
+    return bounds;
 }
 
-test('preserves selection and zoom for each topology map when switching pages', async () => {
+function topologyNodePosition(bounds, node, cardWidth) {
+    return {
+        x: Math.round(bounds.x + bounds.width / 2 + (node.x - 0.5) * (bounds.width - cardWidth - 22)),
+        y: Math.round(bounds.y + bounds.height / 2 + (node.y - 0.5) * (bounds.height - 56)),
+    };
+}
+
+test('draws and inspects the unified topology and keeps selection and zoom when switching pages', async () => {
     const page = await browser.newPage({ viewport: desktop });
     const data = fixture();
-    const unnamedNode = { id: '', label: '', map: 'inside', x: 0.25, y: 0.5 };
+    const unnamedNode = { id: '', label: '', map: 'inside', x: 0.23, y: 0.76 };
     data.topology.nodes.push(unnamedNode);
     const preview = await mockPreview(page, { data });
-    async function capture() {
-        await page.mouse.move(185, 50);
-        await settleCanvas(page);
-        return page.screenshot({ clip: { x: 198, y: 100, width: 1040, height: 420 } });
-    }
 
     try {
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
         await openView(page, 'Nodes & Routers');
-        const insideInitial = await capture();
+        const bounds = await topologyCanvas(page);
+        assert.ok(bounds.width > 1000 && bounds.height > 400, 'The graph fills the desktop work pane.');
+        async function capture() {
+            await page.mouse.move(185, 50);
+            await settleCanvas(page);
+            return page.screenshot({ clip: bounds });
+        }
+        const initial = await capture();
         delete unnamedNode.id;
         delete unnamedNode.label;
         data.logs.push({ ts: '09:41:03', level: 'info', message: 'Received an unnamed node.' });
         await preview.broadcast();
         await page.getByRole('img', { name: /Received an unnamed node/ }).waitFor();
-        assert.ok((await capture()).equals(insideInitial), 'A node with missing text renders with an empty label.');
-        await canvasClick(page, 720, 301);
-        const insideSelected = await capture();
-        await canvasClick(page, 240, 114);
-        const insideZoomed = await capture();
-        assert.ok(!insideSelected.equals(insideInitial), 'Inside map selection changed the drawing.');
-        assert.ok(!insideZoomed.equals(insideSelected), 'Inside map zoom changed the drawing.');
+        assert.deepEqual(await capture(), initial, 'A node with missing text renders with an empty label.');
 
-        await canvasClick(page, 340, 80);
-        const outsideInitial = await capture();
-        await canvasClick(page, 720, 301);
-        const outsideSelected = await capture();
-        await canvasClick(page, 210, 114);
-        const outsideZoomed = await capture();
-        assert.ok(!outsideSelected.equals(outsideInitial), 'Outside map selection changed the drawing.');
-        assert.ok(!outsideZoomed.equals(outsideSelected), 'Outside map zoom changed the drawing.');
+        const positions = data.topology.nodes.slice(0, 3).map(node => topologyNodePosition(bounds, node, 103));
+        for (const [index, label] of ['Office', 'Gateway', 'Relay'].entries()) {
+            await canvasClick(page, positions[index].x, positions[index].y);
+            await page.getByRole('img', { name: new RegExp(`4 nodes, 2 connections, 1 route.*Selected ${label}`) }).waitFor();
+        }
+        const [gateway, relay] = positions.slice(1);
+        await canvasClick(page, (gateway.x + relay.x) / 2, (gateway.y + relay.y) / 2);
+        await page.getByRole('img', { name: /Selected Relay uplink \(WAN\).*Gateway to Relay/ }).waitFor();
+
+        await canvasClick(page, 615, 81);
+        await page.locator('#panel-controls[inert]').waitFor({ state: 'attached' });
+        await canvasClick(page, 520, (await dialogFrame(page)).bottom - 55);
+        await page.getByRole('img', { name: /Selected Office to Relay.*Office > Gateway > Relay/ }).waitFor();
+        await page.locator('#panel-controls[inert]').waitFor({ state: 'detached' });
+
+        await canvasClick(page, relay.x, relay.y);
+        const selected = await capture();
+        assert.notDeepEqual(selected, initial, 'Selection highlights the node on the graph.');
+        await canvasClick(page, 429, 81);
+        const zoomed = await capture();
+        assert.notDeepEqual(zoomed, selected, 'Zoom changes the graph.');
 
         await openView(page, 'Server Status');
         await openView(page, 'Nodes & Routers');
-        await canvasClick(page, 250, 80);
-        assert.ok((await capture()).equals(insideZoomed), 'Inside map kept its selection and zoom.');
-        await canvasClick(page, 340, 80);
-        assert.ok((await capture()).equals(outsideZoomed), 'Outside map kept its selection and zoom.');
+        await page.getByRole('img', { name: /Selected Relay \(Router\)/ }).waitFor();
+        assert.deepEqual(await capture(), zoomed, 'The graph keeps its zoom and selection.');
+        await canvasClick(page, 480, 81);
+        assert.deepEqual(await capture(), selected, 'Fit restores the original graph framing.');
     } finally {
         await page.close();
     }
 });
 
-test('touch drags stay on their topology map while swipes outside it scroll the page', async () => {
+test('pans and selects on a narrow topology canvas while swipes outside it scroll the page', async () => {
     const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
-    await mockPreview(page);
+    const data = fixture();
+    await mockPreview(page, { data });
     const touch = await page.context().newCDPSession(page);
     async function swipe(points) {
         await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [points[0]] });
@@ -1622,8 +1806,7 @@ test('touch drags stay on their topology map while swipes outside it scroll the 
         await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
         await settleCanvas(page);
     }
-    async function nodePosition() {
-        const clip = { x: 75, y: 385, width: 245, height: 115 };
+    async function nodePosition(clip) {
         const { width, pixels } = await screenshotPixels(page, clip);
         let x = width;
         let y = clip.height;
@@ -1642,46 +1825,105 @@ test('touch drags stay on their topology map while swipes outside it scroll the 
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
         await openView(page, 'Nodes & Routers');
         await waitForCanvas(page, portrait, true);
-        const start = await nodePosition();
-        await swipe([{ x: 49, y: 365 }, { x: 65, y: 353 }, { x: 95, y: 337 }]);
-        const moved = await nodePosition();
+        const bounds = await topologyCanvas(page);
+        assert.ok(bounds.width > 300 && bounds.height > 460, 'The graph fills the narrow work pane.');
+        const office = topologyNodePosition(bounds, data.topology.nodes[0], 74);
+        const clip = { x: office.x - 45, y: office.y - 58, width: 140, height: 90 };
+        const start = await nodePosition(clip);
+        const drag = { x: bounds.x + 40, y: bounds.y + 12 };
+        await swipe([drag, { x: drag.x + 16, y: drag.y - 12 }, { x: drag.x + 46, y: drag.y - 28 }]);
+        const moved = await nodePosition(clip);
         assert.deepEqual(moved, { x: start.x + 46, y: start.y - 28 });
         assert.equal(await page.evaluate(() => scrollY), 0);
 
-        const edge = { x: moved.x + 30, y: moved.y - 2, width: 8, height: 5 };
-        const unselected = await page.screenshot({ clip: edge });
-        await page.touchscreen.tap(moved.x + 35, moved.y + 15);
-        await settleCanvas(page);
-        assert.notDeepEqual(await page.screenshot({ clip: edge }), unselected, 'A tap selects the node.');
-        const selected = await nodePosition();
+        await page.touchscreen.tap(office.x + 46, office.y - 28);
+        await page.getByRole('img', { name: /Selected Office \(Client\)/ }).waitFor();
+        const selected = await nodePosition(clip);
 
-        await page.touchscreen.tap(158, 266);
-        await settleCanvas(page);
-        assert.deepEqual(await nodePosition(), start, 'The outside map has its own pan state.');
-        await swipe([{ x: 97, y: 400 }, { x: 125, y: 416 }]);
-        const outside = await nodePosition();
-        assert.deepEqual(outside, { x: start.x + 28, y: start.y + 16 });
-        assert.equal(await page.evaluate(() => scrollY), 0);
-
-        await page.mouse.move(85, 395);
+        await page.mouse.move(drag.x, bounds.y + 90);
         await page.mouse.down();
         await settleCanvas(page);
-        await page.mouse.move(60, 385);
+        await page.mouse.move(drag.x - 25, bounds.y + 80);
         await settleCanvas(page);
         await page.mouse.up();
-        assert.deepEqual(await nodePosition(), { x: outside.x - 25, y: outside.y - 10 });
+        assert.deepEqual(await nodePosition(clip), { x: selected.x - 25, y: selected.y - 10 });
+        await page.getByRole('img', { name: /Selected Office \(Client\)/ }).waitFor();
 
-        await page.touchscreen.tap(66, 266);
-        await settleCanvas(page);
-        assert.deepEqual(await nodePosition(), selected, 'The inside map kept its pan state and selection.');
-        await swipe([{ x: 150, y: 690 }, { x: 150, y: 640 }, { x: 150, y: 560 }]);
+        await swipe([{ x: 150, y: bounds.y - 6 }, { x: 150, y: bounds.y - 56 }, { x: 150, y: bounds.y - 136 }]);
         await page.waitForFunction(() => scrollY > 0);
     } finally {
         await page.close();
     }
 });
 
-test('Overview shows loading and unavailable data, and About opens without preview data', async () => {
+test('adds and confirms deletion of sample nodes with request feedback and an empty state', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    const data = fixture();
+    data.topology = { nodes: [], links: [], routes: [] };
+    const preview = await mockPreview(page, { data, handle() {} });
+    const modal = page.locator('#panel-controls[inert]');
+    const confirm = async () => canvasClick(page, 780, (await dialogFrame(page)).bottom - 25);
+    const cancel = async () => canvasClick(page, 660, (await dialogFrame(page)).bottom - 25);
+
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*Sample data/ }).waitFor();
+        await openView(page, 'Nodes & Routers');
+        const empty = page.getByRole('img', { name: /0 nodes, 0 connections, 0 routes/ });
+        await empty.waitFor();
+        await canvasClick(page, 333, 81);
+        assert.equal(await modal.count(), 0, 'Delete is disabled without a selected node.');
+
+        await canvasClick(page, 235, 81);
+        await modal.waitFor({ state: 'attached' });
+        await confirm();
+        assert.equal(preview.actions.length, 0, 'A blank name cannot be submitted.');
+        await replaceText(page, 530, (await dialogFrame(page)).top + 71, 'Preview relay');
+        await confirm();
+        const add = await preview.action(0);
+        const addId = assertRequest(add.request, { action: 'add_node', name: 'Preview relay' });
+        await confirm();
+        assert.equal(preview.actions.length, 1, 'The dialog waits for the pending reply.');
+        add.reply({ ok: false, feedback: 'A sample node already uses that name.' });
+        await page.getByRole('img', { name: /A sample node already uses that name/ }).waitFor();
+        await confirm();
+        const retry = await preview.action(1);
+        assert.notEqual(assertRequest(retry.request, { action: 'add_node', name: 'Preview relay' }), addId);
+        data.topology.nodes.push({ id: 'sample-node-1', label: 'Preview relay', type: 'Node', x: 0.5, y: 0.5 });
+        retry.reply({ feedback: 'Added sample node Preview relay.' });
+        await modal.waitFor({ state: 'detached' });
+        await page.getByRole('img', { name: /Added sample node Preview relay.*1 node, 0 connections, 0 routes/ }).waitFor();
+
+        const bounds = await topologyCanvas(page);
+        await canvasClick(page, bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        const selection = page.getByRole('img', { name: /Selected Preview relay \(Node\)/ });
+        await selection.waitFor();
+        await canvasClick(page, 333, 81);
+        await modal.waitFor({ state: 'attached' });
+        assert.equal(preview.actions.length, 2, 'Opening the confirmation does not delete the node.');
+        await cancel();
+        await modal.waitFor({ state: 'detached' });
+        await selection.waitFor();
+        assert.equal(preview.actions.length, 2, 'Cancel leaves the selected node in place.');
+
+        await canvasClick(page, 333, 81);
+        await modal.waitFor({ state: 'attached' });
+        await confirm();
+        const remove = await preview.action(2);
+        assertRequest(remove.request, { action: 'delete_node', id: 'sample-node-1' });
+        data.topology.nodes.length = 0;
+        remove.reply({ feedback: 'Deleted sample node Preview relay.' });
+        await modal.waitFor({ state: 'detached' });
+        await empty.waitFor();
+        assert.equal(await selection.count(), 0, 'Deletion clears the selection.');
+        await canvasClick(page, 333, 81);
+        assert.equal(await modal.count(), 0, 'Delete is disabled again.');
+    } finally {
+        await page.close();
+    }
+});
+
+test('Server Status shows loading and unavailable data, and About opens without preview data', async () => {
     const page = await browser.newPage({ viewport: desktop });
     const gate = Promise.withResolvers();
     await page.addInitScript(() => { window.open = url => { window.openedUrl = url; }; });
@@ -1692,10 +1934,10 @@ test('Overview shows loading and unavailable data, and About opens without previ
     try {
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*Loading sample data/ }).waitFor();
-        await openView(page, 'Overview');
-        await page.getByRole('img', { name: /Wave Overview.*Loading sample data/ }).waitFor();
+        await openView(page, 'Server Status');
+        await page.getByRole('img', { name: /Wave Server Status.*Loading sample data/ }).waitFor();
         gate.resolve();
-        await page.getByRole('img', { name: /Wave Overview.*Sample data unavailable/ }).waitFor();
+        await page.getByRole('img', { name: /Wave Server Status.*Sample data unavailable/ }).waitFor();
         await openView(page, 'Users');
         await page.getByRole('img', { name: /Wave Users.*Sample data unavailable/ }).waitFor();
         assert.equal(await page.getByRole('link', { name: 'Users' }).getAttribute('aria-current'), 'page');
@@ -1778,7 +2020,7 @@ test('centers a dialog on a short scrolled phone and keeps its footer reachable 
         await waitForCanvas(page, viewport, true);
         await page.evaluate(() => window.scrollTo(0, 135));
         await settleCanvas(page);
-        await page.touchscreen.tap(63, 155);
+        await page.touchscreen.tap(63, 121);
         await page.waitForFunction(() => document.getElementById('panel-controls').inert);
         await settleCanvas(page);
 

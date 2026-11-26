@@ -13,6 +13,7 @@ configure_file(shell.html "${wave_shell}" @ONLY)
 configure_file(theme_swatches.h.in "${CMAKE_CURRENT_BINARY_DIR}/theme_swatches.h" @ONLY)
 
 add_executable(wave
+    auth_session.cpp
     browser_ui.cpp
     dialog.cpp
     main.cpp
@@ -20,11 +21,10 @@ add_executable(wave
     preview_session.cpp
     theme.cpp
     views/about_view.cpp
-    views/bot_view.cpp
     views/console_view.cpp
+    views/core_controls_view.cpp
     views/entry_view.cpp
     views/logs_view.cpp
-    views/overview.cpp
     views/server_status_plot.cpp
     views/server_status_view.cpp
     views/settings_view.cpp
@@ -47,8 +47,8 @@ set_target_properties(wave PROPERTIES
 )
 target_include_directories(wave PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_BINARY_DIR}"
     "${PROJECT_SOURCE_DIR}/common"
+    "${CMAKE_CURRENT_BINARY_DIR}"
     "${imgui_SOURCE_DIR}"
     "${imgui_SOURCE_DIR}/backends"
 )

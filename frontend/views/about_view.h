@@ -2,6 +2,6 @@
 
 namespace wave {
 
-void render_about();
+void render_about(bool authenticated = false);
 
 } // namespace wave

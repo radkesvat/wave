@@ -43,47 +43,6 @@ bool valid_snapshot(const Json& data)
     return live != data.end() && live->is_boolean();
 }
 
-bool read_metric(const Json& value, float& metric)
-{
-    if (!value.is_number()) {
-        return false;
-    }
-    const auto number = value.get<double>();
-    if (!(number >= 0 && number <= std::numeric_limits<float>::max())) {
-        return false;
-    }
-    metric = static_cast<float>(number);
-    return true;
-}
-
-std::optional<OverviewData> read_overview(const Json& server)
-{
-    OverviewData result{};
-    const auto cpu = server.find("cpu_percent");
-    const auto used = server.find("memory_used_gib");
-    const auto total = server.find("memory_total_gib");
-    const auto uptime = server.find("uptime_minutes");
-    const auto history = server.find("download_history");
-    const auto count = result.download_mib_per_second.size();
-    if (cpu == server.end() || !read_metric(*cpu, result.cpu_percent) || result.cpu_percent > 100 ||
-        used == server.end() || !read_metric(*used, result.memory_used_gib) || total == server.end() ||
-        !read_metric(*total, result.memory_total_gib) || result.memory_used_gib > result.memory_total_gib ||
-        uptime == server.end() || !uptime->is_number_integer() ||
-        uptime->get<std::uint64_t>() > static_cast<std::uint64_t>(std::chrono::minutes::max().count()) ||
-        history == server.end() || !history->is_array() || history->size() < count) {
-        return std::nullopt;
-    }
-
-    result.uptime = std::chrono::minutes(uptime->get<std::chrono::minutes::rep>());
-    const std::size_t offset = history->size() - count;
-    for (std::size_t i = 0; i < count; ++i) {
-        if (!read_metric((*history)[offset + i], result.download_mib_per_second[i])) {
-            return std::nullopt;
-        }
-    }
-    return result;
-}
-
 const Json& field(const Json& object, std::string_view key)
 {
     static const Json empty;
@@ -152,16 +111,17 @@ UsersData read_users(const Json& data)
 
 } // namespace
 
-void PreviewSession::start()
+void PreviewSession::start(bool keep_snapshot)
 {
     stop();
     status_ = PreviewStatus::loading;
     feedback_.clear();
     feedback_action_.clear();
     action_feedback_.clear();
-    data_.clear();
-    overview_.reset();
-    users_ = {};
+    if (!keep_snapshot) {
+        data_.clear();
+        users_ = {};
+    }
 
     const std::unique_ptr<char, decltype(&std::free)> url(preview_url(), std::free);
     if (!url || !emscripten_websocket_is_supported()) {
@@ -329,7 +289,6 @@ bool PreviewSession::receive(std::string_view payload)
         }
     }
     data_ = std::move(frame["data"]);
-    overview_ = read_overview(data_["server"]);
     users_ = read_users(data_);
     status_ = PreviewStatus::ready;
     return true;

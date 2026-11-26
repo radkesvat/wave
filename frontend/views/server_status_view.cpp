@@ -1,5 +1,6 @@
 #include "server_status_view.h"
 
+#include "core_controls_view.h"
 #include "server_status_plot.h"
 #include "view_helpers.h"
 
@@ -156,7 +157,7 @@ void draw_information(const InfoRows& info, const InformationLayout& layout)
 {
     auto& draw = *ImGui::GetWindowDrawList();
     const ImVec2 start = ImGui::GetCursorScreenPos();
-    ImGui::Dummy({ImGui::GetContentRegionAvail().x, layout.height});
+    ImGui::Dummy({layout.value_x + layout.value_width, layout.height});
     float y = start.y;
     for (std::size_t i = 0; i < info.size(); ++i) {
         const auto& [label, value] = info[i];
@@ -278,8 +279,10 @@ bool server_status_has_columns(float content_width, float font_size)
     return content_width >= 2 * 320 * font_size / theme::secondary_font_size + gutter;
 }
 
-float render_server_status(const Json& server, bool stacked)
+float render_server_status(const Json& server, CoreControlsState& controls, PreviewSession& session,
+                           bool stacked)
 {
+    update_core_controls(controls, session);
     const StatusSamples samples(server);
     const double memory_ceiling = samples.memory_capacity > 0
                                       ? samples.memory_capacity
@@ -303,7 +306,10 @@ float render_server_status(const Json& server, bool stacked)
     const float left_body = std::max(1.0f, left_width - 2 * card_padding.x);
     const float right_body = std::max(1.0f, right_width - 2 * card_padding.x);
     const auto info = server_information(server, samples);
-    const InformationLayout information(info, left_body);
+    const float information_width = stacked ? left_body : std::floor((left_body - 2 * gutter) * 0.5f);
+    const float controls_width = stacked ? left_body : left_body - information_width - 2 * gutter;
+    const InformationLayout information(info, information_width);
+    const float controls_height = core_controls_height(controls, session, controls_width);
     LegendLayout cpu_legend(cpu, left_body);
     LegendLayout memory_legend(memory, right_body);
     const LegendLayout traffic_legend(traffic, right_body);
@@ -313,7 +319,9 @@ float render_server_status(const Json& server, bool stacked)
     float cpu_height = chart_minimum_height(cpu_legend);
     float memory_height = chart_minimum_height(memory_legend);
     float traffic_height = chart_minimum_height(traffic_legend);
-    float info_height = title_band_height() + 2 * card_padding.y + information.height;
+    const float info_body_height = stacked ? information.height + 2 * gutter + controls_height
+                                           : std::max(information.height, controls_height);
+    float info_height = title_band_height() + 2 * card_padding.y + info_body_height;
     if (!stacked) {
         const float top_minimum = std::max(cpu_height, memory_height);
         const float bottom_minimum = std::max(info_height, traffic_height);
@@ -333,13 +341,27 @@ float render_server_status(const Json& server, bool stacked)
                memory_ticks, axis_gutter, "GiB", memory_ceiling,
                {{samples.memory, "Memory", memory[0].color}});
     if (begin_card("Server Information", {start.x, info_y}, {left_width, info_height})) {
+        const auto body = ImGui::GetCursorScreenPos();
+        auto& draw = *ImGui::GetWindowDrawList();
         draw_information(info, information);
+        if (stacked) {
+            const float divider_y = body.y + information.height + gutter;
+            draw.AddLineH(body.x, body.x + left_body, divider_y, packed(Color::divider), theme::border_width);
+            ImGui::SetCursorScreenPos({body.x, divider_y + gutter});
+        } else {
+            const float divider_x = body.x + information_width + gutter;
+            draw.AddLineV(divider_x, body.y, info_y + info_height - card_padding.y, packed(Color::divider),
+                          theme::border_width);
+            ImGui::SetCursorScreenPos({divider_x + gutter, body.y});
+        }
+        render_core_controls(controls, session, controls_width);
     }
     ImGui::EndChild();
     chart_card(
         "Traffic", {right_x, traffic_y}, {right_width, traffic_height}, traffic, traffic_legend,
         traffic_ticks, axis_gutter, "MiB/s", traffic_maximum,
         {{samples.upload, "Upload", traffic[0].color}, {samples.download, "Download", traffic[1].color}});
+    render_core_control_dialog(controls, session);
     return traffic_y + traffic_height - start.y;
 }
 

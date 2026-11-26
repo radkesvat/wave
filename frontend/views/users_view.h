@@ -36,11 +36,7 @@ struct UsersViewState {
         notes,
         share,
         reset_traffic,
-        remove,
-        broadcast,
-        bulk_configuration,
-        configuration,
-        message
+        remove
     };
     enum class Column {
         id,
@@ -71,7 +67,6 @@ struct UsersViewState {
     bool open_dialog = false;
     UserDraft draft;
     UserDraft original_draft;
-    std::array<char, 513> message{};
     std::string configuration;
     std::optional<qrcodegen::QrCode> qr;
     std::optional<std::uint64_t> request_id;
