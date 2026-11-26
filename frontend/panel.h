@@ -2,9 +2,9 @@
 
 #include "auth_session.h"
 #include "views/console_view.h"
-#include "views/core_controls_view.h"
 #include "views/entry_view.h"
 #include "views/logs_view.h"
+#include "views/panel_controls_view.h"
 #include "views/settings_view.h"
 #include "views/topology_view.h"
 #include "views/users_view.h"
@@ -49,7 +49,7 @@ struct PanelState {
     TopologyViewState topology;
     SettingsViewState settings;
     ConsoleViewState console;
-    CoreControlsState core_controls;
+    PanelControlsState panel_controls;
     float stacked_server_status_height = 0;
     bool navigation_open = true;
     bool menu_open = false;

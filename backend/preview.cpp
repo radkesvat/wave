@@ -89,9 +89,8 @@ Json make_users()
 
 Json make_core()
 {
-    return {{"state", "running"}, {"active_version", "1.0.0-preview"},
-            {"available_versions", {"1.0.0-preview", "1.1.0-preview", "1.2.0-preview"}},
-            {"capabilities", {{"lifecycle", true}, {"versions", true}, {"configs", true}}},
+    return {{"state", "running"},
+            {"capabilities", {{"lifecycle", true}, {"configs", true}}},
             {"configs", Json::array({
                 {{"id", 1}, {"name", "Default"}, {"enabled", true}, {"active", true}},
                 {{"id", 2}, {"name", "Standby"}, {"enabled", true}, {"active", false}},
@@ -108,6 +107,7 @@ Json make_server()
     const Json download = {11.8, 15.6, 13.5, 14.4, 17.1, 14.8, 22.6, 18.4, 21.9, 16.7, 20.6, 24.3,
                            18.1, 17.8, 19.9, 20.4, 21.8, 19.5, 18.3};
     return {{"name", "Wave Preview"}, {"version", "0.1.0-preview"}, {"platform", "Linux x86_64"},
+            {"available_panel_versions", {"0.1.0-preview", "0.2.0-preview", "0.3.0-preview"}},
             {"region", "Frankfurt, DE"}, {"cpu_cores", 8}, {"uptime_minutes", 6203},
             {"memory_total_gib", 8.0}, {"memory_used_gib", memory.back()}, {"cpu_percent", cpu.back()},
             {"upload_rate", upload.back()}, {"download_rate", download.back()},
@@ -828,19 +828,19 @@ private:
         return {false, "That action is unavailable in the current preview core state."};
     }
 
-    Reply update_core(const Json& input)
+    Reply update_panel(const Json& input)
     {
-        auto& core = data_["server"]["core"];
+        auto& server = data_["server"];
         const auto version = input.find("version");
-        const auto& available = core["available_versions"];
+        const auto& available = server["available_panel_versions"];
         if (version == input.end() || std::ranges::find(available, *version) == available.end()) {
-            return {false, "Choose an available preview core version."};
+            return {false, "Choose an available preview panel version."};
         }
-        if (*version == core["active_version"]) {
-            return {false, "That preview core version is already active."};
+        if (*version == server["version"]) {
+            return {false, "That preview panel version is already active."};
         }
-        core["active_version"] = *version;
-        return complete("Updated the preview core to " + version->get<std::string>() + '.');
+        server["version"] = *version;
+        return complete("Updated the preview panel to " + version->get<std::string>() + '.');
     }
 
     Reply create_core_config(const Json& input)
@@ -903,8 +903,8 @@ private:
         if (action == "start_core" || action == "stop_core") {
             return change_core_state(action);
         }
-        if (action == "update_core") {
-            return update_core(input);
+        if (action == "update_panel") {
+            return update_panel(input);
         }
         if (action == "create_core_config") {
             return create_core_config(input);

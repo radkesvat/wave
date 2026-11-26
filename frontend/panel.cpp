@@ -343,6 +343,13 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
     ImGui::EndChild();
 }
 
+std::string_view displayed_panel_version(const PanelState& state, const PreviewSession& session)
+{
+    return state.auth.enabled()
+               ? "0.1.0"
+               : view::string_field(view::field(session.data(), "server"), "version", "0.1.0-preview");
+}
+
 const char* dialog_title(PanelDialog dialog, bool authenticated)
 {
     switch (dialog) {
@@ -442,11 +449,13 @@ void render_dialogs(PanelState& state, PreviewSession& session)
                 ImGui::TextWrapped("Return to the demo sign-in screen?");
             }
             break;
-        case PanelDialog::version:
-            ImGui::TextUnformatted(state.auth.enabled() ? "Wave 0.1.0" : "Wave 0.1.0 preview");
+        case PanelDialog::version: {
+            const auto version = displayed_panel_version(state, session);
+            ImGui::Text("Wave %.*s", static_cast<int>(version.size()), version.data());
             ImGui::TextWrapped("Dear ImGui %s / WebAssembly / WebGL 2", IMGUI_VERSION);
             ImGui::TextLinkOpenURL("Project releases", "https://github.com/radkesvat/wave/releases");
             break;
+        }
         case PanelDialog::diagnostics:
             ImGui::TextWrapped("Preview socket: %s", session.status() == PreviewStatus::ready ? "Connected"
                                                      : session.status() == PreviewStatus::loading
@@ -493,7 +502,7 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
 {
     if (state.auth.enabled()) {
         if (state.page == PanelPage::about && !state.auth.username().empty()) {
-            render_about(true);
+            render_about(true, displayed_panel_version(state, session));
         } else {
             ImGui::TextUnformatted(panel_page_name(state.page));
             ImGui::Separator();
@@ -532,8 +541,8 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
         render_users(state.users, session);
         break;
     case PanelPage::server: {
-        const float height = render_server_status(session.data()["server"], state.core_controls, session,
-                                                  stacked_status);
+        const float height =
+            render_server_status(session.data()["server"], state.panel_controls, session, stacked_status);
         if (stacked_status) {
             state.stacked_server_status_height = height + 2 * theme::window_padding.y;
         }
@@ -549,7 +558,7 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
         render_topology(state.topology, session, narrow);
         break;
     case PanelPage::about:
-        render_about();
+        render_about(false, displayed_panel_version(state, session));
         break;
     }
 }
@@ -693,14 +702,16 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
             result += " Latest log: " + message->get_ref<const std::string&>();
         }
     }
+    const auto action = session.feedback_action();
     if (!session.feedback().empty() &&
-        (state.page != PanelPage::server || session.feedback_action().find("_core") == std::string_view::npos)) {
+        (state.page != PanelPage::server ||
+         (action != "update_panel" && action.find("_core") == std::string_view::npos))) {
         result += " ";
         result += session.feedback();
     }
     if (state.page == PanelPage::server) {
         result += ' ' + describe_server_status(session.data()["server"]);
-        result += ' ' + describe_core_controls(state.core_controls, session);
+        result += ' ' + describe_panel_controls(state.panel_controls, session);
     } else if (state.page == PanelPage::topology) {
         result += ' ' + describe_topology(state.topology, session.data()["topology"]);
     }

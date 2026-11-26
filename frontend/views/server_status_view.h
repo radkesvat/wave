@@ -7,11 +7,11 @@
 namespace wave {
 
 class PreviewSession;
-struct CoreControlsState;
+struct PanelControlsState;
 
 bool server_status_has_columns(float content_width, float font_size);
-float render_server_status(const nlohmann::json& server, CoreControlsState& controls, PreviewSession& session,
-                           bool stacked);
+float render_server_status(const nlohmann::json& server, PanelControlsState& controls,
+                           PreviewSession& session, bool stacked);
 std::string describe_server_status(const nlohmann::json& server);
 
 } // namespace wave

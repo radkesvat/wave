@@ -7,7 +7,7 @@
 
 namespace wave {
 
-struct CoreControlsState {
+struct PanelControlsState {
     enum class Dialog {
         none,
         stop,
@@ -29,11 +29,11 @@ struct CoreControlsState {
     std::optional<PreviewReply> reply;
 };
 
-void update_core_controls(CoreControlsState& state, PreviewSession& session);
-float core_controls_height(const CoreControlsState& state, const PreviewSession& session, float width,
-                           bool compact);
-void render_core_controls(CoreControlsState& state, PreviewSession& session, float width, bool compact);
-void render_core_control_dialog(CoreControlsState& state, PreviewSession& session);
-std::string describe_core_controls(const CoreControlsState& state, const PreviewSession& session);
+void update_panel_controls(PanelControlsState& state, PreviewSession& session);
+float panel_controls_height(const PanelControlsState& state, const PreviewSession& session, float width,
+                            bool compact);
+void render_panel_controls(PanelControlsState& state, PreviewSession& session, float width, bool compact);
+void render_panel_control_dialog(PanelControlsState& state, PreviewSession& session);
+std::string describe_panel_controls(const PanelControlsState& state, const PreviewSession& session);
 
 } // namespace wave

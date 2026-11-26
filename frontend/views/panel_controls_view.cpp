@@ -1,4 +1,4 @@
-#include "core_controls_view.h"
+#include "panel_controls_view.h"
 
 #include "browser_ui.h"
 #include "dialog.h"
@@ -14,16 +14,16 @@ namespace {
 
 using namespace view;
 using theme::Color;
-using CoreDialog = CoreControlsState::Dialog;
+using ControlsDialog = PanelControlsState::Dialog;
 
-constexpr char popup_id[] = "###ServerCoreDialog";
-constexpr char target_label[] = "Target version";
+constexpr char popup_id[] = "###ServerPanelControlsDialog";
+constexpr char target_label[] = "Target panel version";
 constexpr char pending_message[] = "Applying to preview…";
 constexpr char disconnected_message[] = "The preview connection closed before confirming the change.";
 
-const Json& core_snapshot(const PreviewSession& session)
+const Json& server_snapshot(const PreviewSession& session)
 {
-    return field(field(session.data(), "server"), "core");
+    return field(session.data(), "server");
 }
 
 bool supports(const Json& core, std::string_view capability)
@@ -41,9 +41,9 @@ bool can_stop(const Json& core)
     return supports(core, "lifecycle") && string_field(core, "state") == "running";
 }
 
-bool has_version(const Json& core, std::string_view version)
+bool has_panel_version(const Json& server, std::string_view version)
 {
-    const auto& versions = array_field(core, "available_versions");
+    const auto& versions = array_field(server, "available_panel_versions");
     return !version.empty() && std::ranges::find(versions, version, [](const Json& item) {
                                    return string_value(item);
                                }) != versions.end();
@@ -63,25 +63,26 @@ std::string core_state_label(const Json& core)
     return std::format("Preview core {}.", state);
 }
 
-std::string core_notice(const Json& core, const PreviewSession& session)
+std::string controls_notice(const Json& server, const PreviewSession& session)
 {
     if (!session.ready()) {
         return session.status() == PreviewStatus::loading
                    ? "Reconnecting to the preview…"
                    : "Preview disconnected. Showing last reported values.";
     }
+    const auto& core = field(server, "core");
     const bool lifecycle = supports(core, "lifecycle");
-    const bool versions = supports(core, "versions") && !array_field(core, "available_versions").empty();
+    const bool versions = !array_field(server, "available_panel_versions").empty();
     const bool configs = can_edit_configs(core);
     if (!lifecycle && !versions && !configs) {
-        return "Core controls are unavailable in this preview.";
+        return "Panel controls are unavailable in this preview.";
     }
     std::string notice;
     if (!lifecycle) {
         notice = "Lifecycle controls are unavailable. ";
     }
     if (!versions) {
-        notice += "Version updates are unavailable. ";
+        notice += "Panel version updates are unavailable. ";
     }
     if (!configs) {
         notice += "Config changes are unavailable.";
@@ -89,20 +90,20 @@ std::string core_notice(const Json& core, const PreviewSession& session)
     return notice;
 }
 
-void open_dialog(CoreControlsState& state, CoreDialog dialog)
+void open_dialog(PanelControlsState& state, ControlsDialog dialog)
 {
     state.dialog = dialog;
     state.open_dialog = true;
     state.reply.reset();
 }
 
-void close_dialog(CoreControlsState& state)
+void close_dialog(PanelControlsState& state)
 {
     ImGui::CloseCurrentPopup();
-    state.dialog = CoreDialog::none;
+    state.dialog = ControlsDialog::none;
 }
 
-void submit(CoreControlsState& state, PreviewSession& session, Json request)
+void submit(PanelControlsState& state, PreviewSession& session, Json request)
 {
     if (state.request_id) {
         return;
@@ -115,7 +116,7 @@ void submit(CoreControlsState& state, PreviewSession& session, Json request)
     }
 }
 
-void show_result(const CoreControlsState& state, const PreviewSession& session)
+void show_result(const PanelControlsState& state, const PreviewSession& session)
 {
     if (state.request_id) {
         wrapped(pending_message, Color::info);
@@ -142,14 +143,14 @@ struct ControlsLayout {
     std::string notice;
     std::string_view result;
 
-    ControlsLayout(const CoreControlsState& state, const PreviewSession& session, float width, bool compact)
+    ControlsLayout(const PanelControlsState& state, const PreviewSession& session, const Json& server,
+                   float width, bool compact)
         : width(width), frame_height(control_height(compact ? 32.0f : 40.0f)),
-          has_core(core_snapshot(session).is_object()),
+          has_core(field(server, "core").is_object()),
           reconnect(session.status() == PreviewStatus::unavailable),
-          state_label(core_state_label(core_snapshot(session))),
-          active_label(std::format("Active version {}",
-                                   string_field(core_snapshot(session), "active_version", "unavailable"))),
-          notice(core_notice(core_snapshot(session), session)),
+          state_label(core_state_label(field(server, "core"))),
+          active_label(std::format("Panel version {}", string_field(server, "version", "unavailable"))),
+          notice(controls_notice(server, session)),
           result(state.request_id ? pending_message
                  : state.reply    ? std::string_view(state.reply->message)
                                   : "")
@@ -167,10 +168,11 @@ struct ControlsLayout {
         };
         if (has_core) {
             line(state_label);
-            line(active_label);
-            line(target_label);
-            height += 6 * (frame_height + gap) + 2 * gap;
+            height += 4 * (frame_height + gap) + 2 * gap;
         }
+        line(active_label);
+        line(target_label);
+        height += 2 * (frame_height + gap);
         line(notice);
         line(result);
         if (reconnect) {
@@ -188,20 +190,21 @@ struct ControlsLayout {
     }
 };
 
-void draw_versions(CoreControlsState& state, const Json& core, const ControlsLayout& layout, bool disabled)
+void draw_panel_versions(PanelControlsState& state, const Json& server, const ControlsLayout& layout,
+                         bool disabled)
 {
     wrapped(layout.active_label);
     wrapped(target_label, Color::secondary_text);
-    const auto& versions = array_field(core, "available_versions");
-    const auto active = string_field(core, "active_version");
+    const auto& versions = array_field(server, "available_panel_versions");
+    const auto active = string_field(server, "version");
     const auto selected = state.target_version.empty() ? active : std::string_view(state.target_version);
-    disabled |= !supports(core, "versions") || versions.empty();
+    disabled |= versions.empty();
     ImGui::BeginDisabled(disabled);
     ImGui::SetNextItemWidth(layout.width);
     const auto padding = ImGui::GetStyle().FramePadding;
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
                         {padding.x, (layout.frame_height - ImGui::GetFontSize()) * 0.5f});
-    if (ImGui::BeginCombo("##target-core-version", selected.empty() ? "Choose version" : selected.data())) {
+    if (ImGui::BeginCombo("##target-panel-version", selected.empty() ? "Choose version" : selected.data())) {
         std::string_view picked;
         for (const auto& item : versions) {
             const auto version = string_value(item);
@@ -222,18 +225,18 @@ void draw_versions(CoreControlsState& state, const Json& core, const ControlsLay
     }
     ImGui::PopStyleVar();
     ImGui::EndDisabled();
-    if (layout.button("Update core",
+    if (layout.button("Update panel",
                       disabled || state.target_version.empty() || state.target_version == active)) {
-        open_dialog(state, CoreDialog::update);
+        open_dialog(state, ControlsDialog::update);
     }
 }
 
-void render_create(CoreControlsState& state, PreviewSession& session, const Json& core)
+void render_create(PanelControlsState& state, PreviewSession& session, const Json& core)
 {
     const bool pending = state.request_id.has_value();
     const bool unavailable = !session.ready() || !can_edit_configs(core);
     Dialog frame(
-        "Create new config###ServerCoreDialog", 380,
+        "Create new config###ServerPanelControlsDialog", 380,
         {{"Cancel", pending},
          {"Create config", pending || unavailable || core_config_name(state.config_name.data()).empty()}});
     if (!frame) {
@@ -266,10 +269,10 @@ void render_create(CoreControlsState& state, PreviewSession& session, const Json
     }
 }
 
-void render_configs(CoreControlsState& state, PreviewSession& session, const Json& core)
+void render_configs(PanelControlsState& state, PreviewSession& session, const Json& core)
 {
     const bool pending = state.request_id.has_value();
-    Dialog frame("Manage configs###ServerCoreDialog", 380, {{"Close", pending}});
+    Dialog frame("Manage configs###ServerPanelControlsDialog", 380, {{"Close", pending}});
     if (!frame) {
         return;
     }
@@ -301,7 +304,7 @@ void render_configs(CoreControlsState& state, PreviewSession& session, const Jso
         if (theme::button("Remove", {0, control_height()})) {
             state.remove_id = id;
             state.remove_name = name;
-            state.dialog = CoreDialog::remove;
+            state.dialog = ControlsDialog::remove;
             state.reply.reset();
         }
         ImGui::EndDisabled();
@@ -314,16 +317,17 @@ void render_configs(CoreControlsState& state, PreviewSession& session, const Jso
     }
 }
 
-void render_confirmation(CoreControlsState& state, PreviewSession& session, const Json& core)
+void render_confirmation(PanelControlsState& state, PreviewSession& session, const Json& server)
 {
-    const bool remove = state.dialog == CoreDialog::remove;
+    const auto& core = field(server, "core");
+    const bool remove = state.dialog == ControlsDialog::remove;
     const char* title;
     const char* label;
     std::string question;
     std::string_view unavailable;
     Json request;
     if (remove) {
-        title = "Remove config###ServerCoreDialog";
+        title = "Remove config###ServerPanelControlsDialog";
         label = "Remove";
         question = std::format("Remove {} from the preview config list?", state.remove_name);
         const auto* config = find_config(core, state.remove_id);
@@ -333,20 +337,18 @@ void render_confirmation(CoreControlsState& state, PreviewSession& session, cons
             unavailable = "The active preview config is protected.";
         }
         request = {{"action", "remove_core_config"}, {"id", state.remove_id}};
-    } else if (state.dialog == CoreDialog::update) {
-        title = "Update core###ServerCoreDialog";
-        label = "Update core";
-        question = std::format(
-            "Apply {} as the preview core version? The preview changes the reported version in memory.",
-            state.target_version);
-        if (!supports(core, "versions") || !has_version(core, state.target_version)) {
-            unavailable = "That preview version is unavailable.";
-        } else if (state.target_version == string_field(core, "active_version")) {
-            unavailable = "That preview version is already active.";
+    } else if (state.dialog == ControlsDialog::update) {
+        title = "Update panel###ServerPanelControlsDialog";
+        label = "Update panel";
+        question = std::format("Apply {} as the preview panel version?", state.target_version);
+        if (!has_panel_version(server, state.target_version)) {
+            unavailable = "That preview panel version is unavailable.";
+        } else if (state.target_version == string_field(server, "version")) {
+            unavailable = "That preview panel version is already active.";
         }
-        request = {{"action", "update_core"}, {"version", state.target_version}};
+        request = {{"action", "update_panel"}, {"version", state.target_version}};
     } else {
-        title = "Stop core###ServerCoreDialog";
+        title = "Stop core###ServerPanelControlsDialog";
         label = "Stop core";
         question = "Stop the preview core? This changes its simulated lifecycle state.";
         if (!can_stop(core)) {
@@ -369,7 +371,7 @@ void render_confirmation(CoreControlsState& state, PreviewSession& session, cons
     const int action = frame.footer();
     if (action == 0 || (state.reply && state.reply->ok())) {
         if (remove) {
-            state.dialog = CoreDialog::manage;
+            state.dialog = ControlsDialog::manage;
             if (action == 0) {
                 state.reply.reset();
             }
@@ -383,7 +385,7 @@ void render_confirmation(CoreControlsState& state, PreviewSession& session, cons
 
 } // namespace
 
-void update_core_controls(CoreControlsState& state, PreviewSession& session)
+void update_panel_controls(PanelControlsState& state, PreviewSession& session)
 {
     if (auto reply = session.take_reply(state.request_id)) {
         if (reply->status == PreviewReply::Status::timed_out) {
@@ -394,44 +396,47 @@ void update_core_controls(CoreControlsState& state, PreviewSession& session)
         }
         state.reply = std::move(reply);
     }
-    const auto& core = core_snapshot(session);
-    if (state.dialog != CoreDialog::update && (state.target_version == string_field(core, "active_version") ||
-                                               !has_version(core, state.target_version))) {
+    const auto& server = server_snapshot(session);
+    if (state.dialog != ControlsDialog::update && (state.target_version == string_field(server, "version") ||
+                                                   !has_panel_version(server, state.target_version))) {
         state.target_version.clear();
     }
 }
 
-float core_controls_height(const CoreControlsState& state, const PreviewSession& session, float width,
-                           bool compact)
+float panel_controls_height(const PanelControlsState& state, const PreviewSession& session, float width,
+                            bool compact)
 {
-    return ControlsLayout(state, session, width, compact).height();
+    return ControlsLayout(state, session, server_snapshot(session), width, compact).height();
 }
 
-void render_core_controls(CoreControlsState& state, PreviewSession& session, float width, bool compact)
+void render_panel_controls(PanelControlsState& state, PreviewSession& session, float width, bool compact)
 {
-    const auto& core = core_snapshot(session);
-    const ControlsLayout layout(state, session, width, compact);
+    const auto& server = server_snapshot(session);
+    const auto& core = field(server, "core");
+    const ControlsLayout layout(state, session, server, width, compact);
+    const bool disabled = !session.ready() || state.request_id.has_value();
     ImGui::BeginGroup();
     if (layout.has_core) {
         wrapped(layout.state_label);
-        const bool disabled = !session.ready() || state.request_id.has_value();
         const bool start_disabled =
             disabled || !supports(core, "lifecycle") || field(core, "state") != "stopped";
-        if (layout.button("Start", start_disabled)) {
+        if (layout.button("Start core", start_disabled)) {
             submit(state, session, {{"action", "start_core"}});
         }
-        if (layout.button("Stop", disabled || !can_stop(core))) {
-            open_dialog(state, CoreDialog::stop);
+        if (layout.button("Stop core", disabled || !can_stop(core))) {
+            open_dialog(state, ControlsDialog::stop);
         }
         ImGui::Spacing();
-        draw_versions(state, core, layout, disabled);
+    }
+    draw_panel_versions(state, server, layout, disabled);
+    if (layout.has_core) {
         ImGui::Spacing();
         if (layout.button("Create config", disabled || !can_edit_configs(core))) {
             state.config_name.fill('\0');
-            open_dialog(state, CoreDialog::create);
+            open_dialog(state, ControlsDialog::create);
         }
         if (layout.button("Manage configs", disabled || !field(core, "configs").is_array())) {
-            open_dialog(state, CoreDialog::manage);
+            open_dialog(state, ControlsDialog::manage);
         }
     }
     if (!layout.notice.empty()) {
@@ -458,57 +463,59 @@ void render_core_controls(CoreControlsState& state, PreviewSession& session, flo
     state.keyboard_focus = focus;
 }
 
-void render_core_control_dialog(CoreControlsState& state, PreviewSession& session)
+void render_panel_control_dialog(PanelControlsState& state, PreviewSession& session)
 {
     if (state.open_dialog) {
         ImGui::OpenPopup(popup_id);
         state.open_dialog = false;
     }
-    const auto& core = core_snapshot(session);
+    const auto& server = server_snapshot(session);
+    const auto& core = field(server, "core");
     switch (state.dialog) {
-    case CoreDialog::none:
+    case ControlsDialog::none:
         break;
-    case CoreDialog::create:
+    case ControlsDialog::create:
         render_create(state, session, core);
         break;
-    case CoreDialog::manage:
+    case ControlsDialog::manage:
         render_configs(state, session, core);
         break;
-    case CoreDialog::stop:
-    case CoreDialog::update:
-    case CoreDialog::remove:
-        render_confirmation(state, session, core);
+    case ControlsDialog::stop:
+    case ControlsDialog::update:
+    case ControlsDialog::remove:
+        render_confirmation(state, session, server);
         break;
     }
 }
 
-std::string describe_core_controls(const CoreControlsState& state, const PreviewSession& session)
+std::string describe_panel_controls(const PanelControlsState& state, const PreviewSession& session)
 {
-    const auto& core = core_snapshot(session);
-    std::string description = "Core Controls. ";
+    const auto& server = server_snapshot(session);
+    const auto& core = field(server, "core");
+    std::string description = "Panel Controls. ";
     if (core.is_object()) {
-        const auto active = string_field(core, "active_version", "unavailable");
-        const auto target = state.target_version.empty() ? active : std::string_view(state.target_version);
-        description +=
-            std::format("{} Active version {}. Target version {}. ", core_state_label(core), active, target);
+        description += core_state_label(core) + ' ';
     }
-    const auto notice = core_notice(core, session);
+    const auto active = string_field(server, "version", "unavailable");
+    const auto target = state.target_version.empty() ? active : std::string_view(state.target_version);
+    description += std::format("Panel version {}. Target panel version {}. ", active, target);
+    const auto notice = controls_notice(server, session);
     if (!notice.empty()) {
         description += notice + ' ';
     }
     switch (state.dialog) {
-    case CoreDialog::none:
+    case ControlsDialog::none:
         break;
-    case CoreDialog::stop:
+    case ControlsDialog::stop:
         description += "Confirm stop. ";
         break;
-    case CoreDialog::update:
-        description += std::format("Confirm update to {}. ", state.target_version);
+    case ControlsDialog::update:
+        description += std::format("Confirm panel update to {}. ", state.target_version);
         break;
-    case CoreDialog::create:
+    case ControlsDialog::create:
         description += "Create new config. ";
         break;
-    case CoreDialog::manage: {
+    case ControlsDialog::manage: {
         description += "Manage configs. ";
         const auto& configs = array_field(core, "configs");
         if (configs.empty()) {
@@ -521,7 +528,7 @@ std::string describe_core_controls(const CoreControlsState& state, const Preview
         }
         break;
     }
-    case CoreDialog::remove:
+    case ControlsDialog::remove:
         description += std::format("Confirm removal of {}. ", state.remove_name);
         break;
     }

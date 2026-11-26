@@ -214,9 +214,9 @@ scrollbars use those colors and rounded ends where browser styling is
 supported. Overlay scrollbars use the browser's native appearance.
 
 Server Status shows CPU and Memory in the top row when the work pane is
-wide enough. Server Information and Core Controls each have their own card
+wide enough. Server Information and Panel Controls each have their own card
 under CPU, beside Traffic. When space is tight, the five cards stack in order
-from CPU and Memory through Server Information, Core Controls, and Traffic.
+from CPU and Memory through Server Information, Panel Controls, and Traffic.
 On a phone, swipe through the cards to reach Logs.
 At short desktop heights, scroll inside the work pane to see the rest of
 the grid. Server Status reserves the browser scrollbar gutter on platforms
@@ -281,23 +281,24 @@ field contains 13 samples taken five minutes apart, oldest first.
 With the default listener, open `http://<server-ip>:2045/` from another
 machine to reach the preview.
 
-### Preview core controls
+### Panel Controls and versioning
 
-Server Status reports the preview core's lifecycle and active version separately
-from the Wave version in Server Information. Each button and the target
-version picker fill their own row in Core Controls. The desktop grid uses
-shorter rows, and the stacked layout gives touch controls more height.
-**Start** is available while stopped, and **Stop** is available while running.
-Stop requires confirmation.
+Each Wave panel release uses the same version number as the WaterWall core
+release it supports. For example, Wave 1.6.0 would support WaterWall 1.6.0.
+
+Each button and the target panel version picker fill their own row in Panel
+Controls. The desktop grid uses shorter rows, and the stacked layout gives
+touch controls more height. **Start core** is available while the preview
+core is stopped. **Stop core** is available while it is running and requires
+confirmation.
 These actions change the simulated lifecycle state in memory. Live WaterWall
 starts its executable with a core JSON input and loads the listed node configs
 during startup. Live start and stop are unimplemented in Wave.
 
-Picking a target version is local to the browser. Confirm **Update core** to
-apply a different version from the preview's fixed catalog. That changes the
-reported preview version immediately. The lifecycle state and sample charts
-continue through the change. A live version install or restart is outside this
-preview workflow.
+Pick a target Wave panel version from the preview's sample catalog. The
+choice stays in the browser until you confirm **Update panel**. The preview
+stores the reported panel version in memory and displays it in Server
+Information, About, and the Wave version dialog.
 
 **Create config** saves an in-memory entry by name with its enabled checkbox
 clear. Names are case-sensitive, can contain up to 64 UTF-8 bytes, and must be
@@ -306,19 +307,20 @@ characters are invalid. **Manage configs** can enable or disable an entry, or
 remove it after confirmation. The active entry is protected against both
 changes, including while the preview core is stopped. Enabling an entry only
 changes its preview flag. Live config-file writes, activation, and reload are
-unimplemented. Core control changes are shared by connected browsers and reset
+unimplemented. Panel Controls changes are shared by connected browsers and reset
 with the preview backend.
 
-The preview snapshot reports `server.core` with `state`, `active_version`,
-`available_versions`, `configs`, and the `lifecycle`, `versions`, and `configs`
-capability flags. Requests use the existing `request_id` and snapshot reply.
+The preview snapshot reports the current panel version in `server.version`
+and the panel catalog in `server.available_panel_versions`. The `server.core`
+object reports `state`, `configs`, and the `lifecycle` and `configs` capability
+flags. Requests use the existing `request_id` and snapshot reply.
 While a reply is pending, the controls block duplicate submissions. If the
 connection closes, Server Status shows the last snapshot and offers to reconnect.
 
 | Action | Additional request fields |
 | --- | --- |
 | `start_core`, `stop_core` | None |
-| `update_core` | `version` from `available_versions` |
+| `update_panel` | `version` from `server.available_panel_versions` |
 | `create_core_config` | `name` |
 | `set_core_config_enabled` | Config `id` and boolean `enabled` |
 | `remove_core_config` | Config `id` |

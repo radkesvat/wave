@@ -538,10 +538,11 @@ function statusFixture() {
         memory_used_gib: 4, memory_total_gib: 16, users_total: 2, users_enabled: 2, users_online: 1,
         upload_rate: 2, download_rate: 6, upload_total: 12.5, download_total: 55.8,
         cpu_history: [15, 35, 25], memory_history: [1, 6, 4], upload_history: [1, 2, 2],
-        download_history: [8, 4, 6], core: {
-            state: 'running', active_version: '1.0.0-preview',
-            available_versions: ['1.0.0-preview', '1.1.0-preview', '1.2.0-preview'],
-            capabilities: { lifecycle: true, versions: true, configs: true },
+        download_history: [8, 4, 6],
+        available_panel_versions: ['0.1.0-preview', '0.2.0-preview', '0.3.0-preview'],
+        core: {
+            state: 'running',
+            capabilities: { lifecycle: true, configs: true },
             configs: [{ id: 1, name: 'Default', enabled: true, active: true }],
         } };
     return data;
@@ -593,9 +594,9 @@ async function desktopStatusGrid(page, viewport) {
     assert.ok(Math.abs((cpu[1] - cpu[0]) - (memory[1] - memory[0])) <= 1);
     assert.ok(memory[0] > cpu[1], 'A gutter separates the two main columns.');
     assert.deepEqual(traffic, memory, 'Traffic and Memory use the same right column.');
-    assert.deepEqual([info[0], controls[1]], cpu, 'Server Information and Core Controls share the left column.');
+    assert.deepEqual([info[0], controls[1]], cpu, 'Server Information and Panel Controls share the left column.');
     assert.ok(Math.abs((info[1] - info[0]) - (controls[1] - controls[0])) <= 1);
-    assert.ok(controls[0] > info[1], 'A gutter separates Server Information and Core Controls.');
+    assert.ok(controls[0] > info[1], 'A gutter separates Server Information and Panel Controls.');
     const rightColumn = await statusCards(page, memory[1] - 8, 58, bottom);
     assert.equal(rightColumn.length, 2, 'The right column has two visible cards.');
     for (const [row, right] of rightColumn.entries()) {
@@ -605,10 +606,10 @@ async function desktopStatusGrid(page, viewport) {
         assert.ok(Math.abs(right.bottom - column[row].bottom) <= 2);
     }
     const [controlsCard] = await statusCards(page, controls[0] + 6, column[1].top - 5, bottom);
-    assert.ok(controlsCard, 'Core Controls has a separate card surface.');
+    assert.ok(controlsCard, 'Panel Controls has a separate card surface.');
     assert.equal(controlsCard.titleEnd, column[1].titleEnd);
     assert.ok(Math.abs(controlsCard.bottom - column[1].bottom) <= 2,
-        `Core Controls ends at ${controlsCard.bottom} and Server Information ends at ${column[1].bottom}.`);
+        `Panel Controls ends at ${controlsCard.bottom} and Server Information ends at ${column[1].bottom}.`);
     return { cards: column, columns: bands[0], controls: { ...controlsCard, left: controls[0], right: controls[1] } };
 }
 
@@ -792,7 +793,7 @@ test('Server Status stacks the five cards in reading order and swipes through to
             series.push(colors.map(position => position >= 0));
         }
         assert.deepEqual(series, [[false, true], [true, false], [false, false], [false, false], [true, true]],
-            'CPU, Memory, Server Information, Core Controls, and Traffic appear in order above Logs.');
+            'CPU, Memory, Server Information, Panel Controls, and Traffic appear in order above Logs.');
     } finally {
         await page.close();
     }
@@ -847,7 +848,7 @@ test('Server Status keeps the Traffic plot and Logs in place when phone legends 
 
 const coreDesktop = { width: 1280, height: 1080 };
 
-async function coreDesktopControls(page) {
+async function panelDesktopControls(page) {
     const { controls } = await desktopStatusGrid(page, coreDesktop);
     const x = controls.right - 16;
     const rowPitch = 37;
@@ -866,7 +867,7 @@ async function pressCoreFooter(page, activate, primary = true) {
     await activate(right - (primary ? 42 : 147), bottom - 25);
 }
 
-test('Server Status selects locally and confirms preview updates and Stop before Start becomes available', async () => {
+test('Server Status selects a panel version and confirms updates independently of the core lifecycle', async () => {
     const page = await browser.newPage({ viewport: coreDesktop });
     const data = statusFixture();
     const core = data.server.core;
@@ -877,36 +878,36 @@ test('Server Status selects locally and confirms preview updates and Stop before
     try {
         await page.goto(url);
         await openView(page, 'Server Status');
-        await status(/Preview core running\. Active version 1\.0\.0-preview/);
-        const controls = await coreDesktopControls(page);
+        await status(/Preview core running\. Panel version 0\.1\.0-preview/);
+        const controls = await panelDesktopControls(page);
         await click(...controls.start);
         await click(...controls.update);
         await click(...controls.target);
         await click(...controls.secondVersion);
-        await status(/Active version 1\.0\.0-preview\. Target version 1\.1\.0-preview/);
+        await status(/Panel version 0\.1\.0-preview\. Target panel version 0\.2\.0-preview/);
         assert.equal(preview.actions.length, 0, 'Choosing a version sends no mutation.');
 
         await click(...controls.update);
-        await status(/Confirm update to 1\.1\.0-preview/);
+        await status(/Confirm panel update to 0\.2\.0-preview/);
         await pressCoreFooter(page, click, false);
-        await status(/Target version 1\.1\.0-preview\.$/);
+        await status(/Target panel version 0\.2\.0-preview\.$/);
         assert.equal(preview.actions.length, 0);
         await click(...controls.update);
         await confirm();
         const failed = await preview.action(0);
-        assertRequest(failed.request, { action: 'update_core', version: '1.1.0-preview' });
-        await status(/Active version 1\.0\.0-preview.*Applying to preview/);
+        assertRequest(failed.request, { action: 'update_panel', version: '0.2.0-preview' });
+        await status(/Panel version 0\.1\.0-preview.*Applying to preview/);
         await confirm();
         assert.equal(preview.actions.length, 1, 'A pending confirmation cannot submit again.');
-        failed.reply({ ok: false, feedback: 'Preview update rejected.' });
-        await status(/Active version 1\.0\.0-preview.*Confirm update to 1\.1\.0-preview.*Preview update rejected/);
+        failed.reply({ ok: false, feedback: 'Preview panel update rejected.' });
+        await status(/Panel version 0\.1\.0-preview.*Confirm panel update to 0\.2\.0-preview.*Preview panel update rejected/);
         await confirm();
         const updated = await preview.action(1);
-        const retryId = assertRequest(updated.request, { action: 'update_core', version: '1.1.0-preview' });
+        const retryId = assertRequest(updated.request, { action: 'update_panel', version: '0.2.0-preview' });
         assert.notEqual(retryId, failed.request.request_id);
-        core.active_version = '1.1.0-preview';
-        updated.reply({ feedback: 'Preview version updated.' });
-        await status(/Preview core running\. Active version 1\.1\.0-preview.*Preview version updated/);
+        data.server.version = '0.2.0-preview';
+        updated.reply({ feedback: 'Preview panel version updated.' });
+        await status(/Preview core running\. Panel version 0\.2\.0-preview.*Preview panel version updated/);
 
         await click(...controls.stop);
         await status(/Confirm stop/);
@@ -961,7 +962,7 @@ test('Server Status stacks controls and edits preview configs by touch', async (
         const offset = await page.evaluate(() => scrollY);
         const belowInfo = (await statusCards(page, 28, 36, portrait.height))
             .find(card => card.top > info.bottom - offset);
-        assert.ok(belowInfo, 'Core Controls has its own card below Server Information.');
+        assert.ok(belowInfo, 'Panel Controls has its own card below Server Information.');
         await page.evaluate(y => window.scrollTo(0, y - 40), belowInfo.top + offset);
         await settleCanvas(page);
         const [controls] = await statusCards(page, 28, 36, portrait.height);
@@ -1043,16 +1044,16 @@ test('Server Status explains unavailable controls and retains the last snapshot 
         await page.goto(url);
         await openView(page, 'Server Status');
         await page.getByRole('img', { name: /Lifecycle controls are unavailable/ }).waitFor();
-        const controls = await coreDesktopControls(page);
+        const controls = await panelDesktopControls(page);
         await canvasClick(page, ...controls.start);
         assert.equal(preview.actions.length, 0);
         data.server.core.capabilities.lifecycle = true;
         await preview.broadcast();
-        await page.getByRole('img', { name: /Target version 1\.0\.0-preview\.$/ }).waitFor();
+        await page.getByRole('img', { name: /Target panel version 0\.1\.0-preview\.$/ }).waitFor();
         await canvasClick(page, ...controls.start);
         assertRequest((await preview.action(0)).request, { action: 'start_core' });
         await preview.close();
-        await page.getByRole('img', { name: /CPU 25\.0%.*Preview core stopped.*Active version 1\.0\.0-preview.*Preview disconnected.*closed before confirming the change/ }).waitFor();
+        await page.getByRole('img', { name: /CPU 25\.0%.*Preview core stopped.*Panel version 0\.1\.0-preview.*Preview disconnected.*closed before confirming the change/ }).waitFor();
         await canvasClick(page, ...controls.start);
         assert.equal(preview.actions.length, 1);
     } finally {

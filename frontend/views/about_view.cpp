@@ -4,9 +4,10 @@
 
 namespace wave {
 
-void render_about(bool authenticated)
+void render_about(bool authenticated, std::string_view version)
 {
-    ImGui::TextColored(theme::rgba(theme::Color::accent), "Wave 0.1.0");
+    ImGui::TextColored(theme::rgba(theme::Color::accent), "Wave %.*s", static_cast<int>(version.size()),
+                       version.data());
     ImGui::TextWrapped(
         authenticated ? "Wave is a browser panel for the WaterWall core."
                       : "Wave is a browser panel for the WaterWall core. This workspace uses sample data.");

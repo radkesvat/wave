@@ -1,6 +1,6 @@
 #include "server_status_view.h"
 
-#include "core_controls_view.h"
+#include "panel_controls_view.h"
 #include "server_status_plot.h"
 #include "view_helpers.h"
 
@@ -100,7 +100,7 @@ InfoRows server_information(const Json& server, const StatusSamples& samples)
         {{"Name", std::string(string_field(server, "name", "Wave sample"))},
          {"Region", std::string(string_field(server, "region", "Preview"))},
          {"Platform", std::string(string_field(server, "platform", "Demo"))},
-         {"Version", std::string(string_field(server, "version", "0.1.0"))},
+         {"Panel version", std::string(string_field(server, "version", "Unavailable"))},
          {"Uptime", std::format("{}d {}h {}m", uptime / 1440, uptime / 60 % 24, uptime % 60)},
          {"CPU cores", std::to_string(integer_field(server, "cpu_cores", 4))},
          {"Memory", samples.memory_value()},
@@ -279,10 +279,10 @@ bool server_status_has_columns(float content_width, float font_size)
     return content_width >= 2 * 320 * font_size / theme::secondary_font_size + gutter;
 }
 
-float render_server_status(const Json& server, CoreControlsState& controls, PreviewSession& session,
+float render_server_status(const Json& server, PanelControlsState& controls, PreviewSession& session,
                            bool stacked)
 {
-    update_core_controls(controls, session);
+    update_panel_controls(controls, session);
     const StatusSamples samples(server);
     const double memory_ceiling = samples.memory_capacity > 0
                                       ? samples.memory_capacity
@@ -323,7 +323,7 @@ float render_server_status(const Json& server, CoreControlsState& controls, Prev
     const float card_frame_height = title_band_height() + 2 * card_padding.y;
     float info_height = card_frame_height + information.height;
     float controls_height =
-        card_frame_height + core_controls_height(controls, session, controls_body, !stacked);
+        card_frame_height + panel_controls_height(controls, session, controls_body, !stacked);
     if (!stacked) {
         const float top_minimum = std::max(cpu_height, memory_height);
         const float bottom_minimum = std::max({info_height, controls_height, traffic_height});
@@ -348,15 +348,15 @@ float render_server_status(const Json& server, CoreControlsState& controls, Prev
         draw_information(info, information);
     }
     ImGui::EndChild();
-    if (begin_card("Core Controls", {controls_x, controls_y}, {controls_width, controls_height})) {
-        render_core_controls(controls, session, controls_body, !stacked);
+    if (begin_card("Panel Controls", {controls_x, controls_y}, {controls_width, controls_height})) {
+        render_panel_controls(controls, session, controls_body, !stacked);
     }
     ImGui::EndChild();
     chart_card(
         "Traffic", {right_x, traffic_y}, {right_width, traffic_height}, traffic, traffic_legend,
         traffic_ticks, axis_gutter, "MiB/s", traffic_maximum,
         {{samples.upload, "Upload", traffic[0].color}, {samples.download, "Download", traffic[1].color}});
-    render_core_control_dialog(controls, session);
+    render_panel_control_dialog(controls, session);
     return traffic_y + traffic_height - start.y;
 }
 

@@ -317,26 +317,30 @@ test('validates and shares sample node changes and removes references to deleted
     assert.notEqual(replacement.data.topology.nodes.at(-1).id, node.id);
 });
 
-test('simulates core lifecycle and version changes in preview snapshots', async t => {
+test('simulates core lifecycle and panel version changes independently', async t => {
     const { socket, initial } = await connectPreview(t);
     const observer = await connectPreview(t);
-    const core = initial.server.core;
+    const { core, version: initialVersion, available_panel_versions: available } = initial.server;
     assert.equal(core.state, 'running');
-    assert.ok(core.available_versions.includes(core.active_version));
-    assert.deepEqual(core.capabilities, { lifecycle: true, versions: true, configs: true });
-    const target = core.available_versions.find(version => version !== core.active_version);
+    assert.ok(available.includes(initialVersion));
+    assert.deepEqual(core.capabilities, { lifecycle: true, configs: true });
+    const target = available.find(version => version !== initialVersion);
     assert.ok(target);
 
-    const change = async (action, fields, ok, state, version = core.active_version) => {
+    const change = async (action, fields, ok, state, version = initialVersion) => {
         const reply = await requestPreview(socket, action, fields);
         assert.equal(reply.ok, ok, reply.feedback);
-        assert.deepEqual(reply.data.server.core, { ...core, state, active_version: version });
-        assert.equal(reply.data.server.version, initial.server.version, 'Wave reports its own version separately.');
+        assert.deepEqual(reply.data.server.core, { ...core, state });
+        assert.equal(reply.data.server.version, version);
+        assert.deepEqual(reply.data.server.available_panel_versions, available);
         assert.equal(reply.data.server.platform, initial.server.platform);
         return reply;
     };
     await change('start_core', {}, false, 'running');
-    await change('update_core', { version: 'unknown' }, false, 'running');
+    for (const version of [initialVersion, 'unknown', 1, undefined]) {
+        await change('update_panel', { version }, false, 'running');
+    }
+    await change('update_core', { version: target }, false, 'running');
     const stopped = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'stopped');
     const stop = await change('stop_core', {}, true, 'stopped');
     assert.equal((await stopped).data.server.core.state, 'stopped');
@@ -346,8 +350,10 @@ test('simulates core lifecycle and version changes in preview snapshots', async 
     for (const action of ['stop_core', 'pause_core', 'resume_core']) {
         await change(action, {}, false, 'stopped');
     }
-    await change('update_core', { version: target }, true, 'stopped', target);
-    await change('update_core', { version: target }, false, 'stopped', target);
+    const versionChanged = nextPreviewSnapshot(observer.socket, frame => frame.data.server.version === target);
+    await change('update_panel', { version: target }, true, 'stopped', target);
+    assert.deepEqual((await versionChanged).data.server.core, { ...core, state: 'stopped' });
+    await change('update_panel', { version: target }, false, 'stopped', target);
     await change('start_core', {}, true, 'running', target);
     await change('start_core', {}, false, 'running', target);
 });
