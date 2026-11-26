@@ -8,7 +8,7 @@ void render_about(std::string_view version)
 {
     ImGui::TextColored(theme::rgba(theme::Color::accent), "Wave %.*s", static_cast<int>(version.size()),
                        version.data());
-    ImGui::TextWrapped("Wave is a browser panel for the WaterWall core. This workspace uses sample data.");
+    ImGui::TextWrapped("Wave is a browser panel for the WaterWall core.");
     ImGui::SeparatorText("Projects");
     ImGui::TextLinkOpenURL("Wave source", "https://github.com/radkesvat/wave");
     ImGui::TextLinkOpenURL("WaterWall core", "https://github.com/radkesvat/WaterWall");

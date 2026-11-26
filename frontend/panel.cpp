@@ -99,6 +99,11 @@ bool begin_pane(const char* name, ImVec2 size, Color surface, ImGuiWindowFlags f
     return visible;
 }
 
+std::string_view reported_core_state(const PreviewSession& session)
+{
+    return view::string_field(view::field(view::field(session.data(), "server"), "core"), "state");
+}
+
 float draw_header(const PanelLayout& layout, ImVec2 viewport, bool in_workspace,
                   const PreviewSession& session)
 {
@@ -121,8 +126,7 @@ float draw_header(const PanelLayout& layout, ImVec2 viewport, bool in_workspace,
     if (!in_workspace) {
         return menu_x;
     }
-    const auto& core = view::field(view::field(session.data(), "server"), "core");
-    const auto core_state = view::string_field(core, "state");
+    const auto core_state = reported_core_state(session);
     const auto status = session.ready() && !core_state.empty()       ? std::format("WaterWall {}", core_state)
                         : session.status() == PreviewStatus::loading ? "Connecting to Wave…"
                                                                      : "Wave disconnected";
@@ -554,7 +558,7 @@ void render_dialogs(PanelState& state, PreviewSession& session)
         const float width = sign_out ? 350 : (diagnostics || dialog == PanelDialog::input ? 440 : 365);
         const bool pending = sign_out && state.auth.pending();
         const std::array actions = {DialogAction{sign_out ? "Cancel" : "Close", pending},
-                                    DialogAction{sign_out ? "Sign out" : "Refresh sample data", pending}};
+                                    DialogAction{sign_out ? "Sign out" : "Refresh workspace", pending}};
         const auto count = sign_out || diagnostics ? 2 : 1;
         Dialog frame(title, width, std::span(actions).first(count));
         if (!frame) {
@@ -574,13 +578,19 @@ void render_dialogs(PanelState& state, PreviewSession& session)
             ImGui::TextLinkOpenURL("Project releases", "https://github.com/radkesvat/wave/releases");
             break;
         }
-        case PanelDialog::diagnostics:
+        case PanelDialog::diagnostics: {
             ImGui::TextWrapped("Preview socket: %s", session.status() == PreviewStatus::ready ? "Connected"
                                                      : session.status() == PreviewStatus::loading
                                                          ? "Connecting"
                                                          : "Unavailable");
-            ImGui::TextWrapped("WaterWall: Disconnected");
-            ImGui::TextWrapped("Transport: HTTP and JSON WebSocket");
+            const auto core_state = reported_core_state(session);
+            if (core_state.empty()) {
+                ImGui::TextWrapped("WaterWall state: Unavailable");
+            } else {
+                ImGui::TextWrapped("%s: %.*s", session.ready() ? "WaterWall state" : "Last WaterWall state",
+                                   static_cast<int>(core_state.size()), core_state.data());
+            }
+            ImGui::TextWrapped("Workspace transport: JSON WebSocket");
             ImGui::TextWrapped("Renderer: %.0f frames/s, %.2f× scale", ImGui::GetIO().Framerate,
                                ImGui::GetIO().DisplayFramebufferScale.x);
             if (session.feedback_action() == "refresh") {
@@ -588,6 +598,7 @@ void render_dialogs(PanelState& state, PreviewSession& session)
                                    session.feedback().data());
             }
             break;
+        }
         case PanelDialog::input:
             mini_keyboard(state);
             break;
@@ -600,7 +611,7 @@ void render_dialogs(PanelState& state, PreviewSession& session)
         } else if (action == 1 && sign_out) {
             state.auth.submit(AuthSession::Action::sign_out, nlohmann::json::object());
         } else if (action == 1 && diagnostics && !session.send({{"action", "refresh"}})) {
-            session.start();
+            session.start(true);
         }
     }
     if (state.metrics_open) {

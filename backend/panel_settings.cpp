@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -199,14 +200,14 @@ class DatabaseFile {
     }
 #endif
 
-    std::optional<Json> read_settings() const
+    std::optional<Json> read_settings(bool protect_permissions = true) const
     {
         std::string serialized;
         char buffer[4096];
 #ifdef _WIN32
-        const auto handle =
-            CreateFileW(path_.c_str(), GENERIC_READ | WRITE_DAC, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
-                        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        const auto access = GENERIC_READ | (protect_permissions ? WRITE_DAC : 0);
+        const auto handle = CreateFileW(path_.c_str(), access, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                                        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
         if (handle == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_NOT_FOUND) {
             return std::nullopt;
         }
@@ -220,7 +221,9 @@ class DatabaseFile {
             info.nNumberOfLinks != 1) {
             throw std::runtime_error("wave-db.json must be a regular file beside the executable.");
         }
-        access_.protect(file.get());
+        if (protect_permissions) {
+            access_.protect(file.get());
+        }
         for (;;) {
             DWORD count = 0;
             if (!ReadFile(file.get(), buffer, sizeof(buffer), &count, nullptr)) {
@@ -241,7 +244,8 @@ class DatabaseFile {
         if (file.get() < 0 || fstat(file.get(), &info) != 0 || !S_ISREG(info.st_mode) || info.st_nlink != 1) {
             throw std::runtime_error("wave-db.json must be a regular file beside the executable.");
         }
-        if (info.st_uid != geteuid() || ((info.st_mode & 07777) != 0600 && fchmod(file.get(), 0600) != 0)) {
+        if (info.st_uid != geteuid() ||
+            (protect_permissions && (info.st_mode & 07777) != 0600 && fchmod(file.get(), 0600) != 0)) {
             throw std::runtime_error("wave-db.json must be owned by the Wave user with mode 0600.");
         }
         for (;;) {
@@ -381,9 +385,9 @@ struct LoadedDatabase {
     bool changed;
 };
 
-LoadedDatabase load_database(const DatabaseFile& file)
+LoadedDatabase load_database(const DatabaseFile& file, bool protect_permissions)
 {
-    auto settings = file.read_settings().value_or(Json::object());
+    auto settings = file.read_settings(protect_permissions).value_or(Json::object());
     const auto [admins, added_admins] = settings.emplace("admin", Json::array());
     if (!admins->is_array() || admins->size() > 1) {
         throw std::runtime_error("admin in wave-db.json must be an array "
@@ -417,34 +421,41 @@ struct PanelDatabase::Impl {
         if (!check_only) {
             file.lock();
         }
-        auto loaded = load_database(file);
-        if (loaded.changed && check_only) {
-            file.lock();
-            loaded = load_database(file);
-        }
-        if (loaded.changed) {
-            file.save(loaded.contents);
+        auto loaded = load_database(file, !check_only);
+        if (loaded.changed && !check_only) {
+            save(loaded.contents);
         }
         contents = std::move(loaded.contents);
         settings = std::move(loaded.settings);
     }
 
-    void save_fields(std::initializer_list<std::pair<std::string_view, std::reference_wrapper<const Json>>> fields)
+    Json read_existing() const
     {
-        std::lock_guard lock(write_mutex);
         auto current = file.read_settings();
         if (!current) {
             throw std::runtime_error("Cannot find wave-db.json.");
         }
-        for (const auto& [key, value] : fields) {
-            (*current)[key] = value.get();
-        }
+        return std::move(*current);
+    }
+
+    void save(const Json& next)
+    {
         try {
-            file.save(*current);
+            file.save(next);
         } catch (const DatabaseDirectorySyncError& error) {
             // The replacement is already visible. Do not roll back its associated config files.
             std::cerr << error.what() << '\n';
         }
+    }
+
+    void save_fields(std::initializer_list<std::pair<std::string_view, std::reference_wrapper<const Json>>> fields)
+    {
+        std::lock_guard lock(write_mutex);
+        auto current = read_existing();
+        for (const auto& [key, value] : fields) {
+            current[key] = value.get();
+        }
+        save(current);
     }
 
     fs::path directory;
@@ -478,13 +489,14 @@ const Json& PanelDatabase::initial_contents() const
 
 bool PanelDatabase::claim_waterwall_install()
 {
-    auto& contents = impl_->contents;
-    const auto attempted = contents.find("waterwall_install_attempted");
-    if (attempted != contents.end() && *attempted == true) {
+    std::lock_guard lock(impl_->write_mutex);
+    auto current = impl_->read_existing();
+    const auto attempted = current.find("waterwall_install_attempted");
+    if (attempted != current.end() && *attempted == true) {
         return false;
     }
-    contents["waterwall_install_attempted"] = true;
-    impl_->file.save(contents);
+    current["waterwall_install_attempted"] = true;
+    impl_->save(current);
     return true;
 }
 

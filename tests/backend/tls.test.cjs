@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { execFile } = require('node:child_process');
-const { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } = require('node:fs/promises');
+const { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { dirname, join, resolve } = require('node:path');
 const { test } = require('node:test');
@@ -79,6 +79,24 @@ test('rejects incomplete TLS settings and unsafe certificates before binding', a
     delete settings.tls.private_key;
     await writeFile(config, JSON.stringify(settings));
     await rejectStartup(execute(), /Enabled TLS requires a nonempty tls\.private_key/);
+});
+
+test('requires a fixed HTTPS port in startup and TLS preflight', async t => {
+    const { pair, config, execute } = await deployment(t);
+    await writeTlsConfig(config, pair, { listen: { host: '127.0.0.1', port: 0 } });
+    const message = /Set a fixed listen\.port in wave-db\.json for HTTPS/;
+    await rejectStartup(execute('--check-tls'), message);
+    await rejectStartup(execute(), message);
+});
+
+test('TLS preflight leaves database defaults and permissions unchanged', async t => {
+    const { pair, config, execute } = await deployment(t);
+    await writeTlsConfig(config, pair, { listen: { port: 8443 } });
+    await chmod(config, 0o640);
+    const original = await readFile(config, 'utf8');
+    assert.match((await execute('--check-tls')).stdout, /TLS configuration is valid/);
+    assert.equal(await readFile(config, 'utf8'), original);
+    assert.equal((await stat(config)).mode & 0o777, 0o640);
 });
 
 test('keeps the database and TLS files out of served or checked-in directories', async t => {

@@ -78,7 +78,7 @@ bool validate_site(const std::filesystem::path& site_dir, bool secure)
 }
 
 void configure_workspace_routes(httplib::Server& server, const std::shared_ptr<wave::AuthStore>& store,
-                                const std::shared_ptr<wave::PanelDatabase>& database, bool first_install)
+                                const std::shared_ptr<wave::PanelDatabase>& database)
 {
     server.WebSocket("/ws", [store](const httplib::Request& req, httplib::ws::WebSocket& socket) {
         using namespace std::chrono_literals;
@@ -96,7 +96,7 @@ void configure_workspace_routes(httplib::Server& server, const std::shared_ptr<w
         }
     });
     wave::configure_console_route(server, store, database->directory());
-    wave::configure_preview_routes(server, store, database, first_install);
+    wave::configure_preview_routes(server, store, database);
 }
 
 } // namespace
@@ -128,8 +128,8 @@ int main(int argc, char* argv[])
         std::string authority;
         if (secure) {
 #ifdef WAVE_ENABLE_AUTH
+            server = wave::make_tls_server(*settings.tls, options.site_dir, settings.listen_port);
             if (options.check_tls) {
-                wave::check_tls(*settings.tls, options.site_dir);
                 std::cout << "TLS configuration is valid.\n";
                 return EXIT_SUCCESS;
             }
@@ -137,7 +137,6 @@ int main(int argc, char* argv[])
             if (settings.listen_port != 443) {
                 authority += ':' + std::to_string(settings.listen_port);
             }
-            server = wave::make_tls_server(*settings.tls, options.site_dir, settings.listen_port);
 #else
             throw std::runtime_error("TLS is enabled in wave-db.json. Build with "
                                      "WAVE_ENABLE_AUTH=ON to use it.");
@@ -173,8 +172,7 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
     try {
-        const bool first_install = database->claim_waterwall_install();
-        configure_workspace_routes(*server, store, database, first_install);
+        configure_workspace_routes(*server, store, database);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return EXIT_FAILURE;

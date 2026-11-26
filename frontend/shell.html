@@ -231,6 +231,7 @@
         }
 
         function updateConfigLinks(configs, footer) {
+          const focused = document.activeElement;
           const ids = new Set(configs.map(config => config.id));
           for (const [id, link] of pageLinks) {
             if (id < 0 && !ids.has(id)) {
@@ -238,13 +239,18 @@
               pageLinks.delete(id);
             }
           }
-          const before = pageLinks.get(footer);
-          for (const { id, name } of configs) {
+          let before = pageLinks.get(footer);
+          for (const { id, name } of [...configs].reverse()) {
             const link = pageLinks.get(id) || registerPanelPage(id, name, before);
+            if (link.nextElementSibling !== before) navigation.insertBefore(link, before);
             if (link.textContent !== name) {
               link.textContent = name;
               if (id === activePage) document.title = name + " · Wave";
             }
+            before = link;
+          }
+          if (focused !== document.activeElement && navigation.contains(focused)) {
+            focused.focus({ preventScroll: true });
           }
         }
 

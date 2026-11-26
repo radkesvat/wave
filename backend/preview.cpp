@@ -126,12 +126,15 @@ struct Reply {
 
 class Preview {
   public:
-    Preview(std::shared_ptr<PanelDatabase> database, bool first_install)
+    explicit Preview(std::shared_ptr<PanelDatabase> database)
         : database_(std::move(database)), config_files_(database_->directory()),
-          config_users_(database_->directory()), core_(database_->directory(), first_install),
+          config_users_(database_->directory()), core_(database_->directory()),
           core_logs_(database_->directory())
     {
         load_core_settings();
+        if (database_->claim_waterwall_install()) {
+            core_.install_if_missing();
+        }
         host_.sample(data_["server"]);
         sync_core();
         log("info", "Wave started.");
@@ -381,12 +384,17 @@ class Preview {
                 config["active"] = false;
             }
         }
-        const auto& error = restart_error_.empty() ? core_.error() : restart_error_;
+        const auto& error = core_error();
         if (error.empty()) {
             core.erase("error");
         } else {
             core["error"] = error;
         }
+    }
+
+    const std::string& core_error() const
+    {
+        return restart_error_.empty() ? core_.error() : restart_error_;
     }
 
     Reply apply_settings(const Json& input)
@@ -897,7 +905,12 @@ class Preview {
             return restore_backup(input);
         }
         if (action == "diagnostics") {
-            return complete("Preview diagnostics completed. WaterWall is disconnected.", "info");
+            auto feedback = "WaterWall is " + std::string(core_.state()) + '.';
+            const auto& error = core_error();
+            if (!error.empty()) {
+                feedback += ' ' + error;
+            }
+            return complete(std::move(feedback), "info");
         }
         return {false, "That preview action is unavailable."};
     }
@@ -923,9 +936,9 @@ class Preview {
 } // namespace
 
 void configure_preview_routes(httplib::Server& server, std::shared_ptr<AuthStore> store,
-                              std::shared_ptr<PanelDatabase> database, bool first_install)
+                              std::shared_ptr<PanelDatabase> database)
 {
-    const auto preview = std::make_shared<Preview>(std::move(database), first_install);
+    const auto preview = std::make_shared<Preview>(std::move(database));
     server.WebSocket("/ws/overview",
                      [preview, store](const httplib::Request& req, httplib::ws::WebSocket& socket) {
                          if (!websocket_session(store, req)()) {

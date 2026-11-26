@@ -43,6 +43,22 @@ bool valid_version(const Json& value)
     return value.is_number_integer() && value >= 0 && value <= std::numeric_limits<int>::max();
 }
 
+bool contains_nul(const Json& value)
+{
+    if (value.is_object()) {
+        for (const auto& [key, field] : value.items()) {
+            if (key.find('\0') != key.npos || contains_nul(field)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (value.is_array()) {
+        return std::ranges::any_of(value, contains_nul);
+    }
+    return text(value).find('\0') != std::string_view::npos;
+}
+
 std::string new_db_name()
 {
     std::array<unsigned char, 16> bytes{};
@@ -100,6 +116,9 @@ std::string validate_config_graph(const Json& config, const Json& previous)
     const auto& nodes = field(config, "nodes");
     if (!config.is_object() || !valid_name(field(config, "name")) || !nodes.is_array()) {
         return "The config must have a name and a nodes array.";
+    }
+    if (contains_nul(config)) {
+        return "Config strings cannot contain a NUL character.";
     }
     for (const char* key : {"config-version", "core-minimum-version"}) {
         if (config.contains(key) && !valid_version(config[key])) {

@@ -114,13 +114,11 @@ pid_t launch(const fs::path& executable, const fs::path& directory, int input)
 
 } // namespace
 
-WaterWall::WaterWall(const fs::path& directory, bool first_install)
+WaterWall::WaterWall(const fs::path& directory)
     : working_dir_(directory), bin_dir_(directory / "waterwall_bin"), executable_(bin_dir_ / "Waterwall")
 {
     if (!prepare_directory(bin_dir_)) {
         error_ = "Cannot create or use the waterwall_bin directory.";
-    } else if (first_install && !installed()) {
-        error_ = install();
     }
 }
 
@@ -162,6 +160,13 @@ bool WaterWall::installed() const
     struct stat info{};
     return trusted_directory(bin_dir_) && ::lstat(executable_.c_str(), &info) == 0 && S_ISREG(info.st_mode) &&
            trusted(info) && !(info.st_mode & (S_ISUID | S_ISGID)) && ::access(executable_.c_str(), X_OK) == 0;
+}
+
+void WaterWall::install_if_missing()
+{
+    if (state() == "missing") {
+        error_ = install();
+    }
 }
 
 std::string WaterWall::install()

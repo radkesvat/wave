@@ -131,16 +131,14 @@ CoreConfigDocument CoreConfigFiles::read(std::string_view name) const
         contents.append(buffer, static_cast<std::size_t>(count));
     }
     ::close(file);
-    bool too_deep = false;
-    auto value = nlohmann::json::parse(
-        contents,
-        [&too_deep](int depth, auto, auto&) {
-            too_deep |= depth > max_core_config_depth;
-            return !too_deep;
-        },
-        false);
-    if (too_deep || !value.is_object()) {
-        return {{}, {}, "The config file must contain a valid JSON object up to 64 levels deep."};
+    constexpr char invalid[] = "The config file must contain a valid JSON object.";
+    std::string error;
+    auto value = parse_plain_core_config_json(contents, invalid, error);
+    if (!error.empty()) {
+        return {{}, {}, std::move(error)};
+    }
+    if (!value.is_object()) {
+        return {{}, {}, invalid};
     }
     return {std::move(value), revision_of(contents), {}};
 }

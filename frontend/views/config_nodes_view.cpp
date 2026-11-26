@@ -366,7 +366,7 @@ bool config_active(const PreviewSession& session, int id)
 {
     const auto& configs = array_field(field(field(session.data(), "server"), "core"), "configs");
     return std::ranges::any_of(configs, [id](const Json& config) {
-        return integer_field(config, "id") == id && bool_field(config, "active");
+        return field(config, "id") == id && bool_field(config, "active");
     });
 }
 
@@ -635,15 +635,15 @@ void close_dialog(State& state)
     state.error.clear();
 }
 
-Json parse_graph_json(std::string_view text, bool& too_deep)
+Json parse_node_settings(std::string_view text, std::string& error)
 {
-    return Json::parse(
-        text,
-        [&too_deep](int depth, auto, auto&) {
-            too_deep |= depth > max_core_config_depth;
-            return !too_deep;
-        },
-        false);
+    constexpr std::string_view invalid = "Node settings must be a JSON object.";
+    error.clear();
+    auto settings = parse_plain_core_config_json(text, invalid, error);
+    if (error.empty() && !settings.is_object()) {
+        error = invalid;
+    }
+    return settings;
 }
 
 bool apply_node(State& state, bool adding)
@@ -664,10 +664,8 @@ bool apply_node(State& state, bool adding)
         state.error = "Choose a node type.";
         return false;
     }
-    bool too_deep = false;
-    auto settings = parse_graph_json(state.settings_text, too_deep);
-    if (too_deep || !settings.is_object()) {
-        state.error = too_deep ? "JSON can contain up to 64 levels." : "Node settings must be a JSON object.";
+    auto settings = parse_node_settings(state.settings_text, state.error);
+    if (!state.error.empty()) {
         return false;
     }
     const bool allow_next = can_send(state.node_type, settings);
@@ -848,10 +846,11 @@ void edit_node(State& state, bool adding)
         ImGui::EndCombo();
     }
     const bool router = state.node_type == "Router" || state.node_type == "SniffRouter";
-    bool too_deep = false;
-    auto settings =
-        node_link_fields(state.node_type).empty() ? Json{} : parse_graph_json(state.settings_text, too_deep);
-    if (!too_deep) {
+    std::string settings_error;
+    auto settings = node_link_fields(state.node_type).empty()
+                        ? Json{}
+                        : parse_node_settings(state.settings_text, settings_error);
+    if (settings_error.empty()) {
         edit_setting_links(state, settings, adding);
     }
     if (can_send(state.node_type, settings)) {

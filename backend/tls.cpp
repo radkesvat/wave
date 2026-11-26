@@ -212,8 +212,13 @@ void load_certificate_chain(SSL_CTX* context, const TlsSettings& settings)
     }
 }
 
-std::unique_ptr<httplib::Server> make_https_server(const TlsSettings& settings, const fs::path& site_dir)
+} // namespace
+
+std::unique_ptr<httplib::Server> make_tls_server(const TlsSettings& settings, const fs::path& site_dir, int port)
 {
+    if (port == 0) {
+        throw std::runtime_error("Set a fixed listen.port in wave-db.json for HTTPS.");
+    }
     validate_settings(settings);
     require_private_location(settings.certificate_chain, site_dir);
     require_private_location(settings.private_key, site_dir);
@@ -240,21 +245,6 @@ std::unique_ptr<httplib::Server> make_https_server(const TlsSettings& settings, 
         throw std::runtime_error("Cannot use the supplied TLS private key.");
     }
     return server;
-}
-
-} // namespace
-
-void check_tls(const TlsSettings& settings, const fs::path& site_dir)
-{
-    make_https_server(settings, site_dir);
-}
-
-std::unique_ptr<httplib::Server> make_tls_server(const TlsSettings& settings, const fs::path& site_dir, int port)
-{
-    if (port == 0) {
-        throw std::runtime_error("Set a fixed listen.port in wave-db.json for HTTPS.");
-    }
-    return make_https_server(settings, site_dir);
 }
 
 } // namespace wave

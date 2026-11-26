@@ -544,7 +544,8 @@ void render_config_users(ConfigUsersState& state, PreviewSession& session, int c
         return;
     }
     state.blocked = false;
-    if (state.last_frame != frame - 1) {
+    const bool pending_mutation = state.request && state.mutation;
+    if (state.last_frame != frame - 1 && !pending_mutation) {
         session.abandon(state.request);
         state.users = nullptr;
         state.editable = false;

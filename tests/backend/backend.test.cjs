@@ -438,6 +438,10 @@ test('starts, restarts, and reaps WaterWall with the selected configs supplied t
         const running = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'running');
         assert.equal((await requestPreview(socket, 'start_core')).ok, true);
         assert.deepEqual((await running).data.server.core.configs, [{ ...active, active: true }, inactive]);
+        const diagnostics = await requestPreview(socket, 'diagnostics');
+        assert.equal(diagnostics.ok, true, diagnostics.feedback);
+        assert.match(diagnostics.feedback, /WaterWall is running/);
+        assert.equal(diagnostics.data.logs.at(-1).message, diagnostics.feedback);
         const child = JSON.parse(await waitForFile(coreFixture.processFile));
         assert.deepEqual(child.args, ['--config:stdin']);
         assert.equal(child.cwd, dirname(backend));
@@ -540,6 +544,13 @@ test('attempts first-run installation once and lets an authenticated administrat
         const invoked = async () => (await readFile(calls, 'utf8')).trim().split('\n');
         const failedInstall = socket => nextPreviewSnapshot(socket, ({ data: { server: { core } } }) =>
             core.state === 'missing' && core.error?.includes('SHA-256'));
+        const initial = JSON.parse(await readFile(fixture.database, 'utf8'));
+        await writeFile(fixture.database, JSON.stringify({ ...initial, core_configs: [{ name: 'Incomplete' }] }));
+        await assert.rejects(fixture.start(env), /invalid or duplicate config/);
+        assert.equal(JSON.parse(await readFile(fixture.database, 'utf8')).waterwall_install_attempted, undefined);
+        await assert.rejects(stat(calls), { code: 'ENOENT' });
+        await fixture.stop();
+        await writeFile(fixture.database, JSON.stringify(initial));
         await fixture.start(env);
         const firstCall = await waitForFile(calls);
         assert.match(firstCall, /WaterWall\/releases\/download\/v1\.6\.0\/Waterwall-linux-gcc-/);
@@ -747,6 +758,19 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
         requestPreview(sock, action, { config_id: profile.id, node, ...fields });
 
     const { config: skeleton, revision } = (await open(socket)).result;
+    for (const [contents, expected] of [
+        ['{"name":"Fixture","nodes":[],"metadata":{"author":"A","author":"B"}}', /duplicate.*key/i],
+        ['{"name":"Fixture","nodes":[],"author":"a\\u0000b"}', /NUL/i],
+        [JSON.stringify(skeleton) + '\0', /NUL/i],
+    ]) {
+        await writeFile(file, contents);
+        const rejected = await open(socket);
+        assert.equal(rejected.ok, false);
+        assert.match(rejected.feedback, expected);
+        assert.equal(await readFile(file, 'utf8'), contents);
+    }
+    await writeFile(file, JSON.stringify(skeleton, null, 2) + '\n');
+    assert.equal((await open(socket)).result.revision, revision);
     const gateway = { name: 'listener', type: 'TcpListener', next: 'staff', 'panel-settings': { x: 28, y: 57 } };
     for (const nodes of [
         [gateway],
@@ -757,6 +781,9 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
         assert.equal((await save({ ...skeleton, nodes }, revision)).ok, false);
         assert.deepEqual(await readdir(dir), ['config.json']);
     }
+    const invalidText = await save({ ...skeleton, author: 'a\0b' }, revision);
+    assert.equal(invalidText.ok, false);
+    assert.match(invalidText.feedback, /NUL/i);
 
     const graph = { ...skeleton, author: 'Fixture', nodes: [gateway,
         { name: 'staff', type: 'AuthenticationServer' }, { name: 'guests', type: 'AuthenticationServer' }] };
@@ -943,7 +970,8 @@ function liveWaterWallFixture({ configName, cursor, user }) {
             });
         });
     });
-    upstream.listen(listener.settings.port, '127.0.0.1', () => writeFileSync('live-fixture-ready', 'ready'));
+    upstream.listen(listener.settings['port-range'][0], '127.0.0.1',
+        () => writeFileSync('live-fixture-ready', 'ready'));
     setInterval(() => {
         try {
             process.kill(parent, 0);
@@ -989,7 +1017,7 @@ test('lists active AuthenticationServer users through the scoped WaterWall loopb
         const configured = await saveGraph(profile.id, { name: configName, nodes: [
             { name: node, type: 'AuthenticationServer' },
             { name: 'api listener', type: 'TcpListener', next: 'api', settings: {
-                address: '127.0.0.1', port,
+                address: '127.0.0.1', 'port-range': [port, port],
             } },
             { name: 'api', type: 'APIServer', settings: { clients: [
                 { name: 'wrong operation', token: '56'.repeat(32), allow: [{ config: configName, node, operations: ['get-user'] }] },

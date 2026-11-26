@@ -73,8 +73,9 @@ To enable TLS, edit `wave-db.json` before starting Wave.
 
 Keep an existing `admin` entry if the panel is already configured.
 
-Use the exact lowercase DNS hostname the browser will use. The certificate’s
-DNS Subject Alternative Name must cover it. A wildcard matches one label.
+Set a fixed HTTPS listener port. Use the exact lowercase DNS hostname the
+browser will use. The certificate’s DNS Subject Alternative Name must cover
+it. A wildcard matches one label.
 Use absolute PEM paths. Put the leaf certificate first, followed by the
 intermediates in issuer order. Supply the matching unencrypted private key.
 
@@ -148,7 +149,8 @@ stable, wait until it has updated both files or symlinks before checking the
 pair.
 
 Run this check as the service account before restarting Wave. It reads the
-database and validates the TLS configuration without binding a port.
+database and validates the TLS configuration without changing the file or
+binding a port.
 
 ```sh
 ./build/backend-release/wave-backend \

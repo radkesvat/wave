@@ -94,8 +94,9 @@ std::uint16_t listener_port(const Json& settings)
 {
     const auto& port = field(settings, "port");
     const auto& range = field(settings, "port-range");
-    const bool socket_range = port.is_null() && range.is_array() && range.size() == 2 &&
-                              field(settings, "multiport-backend") == "socket";
+    const bool socket_range =
+        port.is_null() && range.is_array() && range.size() == 2 &&
+        (range.front() == range.back() || field(settings, "multiport-backend") == "socket");
     const auto& first = socket_range ? range.front() : port.is_array() && !port.empty() ? port.front() : port;
     return first.is_number_integer() && first >= 1 && first <= 65535 ? first.get<std::uint16_t>() : 0;
 }

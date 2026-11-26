@@ -15,13 +15,14 @@ namespace wave {
 // The workspace serializes calls. The sampler calls update from one long-lived thread.
 class WaterWall {
   public:
-    WaterWall(const std::filesystem::path& directory, bool first_install);
+    explicit WaterWall(const std::filesystem::path& directory);
     ~WaterWall();
 
     bool installed() const;
     std::string_view state() const;
     pid_t running_pid() const;
     const std::string& error() const;
+    void install_if_missing();
     std::string install();
     std::string start(std::string core_json);
     std::string stop();

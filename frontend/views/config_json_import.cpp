@@ -3,9 +3,7 @@
 #include "core_config_json.h"
 
 #include <map>
-#include <set>
 #include <utility>
-#include <vector>
 
 namespace wave {
 namespace {
@@ -68,6 +66,12 @@ std::size_t object_end(std::string_view text, std::size_t start)
     return text.npos;
 }
 
+bool is_variables_key(std::string_view token)
+{
+    return token == "\"variables\"" ||
+           (token.find('\\') != token.npos && Json::parse(token, nullptr, false) == "variables");
+}
+
 std::string_view variable_declaration(std::string_view source, std::string& error)
 {
     constexpr std::string_view bom = "\xef\xbb\xbf";
@@ -79,9 +83,10 @@ std::string_view variable_declaration(std::string_view source, std::string& erro
     for (auto i = root; i < source.size();) {
         if (source[i] == '"') {
             const auto end = string_end(source, i);
-            if (depth == 1 && end != source.npos && source.substr(i, end - i) == "\"variables\"") {
+            if (depth == 1 && end != source.npos) {
                 const auto colon = source.find_first_not_of(json_whitespace, end);
-                if (colon != source.npos && source[colon] == ':') {
+                if (colon != source.npos && source[colon] == ':' &&
+                    is_variables_key(source.substr(i, end - i))) {
                     const auto start = source.find_first_not_of(json_whitespace, colon + 1);
                     if (start == source.npos || source[start] != '{') {
                         error = "The top-level variables block must be a JSON object.";
@@ -114,42 +119,6 @@ std::string_view variable_declaration(std::string_view source, std::string& erro
         ++i;
     }
     return {};
-}
-
-Json parse_json(std::string_view source, std::string_view invalid, std::string& error)
-{
-    std::vector<std::set<std::string>> object_keys;
-    auto check = [&](int depth, Json::parse_event_t event, Json& value) {
-        if (!error.empty()) {
-            return false;
-        }
-        if (depth > max_core_config_depth) {
-            error = "The config exceeds Wave's 64-level nesting limit.";
-            return false;
-        }
-        if (event == Json::parse_event_t::object_start) {
-            object_keys.emplace_back();
-        } else if (event == Json::parse_event_t::object_end) {
-            object_keys.pop_back();
-        } else if (event == Json::parse_event_t::key || event == Json::parse_event_t::value) {
-            if (const auto* string = value.get_ptr<const std::string*>();
-                string && string->find('\0') != string->npos) {
-                error = "Config strings cannot contain a NUL character.";
-                return false;
-            }
-            if (event == Json::parse_event_t::key &&
-                !object_keys.back().insert(value.get_ref<const std::string&>()).second) {
-                error = "The config contains a duplicate JSON object key.";
-                return false;
-            }
-        }
-        return true;
-    };
-    auto document = Json::parse(source, check, false);
-    if (error.empty() && document.is_discarded()) {
-        error = invalid;
-    }
-    return document;
 }
 
 std::string substitute_variables(std::string_view source, const Json& variables, std::string& error)
@@ -223,8 +192,8 @@ ConfigJsonImport parse_config_json_import(std::string_view text)
     }
     Json variables = Json::object();
     if (!declaration.empty()) {
-        variables =
-            parse_json(declaration, "The variables block must contain valid JSON values.", result.error);
+        variables = parse_plain_core_config_json(
+            declaration, "The variables block must contain valid JSON values.", result.error);
         if (!result.error.empty()) {
             return result;
         }
@@ -233,7 +202,7 @@ ConfigJsonImport parse_config_json_import(std::string_view text)
     if (!result.error.empty()) {
         return result;
     }
-    auto document = parse_json(expanded, "Enter valid JSON.", result.error);
+    auto document = parse_plain_core_config_json(expanded, "Enter valid JSON.", result.error);
     if (!result.error.empty()) {
         return result;
     }

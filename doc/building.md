@@ -2,8 +2,8 @@
 
 Wave builds a WebAssembly panel and a Linux server that manages the WaterWall
 executable and supplies host metrics and preview workspace data. Use a browser
-with WebGL 2 enabled. After sign-in, the workspace starts on Users with sample
-records. See **Panel Controls** on Server Status for the WaterWall process state.
+with WebGL 2 enabled. After sign-in, the workspace starts on **Server Status**.
+See **Panel Controls** there for the WaterWall process state.
 
 ## Prerequisites
 
@@ -416,9 +416,11 @@ and commits metadata, and saves the imported nodes as plain JSON. The graph
 updates after the save succeeds. Paste and expansion are limited to 1 MiB each.
 
 Wave edits JSON config files up to 256 KiB. If another browser or a local
-editor changes the file first, reload it before saving again. Add and configure
-the nodes needed for each chain before enabling the config. WaterWall checks
-each node's settings and chain compatibility when it starts.
+editor changes the file first, reload it before saving again. The editor
+rejects duplicate JSON object keys and NUL characters because WaterWall
+rejects them. Add and configure the nodes needed for each chain before enabling
+the config. WaterWall checks each node's settings and chain compatibility when
+it starts.
 
 Saving an **AuthenticationServer** adds a tab with the node's name. Its user
 database is a separate JSON file under `configs/<name>/`. Wave sets the node's

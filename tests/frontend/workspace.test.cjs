@@ -274,6 +274,26 @@ test('opens the authenticated workspace, updates host metrics, and navigates the
         for (const x of [11, 176]) {
             assert.deepEqual(await verticalRuns(page, x, 110, 128, [55, 49, 59]), [[110, 128]]);
         }
+        const links = page.getByRole('navigation', { name: 'Wave' }).getByRole('link');
+        const expectLinks = async names => {
+            await page.waitForFunction(names => JSON.stringify(
+                Array.from(document.querySelectorAll('#navigation a'), link => link.textContent)
+            ) === JSON.stringify(names), names, { timeout });
+            assert.deepEqual(await links.allTextContents(), names);
+        };
+        const configs = data.server.core.configs;
+        const archive = { id: 2, name: 'Archive', enabled: false, active: false };
+        configs.push(archive);
+        await preview.broadcast();
+        await expectLinks(['Server Status', 'Default', 'Archive', 'Console', 'Settings', 'About']);
+        await page.getByRole('link', { name: 'Default' }).focus();
+        configs.reverse();
+        await preview.broadcast();
+        await expectLinks(['Server Status', 'Archive', 'Default', 'Console', 'Settings', 'About']);
+        assert.equal(await page.evaluate(() => document.activeElement.textContent), 'Default');
+        configs.shift();
+        await preview.broadcast();
+        await expectLinks(['Server Status', 'Default', 'Console', 'Settings', 'About']);
         Object.assign(data.server, {
             cpu_percent: null, cpu_history: [25, null],
             upload_rate: 0.5 / 1024, download_rate: 1.5 / 1024,
@@ -757,9 +777,15 @@ test('downloads a backup and restores it through the browser file picker', async
 
         await click(page, restoreX, rowY);
         await status(page, /Restore backup/);
-        const choosing = page.waitForEvent('filechooser', { timeout });
-        await click(page, 560, (await dialogFrame(page)).top + 80);
-        await (await choosing).setFiles({ name: download.suggestedFilename(), mimeType: 'application/json', buffer });
+        const chooseBackup = async buffer => {
+            const choosing = page.waitForEvent('filechooser', { timeout });
+            await click(page, 560, (await dialogFrame(page)).top + 80);
+            await (await choosing).setFiles({ name: download.suggestedFilename(), mimeType: 'application/json', buffer });
+        };
+        const duplicate = Buffer.from(JSON.stringify(backup).replace('"configs":', '"configs":[],"configs":'));
+        await chooseBackup(duplicate);
+        await status(page, /Choose a valid Wave preview backup\./);
+        await chooseBackup(buffer);
         await status(page, /Wave preview backup selected/);
         assert.equal(preview.actions.length, 0, 'Selecting a file waits for confirmation.');
         await confirmDialog(page, (x, y) => click(page, x, y));
@@ -843,6 +869,13 @@ test('edits a WaterWall node graph and reopens the saved JSON', async () => {
         await status(page, /Edit node\./);
         const { top: editTop } = await dialogFrame(page);
         await replaceText(page, 640, editTop + 72, 'discard');
+        await replaceText(page, 640, editTop + 200, '{"port":1,"port":2}');
+        await confirmDialog(page, (x, y) => click(page, x, y), 560);
+        await status(page, /Edit node\..*duplicate JSON object key\./);
+        await replaceText(page, 640, (await dialogFrame(page)).top + 200, '{"value":"\\u0000"}');
+        await confirmDialog(page, (x, y) => click(page, x, y), 560);
+        await status(page, /Edit node\..*cannot contain a NUL character\./);
+        await replaceText(page, 640, (await dialogFrame(page)).top + 200, '{}');
         await confirmDialog(page, (x, y) => click(page, x, y), 560);
         await status(page, /Selected discard. Type BlackHole/);
 
@@ -1006,7 +1039,7 @@ test('reviews a WaterWall import with variables or comments before saving', asyn
         await status(page, /Edit configuration JSON\..*undefined variable\./);
         assert.equal(preview.actions.length, 1, 'An undefined variable does not save the import.');
 
-        await pasteConfigJson(page, `{
+        await pasteConfigJson(page, String.raw`{
             "name": "Source fixture",
             "author": "Source metadata",
             "commits": [{"message": "Fixture metadata"}],
@@ -1015,7 +1048,7 @@ test('reviews a WaterWall import with variables or comments before saving', asyn
                 {"name":"dummy-in","type":"TcpListener","settings":{"address":$fixture_address$,"port":$fixture_port$},"next":$fixture_target$},
                 {"name":"dummy-out","type":"BlackHole","settings":{"marker":"literal // $fixture_port$"}}
             ],
-            "variables": {"fixture_address":"192.0.2.10","fixture_port":31870,"fixture_target":"dummy-out"}
+            "var\u0069ables": {"fixture_address":"192.0.2.10","fixture_port":31870,"fixture_target":"dummy-out"}
         }`);
         await status(page, review);
         assert.equal(preview.actions.length, 1, 'Variables and comments need explicit confirmation.');
@@ -1154,8 +1187,11 @@ test('edits WaterWall user access and limits and creates a user with an exact ID
         });
         const updated = { ...user, gid, 'wireguard-allowed-ips': allowedIps,
             time: { 'created-at-ms': user.time['created-at-ms'] }, limit: { traffic: { up: '0' } } };
+        await selectConfigTab(page, 'Nodes');
         save.reply({ feedback: 'Saved fixture user.', result: listing(updated) });
+        await selectConfigTab(page, 'staff');
         await status(page, /Saved fixture user\./);
+        assert.equal(preview.actions.length, 3, 'Returning to the tab preserves the pending save result.');
 
         await click(page, 235, 137);
         await status(page, /Add user\. Account section\./);
@@ -1177,13 +1213,14 @@ test('edits WaterWall user access and limits and creates a user with an exact ID
 
 test('lists and refreshes AuthenticationServer live users while offline editing is locked', async () => {
     const page = await browser.newPage({ viewport: desktop });
-    const data = fixture('running');
+    const data = fixture('stopped');
     const config = { name: 'Live fixture', nodes: [{ name: 'staff', type: 'AuthenticationServer' }] };
+    const id = 2147483646;
     data.server.core.configs = [
-        { id: 11, name: config.name, enabled: true, active: true, auth_nodes: ['staff'], live_users: true },
+        { id, name: config.name, enabled: true, active: false, auth_nodes: ['staff'], live_users: true },
     ];
     const preview = await mockPreview(page, data);
-    const listRequest = { action: 'get_live_config_users', config_id: 11, node: 'staff' };
+    const listRequest = { action: 'get_live_config_users', config_id: id, node: 'staff' };
     const cursor = '12'.repeat(32);
     const user = { id: '9007199254740993', name: 'Fixture account', enabled: true, usage: { u: '2048', d: '4096' } };
     try {
@@ -1191,8 +1228,17 @@ test('lists and refreshes AuthenticationServer live users while offline editing 
         await page.getByRole('link', { name: config.name, exact: true }).focus();
         await page.keyboard.press('Enter');
         const opened = await preview.action(0);
-        assertRequest(opened.request, { action: 'get_core_config', id: 11 });
-        opened.reply({ result: { config, revision: 'active', editable: false } });
+        assertRequest(opened.request, { action: 'get_core_config', id });
+        opened.reply({ result: { config, revision: 'fixture', editable: true } });
+        await status(page, /Nodes tab\. Nodes\. 1 node\./);
+        data.server.core.state = 'running';
+        data.server.core.configs[0].active = true;
+        data.logs[0].message = 'Fixture config started.';
+        await preview.broadcast();
+        await status(page, /Latest log: Fixture config started\./);
+        await graphMenuItem(page, 'nodes', 0);
+        assert.doesNotMatch(await page.locator('#canvas').getAttribute('aria-label'), /Add node\./,
+            'An active config with a large ID locks its graph.');
 
         await selectConfigTab(page, 'staff');
         await status(page, /staff tab\. AuthenticationServer users\..*Stop WaterWall to access this users database\./);

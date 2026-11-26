@@ -16,8 +16,7 @@ struct TlsSettings {
     std::filesystem::path private_key;
 };
 
-void check_tls(const TlsSettings& settings, const std::filesystem::path& site_dir);
 std::unique_ptr<httplib::Server> make_tls_server(const TlsSettings& settings,
-                                                 const std::filesystem::path& site_dir, int port);
+                                              const std::filesystem::path& site_dir, int port);
 
 } // namespace wave

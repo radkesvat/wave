@@ -1,6 +1,7 @@
 #include "panel_controls_view.h"
 
 #include "browser_ui.h"
+#include "core_config_json.h"
 #include "dialog.h"
 #include "preview_backup.h"
 #include "view_helpers.h"
@@ -470,16 +471,18 @@ void download_backup(const PreviewSession& session)
 void render_restore(PanelControlsState& state, PreviewSession& session)
 {
     if (const auto content = take_preview_json_file()) {
-        auto backup = Json::parse(*content, nullptr, false);
+        constexpr char invalid[] = "Choose a valid Wave preview backup.";
+        std::string error;
+        auto backup = parse_plain_core_config_json(*content, invalid, error);
         Json request = {{"action", "restore_preview_backup"}, {"backup", nullptr}};
-        if (field(backup, "format") == preview_backup_format &&
+        if (error.empty() && field(backup, "format") == preview_backup_format &&
             field(backup, "version").is_number_integer() &&
             field(backup, "version") == preview_backup_version) {
             request["backup"] = std::move(backup);
         }
         if (request["backup"].is_null() ||
             request.dump().size() + request_id_bytes > max_preview_restore_request_bytes) {
-            state.reply = PreviewReply{PreviewReply::Status::rejected, "Choose a valid Wave preview backup."};
+            state.reply = PreviewReply{PreviewReply::Status::rejected, invalid};
         } else {
             state.restore_request = std::move(request);
         }
