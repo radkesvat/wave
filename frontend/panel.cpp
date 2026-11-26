@@ -431,6 +431,7 @@ void configure_panel_style(bool high_contrast)
 void render_panel(PanelState& state, PreviewSession& session, const OverviewData* overview,
                   bool overview_loading, int browser_focus)
 {
+    state.topology.visible_map = TopologyViewState::Tab::none;
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     if (state.browser_control && state.navigation_open && state.entry.page == EntryPage::workspace) {
         const auto selected = std::ranges::find(navigation, static_cast<PanelPage>(state.browser_control),
@@ -484,6 +485,9 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
         ImGui::EndChild();
     }
     render_dialogs(state, session);
+    if (ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
+        state.topology.visible_map = TopologyViewState::Tab::none;
+    }
     ImGui::End();
 }
 

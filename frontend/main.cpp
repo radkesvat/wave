@@ -80,7 +80,7 @@ struct Application {
 
     bool initialize()
     {
-        // SDL handles mouse and keyboard keys. The shell routes scrolling, taps, and browser text input.
+        // SDL handles mouse and keyboard keys. The shell routes touch, scrolling, and browser text input.
         SDL_SetHint(SDL_HINT_EMSCRIPTEN_KEYBOARD_ELEMENT, "#canvas");
         SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
         if (SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -274,6 +274,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wave_scroll_panel(float x, float y, float d
     auto& io = ImGui::GetIO();
     io.AddMousePosEvent(x, y);
     io.AddMouseWheelEvent(dx, dy);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int wave_topology_map_at(float x, float y)
+{
+    return static_cast<int>(application.panel.topology.map_at(x, y));
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void wave_pan_topology(int map, float dx, float dy)
+{
+    application.panel.topology.pan(static_cast<wave::TopologyViewState::Tab>(map), dx, dy);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void wave_input_text(const char* text, bool paste)

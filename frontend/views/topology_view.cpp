@@ -13,6 +13,7 @@ namespace {
 using namespace view;
 
 using Selection = TopologyViewState::Map::Selection;
+using Tab = TopologyViewState::Tab;
 
 bool in_map(const Json& item, std::string_view map)
 {
@@ -54,8 +55,8 @@ struct GraphNode {
     ImVec2 position;
 };
 
-void draw_topology(TopologyViewState::Map& state, const Json& nodes, const Json& links, std::string_view map,
-                   bool narrow)
+TopologyViewState::Bounds draw_topology(TopologyViewState::Map& state, const Json& nodes, const Json& links,
+                                        std::string_view map, bool narrow)
 {
     ImGui::BeginDisabled(state.zoom <= 0.7f);
     if (ImGui::Button("-##zoom")) {
@@ -79,6 +80,8 @@ void draw_topology(TopologyViewState::Map& state, const Json& nodes, const Json&
 
     const float width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
     const float height = narrow ? 230.0f : 290.0f;
+    state.width = width;
+    state.height = height;
     const auto corner = ImGui::GetCursorScreenPos();
     const ImVec2 bottom{corner.x + width, corner.y + height};
     const bool selected = ImGui::InvisibleButton("##network-topology", {width, height});
@@ -87,8 +90,7 @@ void draw_topology(TopologyViewState::Map& state, const Json& nodes, const Json&
     }
     if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 7)) {
         const auto delta = ImGui::GetIO().MouseDelta;
-        state.offset_x = std::clamp(state.offset_x + delta.x, -width, width);
-        state.offset_y = std::clamp(state.offset_y + delta.y, -height, height);
+        state.pan(delta.x, delta.y);
         state.graph_dragged = true;
     }
     const bool inspect_graph = selected && !state.graph_dragged;
@@ -96,6 +98,8 @@ void draw_topology(TopologyViewState::Map& state, const Json& nodes, const Json&
     auto& draw = *ImGui::GetWindowDrawList();
     draw.AddRectFilled(corner, bottom, plot_surface, 6);
     draw.PushClipRect(corner, bottom, true);
+    const ImVec2 visible_min = draw.GetClipRectMin();
+    const ImVec2 visible_max = draw.GetClipRectMax();
     constexpr float grid = 28;
     for (float x = corner.x + std::fmod(state.offset_x, grid); x < bottom.x; x += grid) {
         draw.AddLineV(x, corner.y, bottom.y, plot_grid);
@@ -169,6 +173,7 @@ void draw_topology(TopologyViewState::Map& state, const Json& nodes, const Json&
                      IM_COL32(234, 243, 247, 255), label.data(), label_end, wrap_width);
     }
     draw.PopClipRect();
+    return {visible_min.x, visible_min.y, visible_max.x, visible_max.y};
 }
 
 const Json* selected_item(const Json& items, std::string_view id)
@@ -224,12 +229,15 @@ void topology_details(const TopologyViewState::Map& state, const Json& nodes, co
     }
 }
 
-void render_map(TopologyViewState::Map& state, const Json& topology, std::string_view map, bool narrow)
+void render_map(TopologyViewState& view, Tab tab, const Json& topology, bool narrow)
 {
+    auto& state = tab == Tab::inside ? view.inside_map : view.outside_map;
+    const std::string_view map = tab == Tab::inside ? "inside" : "outside";
     const auto& nodes = array_field(topology, "nodes");
     const auto& links = array_field(topology, "links");
     const auto& routes = array_field(topology, "routes");
-    draw_topology(state, nodes, links, map, narrow);
+    view.visible_map = tab;
+    view.visible_bounds = draw_topology(state, nodes, links, map, narrow);
     topology_details(state, nodes, links, routes);
     if (ImGui::CollapsingHeader("Nodes", ImGuiTreeNodeFlags_DefaultOpen)) {
         for (const auto& node : nodes) {
@@ -271,18 +279,45 @@ void render_map(TopologyViewState::Map& state, const Json& topology, std::string
 
 } // namespace
 
+void TopologyViewState::Map::pan(float dx, float dy)
+{
+    offset_x = std::clamp(offset_x + dx, -width, width);
+    offset_y = std::clamp(offset_y + dy, -height, height);
+}
+
+TopologyViewState::Tab TopologyViewState::map_at(float x, float y) const
+{
+    const auto& bounds = visible_bounds;
+    return x >= bounds.left && x < bounds.right && y >= bounds.top && y < bounds.bottom ? visible_map
+                                                                                        : Tab::none;
+}
+
+void TopologyViewState::pan(Tab map, float dx, float dy)
+{
+    switch (map) {
+    case Tab::inside:
+        inside_map.pan(dx, dy);
+        break;
+    case Tab::outside:
+        outside_map.pan(dx, dy);
+        break;
+    case Tab::none:
+        break;
+    }
+}
+
 void render_topology(TopologyViewState& state, const nlohmann::json& topology, bool narrow)
 {
     if (ImGui::BeginTabBar("topology-views")) {
         if (ImGui::BeginTabItem("Inside Map")) {
             ImGui::PushID("inside-map");
-            render_map(state.inside_map, topology, "inside", narrow);
+            render_map(state, Tab::inside, topology, narrow);
             ImGui::PopID();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Outside Map")) {
             ImGui::PushID("outside-map");
-            render_map(state.outside_map, topology, "outside", narrow);
+            render_map(state, Tab::outside, topology, narrow);
             ImGui::PopID();
             ImGui::EndTabItem();
         }

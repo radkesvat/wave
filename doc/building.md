@@ -127,6 +127,7 @@ sign-in uses the username `demo` and password `wave-demo`.
 
 On narrow screens, the Users table provides page controls. Swipe the panel
 to reach Logs. Swiping along a pane's right edge scrolls its contents.
+Drag directly on a topology map to pan it, or tap a node or link to inspect it.
 
 `--site-dir` selects a frontend build directory relative to the current
 working directory or by absolute path. It defaults to `build/web-release/site`

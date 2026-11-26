@@ -118,8 +118,7 @@
           Module['_wave_scroll_panel'](event.clientX - bounds.left, event.clientY - bounds.top, dx, dy);
         }
 
-        function usesDocumentScroll(event) {
-          const bounds = canvas.getBoundingClientRect();
+        function usesDocumentScroll(event, bounds = canvas.getBoundingClientRect()) {
           return bounds.height > innerHeight && event.clientX < bounds.right - 34;
         }
 
@@ -139,11 +138,17 @@
             return;
           }
           event.preventDefault();
-          touch = event.isPrimary ? {
+          if (!event.isPrimary) {
+            touch = null;
+            return;
+          }
+          const bounds = canvas.getBoundingClientRect();
+          touch = {
             id: event.pointerId, x: event.clientX, y: event.clientY,
             lastX: event.clientX, lastY: event.clientY, panning: false,
-            pageScroll: usesDocumentScroll(event)
-          } : null;
+            map: Module['_wave_topology_map_at'](event.clientX - bounds.left, event.clientY - bounds.top),
+            pageScroll: usesDocumentScroll(event, bounds)
+          };
         });
         canvas.addEventListener("pointermove", event => {
           if (touch?.id !== event.pointerId) return;
@@ -151,7 +156,9 @@
           if (!touch.panning) return;
           const dx = touch.lastX - event.clientX;
           const dy = touch.lastY - event.clientY;
-          if (touch.pageScroll && Math.abs(event.clientY - touch.y) >= Math.abs(event.clientX - touch.x)) {
+          if (touch.map) {
+            Module['_wave_pan_topology'](touch.map, -dx, -dy);
+          } else if (touch.pageScroll && Math.abs(event.clientY - touch.y) >= Math.abs(event.clientX - touch.x)) {
             window.scrollBy(0, dy);
           } else {
             scrollPanel(event, -dx / 36, -dy / 36);
@@ -159,9 +166,11 @@
           touch.lastX = event.clientX;
           touch.lastY = event.clientY;
         });
-        canvas.addEventListener("pointercancel", event => {
+        function cancelTouch(event) {
           if (touch?.id === event.pointerId) touch = null;
-        });
+        }
+        canvas.addEventListener("pointercancel", cancelTouch);
+        canvas.addEventListener("lostpointercapture", cancelTouch);
         canvas.addEventListener("pointerup", event => {
           if (touch?.id !== event.pointerId) return;
           const tapped = !touch.panning;

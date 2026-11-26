@@ -702,6 +702,36 @@ test('preserves selection and zoom for each topology map when switching pages', 
     }
 });
 
+test('touch drags stay on their topology map while swipes outside it scroll the page', async () => {
+    const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
+    await mockPreview(page);
+    const touch = await page.context().newCDPSession(page);
+    async function swipe(points) {
+        await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [points[0]] });
+        for (const point of points.slice(1)) {
+            await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [point] });
+        }
+        await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await settleCanvas(page);
+    }
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await openView(page, 'Nodes & Routers');
+        await waitForCanvas(page, portrait, true);
+        await settleCanvas(page);
+        const clip = { x: 40, y: 375, width: 310, height: 180 };
+        const before = await page.screenshot({ clip });
+        await swipe([{ x: 150, y: 520 }, { x: 180, y: 502 }, { x: 221, y: 479 }]);
+        assert.ok(!(await page.screenshot({ clip })).equals(before), 'The touch drag pans the map.');
+        assert.equal(await page.evaluate(() => scrollY), 0);
+        await swipe([{ x: 150, y: 690 }, { x: 150, y: 640 }, { x: 150, y: 560 }]);
+        await page.waitForFunction(() => scrollY > 0);
+    } finally {
+        await page.close();
+    }
+});
+
 test('Overview shows loading and unavailable data, and About opens without preview data', async () => {
     const page = await browser.newPage({ viewport: desktop });
     const gate = Promise.withResolvers();
