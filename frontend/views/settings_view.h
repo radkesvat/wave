@@ -1,6 +1,6 @@
 #pragma once
 
-#include "preview_session.h"
+#include "core_settings_view.h"
 
 #include <array>
 #include <cstdint>
@@ -9,14 +9,6 @@
 namespace wave {
 
 class AuthSession;
-
-struct CoreSettingsDraft {
-    nlohmann::json source;
-    std::string text;
-    bool dirty = false;
-    std::optional<std::uint64_t> request;
-    std::optional<PreviewReply> reply;
-};
 
 struct SettingsViewState {
     enum class Tab {

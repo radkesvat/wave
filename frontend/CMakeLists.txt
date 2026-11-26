@@ -46,6 +46,7 @@ add_executable(wave
     theme.cpp
     views/about_view.cpp
     views/console_view.cpp
+    views/core_settings_view.cpp
     views/panel_controls_view.cpp
     views/entry_view.cpp
     views/logs_view.cpp

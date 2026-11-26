@@ -377,7 +377,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wave_scroll_panel(float x, float y, float d
 
 extern "C" EMSCRIPTEN_KEEPALIVE bool wave_scroll_window_at(float x, float y)
 {
-    return wave::dialog_at(x, y) || wave::panel_demo_at(application.panel, x, y);
+    const auto bounds = application.panel.settings.core.scroll_bounds;
+    return wave::dialog_at(x, y) || wave::panel_demo_at(application.panel, x, y) ||
+           (x >= bounds.left && x < bounds.left + bounds.width && y >= bounds.top &&
+            y < bounds.top + bounds.height);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE bool wave_topology_at(float x, float y)

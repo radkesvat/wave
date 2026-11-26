@@ -291,12 +291,12 @@ test('installs, retries, starts, and confirms stopping WaterWall from Server Sta
     }
 });
 
-test('saves Panel TLS and Core JSON settings without mixing their drafts', async () => {
+test('validates and saves WaterWall form settings alongside a separate Panel TLS draft', async () => {
     const page = await browser.newPage({ viewport: desktop });
     const data = fixture();
     const preview = await mockPreview(page, data);
-    const editCore = text => replaceText(page, 320, 177, text);
-    const saveCore = () => click(page, 267, 389);
+    const editWorkers = text => replaceText(page, 320, 228, text);
+    const saveCore = () => click(page, 267, 557);
     try {
         await page.goto(url);
         await openView(page, 'Settings');
@@ -304,18 +304,29 @@ test('saves Panel TLS and Core JSON settings without mixing their drafts', async
         const tls = { ...data.settings, domain: 'updated.example.invalid' };
         await replaceText(page, 325, 138, tls.domain);
         await click(page, 281, 82);
-        await status(page, /Core tab\. WaterWall core settings JSON/);
+        await status(page, /Core tab\. WaterWall core settings\. Runtime\. Version 1\.6\.0/);
+        const runtimeScrolls = () => Boolean(Module._wave_scroll_window_at(620, 375));
+        assert.equal(await page.evaluate(runtimeScrolls), false, 'The collapsed Runtime form fits its pane.');
+        await click(page, 420, 469);
+        await page.waitForFunction(runtimeScrolls, undefined, { timeout });
+        await click(page, 420, 469);
+        await page.waitForFunction(() => !Module._wave_scroll_window_at(620, 375), undefined, { timeout });
 
-        await editCore('{"configs":[]}');
+        await editWorkers('1.5');
+        await status(page, /Worker threads.*whole number/);
         await saveCore();
-        await status(page, /Remove the configs key before saving/);
-        assert.equal(preview.actions.length, 0);
-        await click(page, 386, 389);
+        assert.equal(preview.actions.length, 0, 'An invalid worker count blocks save.');
+        await click(page, 386, 557);
+        await status(page, /Runtime\. Version 1\.6\.0\. Sample data/);
         await saveCore();
         assert.equal(preview.actions.length, 0, 'Revert clears the rejected draft.');
 
-        const core = { misc: { workers: 4, 'ram-profile': 'client' } };
-        await editCore(JSON.stringify(core, null, 2));
+        await editWorkers('4');
+        await click(page, 369, 157);
+        await status(page, /WaterWall core settings\. DNS/);
+        const servers = '192.0.2.53,2001:db8::53';
+        await replaceText(page, 840, 228, servers);
+        const core = { misc: { workers: 4 }, dns: { servers } };
         await click(page, 223, 82);
         await status(page, /Panel tab\. Administrator settings/);
         await click(page, 245, 283);
@@ -332,8 +343,18 @@ test('saves Panel TLS and Core JSON settings without mixing their drafts', async
         const coreSave = await preview.action(1);
         assertRequest(coreSave.request, { action: 'apply_core_settings', settings: core });
         data.core_settings = core;
-        coreSave.reply({ feedback: 'Saved core settings.' });
+        coreSave.reply({ feedback: 'Saved core settings for the next launch.' });
         await status(page, /Core tab.*Saved core settings/);
+
+        data.core_settings_notice = 'Unsupported WaterWall core setting: log.level.';
+        await preview.broadcast();
+        await status(page, /Unsupported WaterWall core setting: log\.level/);
+        await saveCore();
+        const review = await preview.action(2);
+        assertRequest(review.request, { action: 'apply_core_settings', settings: core });
+        delete data.core_settings_notice;
+        review.reply({ feedback: 'Saved core settings for the next launch.' });
+        await status(page, /DNS\. Version 1\.6\.0\. Saved core settings/);
     } finally {
         await page.close();
     }

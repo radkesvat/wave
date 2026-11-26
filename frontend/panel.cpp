@@ -578,6 +578,7 @@ void render_panel(PanelState& state, PreviewSession& session, float viewport_wid
 {
     state.console = {};
     state.topology.visible_bounds = {};
+    state.settings.core.scroll_bounds = {};
     const bool in_workspace = state.entry.page == EntryPage::workspace;
     if (in_workspace) {
         update_panel_controls(state.panel_controls, session);

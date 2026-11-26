@@ -4,8 +4,6 @@
 #include "dialog.h"
 #include "view_helpers.h"
 
-#include <misc/cpp/imgui_stdlib.h>
-
 #include <utility>
 
 namespace wave {
@@ -14,10 +12,6 @@ namespace {
 
 using namespace view;
 using theme::Color;
-
-constexpr char core_help[] = "Wave fills in the configs list automatically.";
-constexpr char core_saving[] = "Saving core settings…";
-constexpr std::size_t max_core_settings_bytes = 16 * 1024;
 
 void sync_settings(SettingsViewState& state, const Json& settings)
 {
@@ -177,99 +171,11 @@ void show_settings_connection(PreviewSession& session)
     }
 }
 
-void sync_core_settings(CoreSettingsDraft& draft, const Json& snapshot)
-{
-    if (draft.dirty || !snapshot.is_object() || snapshot == draft.source) {
-        return;
-    }
-    auto editable = snapshot;
-    editable.erase("configs");
-    draft.text = editable.dump(2);
-    draft.source = snapshot;
-}
-
-void finish_core_save(CoreSettingsDraft& draft, PreviewSession& session)
-{
-    if (auto reply = session.take_reply(draft.request)) {
-        if (reply->ok()) {
-            draft.dirty = false;
-            draft.source = nullptr;
-        } else if (reply->status == PreviewReply::Status::timed_out) {
-            reply->message = "Wave did not confirm the save. Check the current settings before retrying.";
-        } else if (reply->status == PreviewReply::Status::disconnected) {
-            reply->message = "The settings connection closed. Try again after reconnecting.";
-        }
-        draft.reply = std::move(reply);
-    }
-}
-
-void submit_core_settings(CoreSettingsDraft& draft, PreviewSession& session)
-{
-    auto settings = Json::parse(draft.text, nullptr, false);
-    if (!settings.is_object()) {
-        draft.reply = PreviewReply{PreviewReply::Status::rejected, "Enter a valid JSON object."};
-    } else if (settings.contains("configs")) {
-        draft.reply = PreviewReply{PreviewReply::Status::rejected, "Remove the configs key before saving."};
-    } else if (settings.dump().size() > max_core_settings_bytes) {
-        draft.reply = PreviewReply{PreviewReply::Status::rejected,
-                                   "Core settings must fit within 16 KiB of compact JSON."};
-    } else {
-        draft.reply.reset();
-        draft.request =
-            session.submit({{"action", "apply_core_settings"}, {"settings", std::move(settings)}}, 5000);
-        if (!draft.request) {
-            draft.reply =
-                PreviewReply{PreviewReply::Status::disconnected, "The settings connection is unavailable."};
-        }
-    }
-}
-
-void render_core_settings(CoreSettingsDraft& draft, PreviewSession& session)
-{
-    const auto& snapshot = field(session.data(), "core_settings");
-    sync_core_settings(draft, snapshot);
-    if (!session.ready()) {
-        show_settings_connection(session);
-    } else if (!snapshot.is_object()) {
-        wrapped("Core settings unavailable.", Color::warning);
-    }
-
-    if (draft.source.is_object() || draft.dirty) {
-        ImGui::TextUnformatted("WaterWall core settings JSON");
-        wrapped(core_help, Color::secondary_text);
-        ImGui::BeginDisabled(draft.request.has_value());
-        if (ImGui::InputTextMultiline("##WaterWall core settings JSON", &draft.text, {-1, 224})) {
-            draft.dirty = true;
-            draft.reply.reset();
-        }
-        ImGui::BeginDisabled(!draft.dirty || !session.ready() || !snapshot.is_object());
-        if (theme::button("Save core settings")) {
-            submit_core_settings(draft, session);
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!draft.dirty || !snapshot.is_object());
-        if (theme::button("Revert edits")) {
-            draft.dirty = false;
-            draft.source = nullptr;
-            draft.reply.reset();
-            sync_core_settings(draft, snapshot);
-        }
-        ImGui::EndDisabled();
-        ImGui::EndDisabled();
-    }
-    if (draft.request) {
-        wrapped(core_saving, Color::info);
-    } else if (draft.reply) {
-        feedback(*draft.reply);
-    }
-}
-
 } // namespace
 
 void render_settings(SettingsViewState& state, AuthSession& auth, PreviewSession& session, bool narrow)
 {
-    finish_core_save(state.core, session);
+    update_core_settings(state.core, session);
     if (!ImGui::BeginTabBar("Settings tabs")) {
         return;
     }
@@ -295,13 +201,7 @@ void render_settings(SettingsViewState& state, AuthSession& auth, PreviewSession
 std::string describe_settings(const SettingsViewState& state, const AuthSession& auth)
 {
     if (state.tab == SettingsViewState::Tab::core) {
-        auto description = std::string("Core tab. WaterWall core settings JSON. ") + core_help;
-        if (state.core.request) {
-            description += std::string(" ") + core_saving;
-        } else if (state.core.reply && !state.core.reply->message.empty()) {
-            description += ' ' + state.core.reply->message;
-        }
-        return description;
+        return "Core tab. " + describe_core_settings(state.core);
     }
     std::string description = "Panel tab. Administrator settings.";
     if (auth.action() == AuthSession::Action::update_administrator) {

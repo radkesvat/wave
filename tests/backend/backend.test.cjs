@@ -399,8 +399,14 @@ test('starts and reaps WaterWall with the selected configs supplied through stdi
             }
         }
 
-        const settings = { log: { level: 'warning' }, misc: { workers: 2 } };
-        assert.equal((await requestPreview(socket, 'apply_core_settings', { settings })).ok, true);
+        const settings = {
+            log: { path: 'test-logs/', core: { loglevel: 'WARN', console: false } },
+            misc: { workers: 2, 'ram-profile': 'server', 'tcp-stack-receive-budget': 0 },
+            dns: { rotate: false, flags: [], 'server-failover': {} },
+        };
+        const saved = await requestPreview(socket, 'apply_core_settings', { settings });
+        assert.equal(saved.ok, true, saved.feedback);
+        assert.deepEqual(saved.data.core_settings, settings);
         const running = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'running');
         assert.equal((await requestPreview(socket, 'start_core')).ok, true);
         assert.deepEqual((await running).data.server.core.configs, [{ ...active, active: true }, inactive]);
@@ -500,41 +506,104 @@ test('attempts first-run installation once and lets an authenticated administrat
         assert.equal((await invoked()).length, 2, 'Deleting the executable leaves installation up to the administrator.');
     });
 
-test('persists safe config files and managed settings across a backend restart', async t => {
+test('preserves config files and keeps outdated core settings until the administrator reviews them', async t => {
     const fixture = await authFixture(t, undefined, { encrypted: false });
+    const canLaunch = process.platform === 'linux';
+    const core = await seedCore(fixture.backend, { executable: canLaunch });
     await fixture.start();
     const session = await fixtureSession(fixture);
     const { socket, initial } = await connectPreview(t, fixture.origin, session);
-    const configs = join(dirname(fixture.backend), 'configs');
     const original = await readFile(fixture.database, 'utf8');
     assert.deepEqual(initial.server.core.configs, []);
     for (const name of ['..', '../escape', 'nested/profile', 'nested\\profile', 'invalid\u0000name']) {
         assert.equal((await requestPreview(socket, 'create_core_config', { name })).ok, false);
     }
-    assert.equal((await requestPreview(socket, 'apply_core_settings', {
-        settings: { configs: ['other.json'] },
-    })).ok, false);
+    // This fits on input, but expanding all 11 resolver flag names exceeds 16 KiB.
+    const oversized = { log: { path: 'x'.repeat(16 * 1024 - 64) }, dns: { flags: 2047 } };
+    assert.ok(Buffer.byteLength(JSON.stringify(oversized)) <= 16 * 1024);
+    for (const [settings, field] of [
+        [{ configs: ['other.json'] }, /\bconfigs\b/],
+        [{ log: { level: 'warning' } }, /\blog\.level\b/],
+        [{ log: { core: { console: 'false' } } }, /\blog\.core\.console\b/],
+        [{ misc: { mtu: 67 } }, /\bmisc\.mtu\b/],
+        [{ dns: { 'server-failover': { 'retry-chance': 65536 } } }, /\bdns\.server-failover\.retry-chance\b/],
+        [oversized, /16 KiB/],
+    ]) {
+        const rejected = await requestPreview(socket, 'apply_core_settings', { settings });
+        assert.equal(rejected.ok, false);
+        assert.match(rejected.feedback, field);
+        assert.deepEqual(rejected.data.core_settings, initial.core_settings);
+    }
     assert.equal(await readFile(fixture.database, 'utf8'), original);
-    assert.deepEqual(await readdir(configs), []);
+    assert.deepEqual(await readdir(core.configDir), []);
 
     const name = 'Lab profile';
     const created = await createCoreConfig(socket, ` ${name} `, true);
-    const directory = join(configs, name);
+    const directory = join(core.configDir, name);
     const file = join(directory, 'config.json');
     const skeleton = { name, 'config-version': 1, 'core-minimum-version': 0, nodes: [] };
     assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), skeleton);
     assert.equal((await requestPreview(socket, 'create_core_config', { name })).ok, false);
-    const settings = { log: { level: 'debug' } };
-    assert.equal((await requestPreview(socket, 'apply_core_settings', { settings })).ok, true);
+
+    const stored = JSON.parse(await readFile(fixture.database, 'utf8'));
+    assert.deepEqual(stored.core_configs, [{ id: created.id, name, enabled: true }]);
+    const legacy = JSON.stringify({
+        ...stored,
+        core_settings: {
+            log: { core: { loglevel: 'debug' }, level: 'debug' },
+            misc: { 'ram-profile': 6, mtu: 67 },
+            dns: {
+                'domain-strategy': 2, flags: { tcp: true, edns: true },
+                servers: ['192.0.2.53', '2001:db8::53'],
+            },
+        },
+    }, null, 2);
+    const settings = {
+        log: { core: { loglevel: 'DEBUG' } },
+        misc: { 'ram-profile': 'server' },
+        dns: { 'domain-strategy': 'prefer-ipv6', flags: ['use-vc', 'edns'], servers: '192.0.2.53,2001:db8::53' },
+    };
+    await fixture.stop();
+    await writeFile(fixture.database, legacy);
+    await fixture.start();
+    const review = await connectPreview(t, fixture.origin, session);
+    assert.deepEqual(review.initial.core_settings, settings);
+    assert.match(review.initial.core_settings_notice, /\blog\.level\b/);
+    assert.match(review.initial.core_settings_notice, /\bmisc\.mtu\b/);
+    assert.equal(await readFile(fixture.database, 'utf8'), legacy);
+    if (canLaunch) {
+        const blocked = await requestPreview(review.socket, 'start_core');
+        assert.equal(blocked.ok, false);
+        assert.match(blocked.feedback, /review|save/i);
+        await assert.rejects(stat(core.processFile), { code: 'ENOENT' });
+        assert.equal(await readFile(fixture.database, 'utf8'), legacy);
+    }
+
+    const approved = await requestPreview(review.socket, 'apply_core_settings', {
+        settings: review.initial.core_settings,
+    });
+    assert.equal(approved.ok, true, approved.feedback);
+    assert.ok(!approved.data.core_settings_notice);
     const persisted = JSON.parse(await readFile(fixture.database, 'utf8'));
-    assert.deepEqual(persisted.core_configs, [{ id: created.id, name, enabled: true }]);
     assert.deepEqual(persisted.core_settings, settings);
+    assert.deepEqual(persisted.core_configs, stored.core_configs);
 
     await fixture.stop();
     await fixture.start();
     const restarted = await connectPreview(t, fixture.origin, session);
     assert.deepEqual(restarted.initial.core_settings, settings);
+    assert.ok(!restarted.initial.core_settings_notice);
     assert.deepEqual(restarted.initial.server.core.configs, [created]);
+    if (canLaunch) {
+        const running = nextPreviewSnapshot(restarted.socket, frame => frame.data.server.core.state === 'running');
+        assert.equal((await requestPreview(restarted.socket, 'start_core')).ok, true);
+        await running;
+        const child = JSON.parse(await waitForFile(core.processFile));
+        assert.deepEqual(child.settings, { ...settings, configs: [`configs/${name}/config.json`] });
+        const stopped = nextPreviewSnapshot(restarted.socket, frame => frame.data.server.core.state === 'stopped');
+        assert.equal((await requestPreview(restarted.socket, 'stop_core')).ok, true);
+        await stopped;
+    }
     const notes = join(directory, 'notes.txt');
     await writeFile(notes, 'Fixture notes survive removal.');
     assert.equal((await requestPreview(restarted.socket, 'remove_core_config', { id: created.id })).ok, true);

@@ -368,18 +368,32 @@ while WaterWall is stopped. **Stop core** asks for confirmation before stopping
 the running process. If the executable is removed while WaterWall is running,
 stop it to reinstall. Wave starts WaterWall only when requested.
 
-Use **Settings → Core** to edit the WaterWall core settings as JSON. Wave stores
-these settings in `wave-db.json` under `core_settings`. On **Start core**, Wave
-adds the enabled `configs/<name>/config.json` paths to the settings and passes
-the generated `core.json` through an anonymous in-memory file. WaterWall runs
-from the directory containing `wave-backend`, where relative paths resolve.
-Enable at least one config before starting. Settings and enabled flags take
-effect on the next start. [WaterWall core settings](https://radkesvat.github.io/WaterWall-Docs/docs/getting-started/installation)
+Use **Settings → Core** to configure the WaterWall release that matches this
+version of Wave. **Runtime** covers workers, memory profiles, MTU, TCP tuning,
+library paths, and advanced userspace stack limits. **Logging** covers the log
+directory and each of the four loggers. **DNS** covers address preference,
+servers, search domains, lookup order, and advanced resolver and failover
+options. Settings left at the core default are omitted so WaterWall can use
+its built-in or system defaults. [WaterWall 1.6.0 core settings](https://github.com/radkesvat/WaterWall/blob/v1.6.0/core/readme.md)
 
-For deployments using `waterwall_config/` from an earlier build, copy the
-settings to the **Core** tab without the `configs` field, create an entry for
-each config, and copy the node JSON into its new `configs/<name>/config.json`.
-Wave leaves the old directory in place.
+Wave validates the form and saves the overrides in `wave-db.json` under
+`core_settings`, grouped as `misc`, `log`, and `dns`. On **Start core**, Wave
+builds `core.json` from those groups and adds the paths of enabled profiles from
+**Manage configs**. The generated file is passed through an anonymous in-memory
+file. Relative paths resolve from the directory containing `wave-backend`.
+Enable at least one config before starting. Saved settings and enabled flags
+take effect on the next start.
+
+Wave loads supported values saved by the previous JSON editor and converts
+legacy aliases to the corresponding form options. If the saved settings include
+unsupported fields or invalid values, review the notice in **Settings → Core**,
+then save the form before starting WaterWall. Saving replaces the previous
+`core_settings` with the supported values shown in the form.
+
+For deployments using `waterwall_config/` from an earlier build, enter the
+core settings in the form, create an entry for each config, and copy each node
+JSON into its new `configs/<name>/config.json`. Wave leaves the old directory
+in place.
 
 The top-bar **Menu** provides **Create config** and **Manage configs** on
 every workspace page. New configs start disabled. Names are case-sensitive,
@@ -407,7 +421,7 @@ connection closes, Server Status shows the last snapshot and offers to reconnect
 | Action | Additional request fields |
 | --- | --- |
 | `install_core`, `start_core`, `stop_core` | None |
-| `apply_core_settings` | JSON object as `settings`, up to 16 KiB |
+| `apply_core_settings` | WaterWall 1.6.0 `misc`, `log`, and `dns` overrides as `settings`, up to 16 KiB |
 | `create_core_config` | `name` |
 | `set_core_config_enabled` | Config `id` and boolean `enabled` |
 | `remove_core_config` | Config `id` |

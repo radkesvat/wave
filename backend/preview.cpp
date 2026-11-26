@@ -3,6 +3,7 @@
 #include "auth.h"
 #include "core_config_files.h"
 #include "core_config_name.h"
+#include "core_settings.h"
 #include "linux_metrics.h"
 #include "panel_settings.h"
 #include "preview_backup.h"
@@ -39,8 +40,7 @@ using namespace std::chrono_literals;
 constexpr auto host_sample_interval = 500ms;
 constexpr auto user_update_interval = 5s;
 constexpr std::size_t max_request_bytes = 8192;
-constexpr std::size_t max_core_settings_bytes = 16 * 1024;
-constexpr auto max_frame_bytes = std::max(max_preview_restore_request_bytes, max_core_settings_bytes + 256);
+constexpr auto max_frame_bytes = std::max(max_preview_restore_request_bytes, core_settings::max_bytes + 256);
 constexpr std::size_t max_users = 128;
 constexpr std::size_t max_topology_nodes = 64;
 constexpr std::size_t max_node_name_bytes = 64;
@@ -352,11 +352,6 @@ struct Reply {
     bool changed = false;
 };
 
-bool valid_core_settings(const Json& settings)
-{
-    return settings.is_object() && !settings.contains("configs") && settings.dump().size() <= max_core_settings_bytes;
-}
-
 class Preview {
 public:
     Preview(std::shared_ptr<PanelDatabase> database, bool first_install)
@@ -432,11 +427,13 @@ private:
     void load_core_settings()
     {
         const auto& stored = database_->initial_contents();
-        auto settings = stored.value("core_settings", Json::object());
-        if (!valid_core_settings(settings)) {
-            throw std::runtime_error("core_settings in wave-db.json must be a JSON object without configs.");
+        auto normalized = core_settings::normalize(stored.value("core_settings", Json::object()));
+        if (!normalized.issue.empty()) {
+            data_["core_settings_notice"] =
+                "Review the settings shown here before saving. Saving replaces the previous core settings. " +
+                normalized.issue;
         }
-        data_["core_settings"] = std::move(settings);
+        data_["core_settings"] = std::move(normalized.settings);
 
         const auto saved_configs = stored.value("core_configs", Json::array());
         if (!saved_configs.is_array() || saved_configs.size() > max_core_configs) {
@@ -791,15 +788,20 @@ private:
     Reply apply_core_settings(const Json& input)
     {
         const auto settings = input.find("settings");
-        if (settings == input.end() || !valid_core_settings(*settings)) {
-            return {false, "Enter a JSON settings object up to 16 KiB. Wave supplies the configs field."};
+        if (settings == input.end()) {
+            return {false, "Send a core settings object."};
+        }
+        auto normalized = core_settings::normalize(*settings);
+        if (!normalized.issue.empty()) {
+            return {false, std::move(normalized.issue)};
         }
         try {
-            database_->save_core_settings(*settings);
+            database_->save_core_settings(normalized.settings);
         } catch (const std::runtime_error&) {
             return {false, "Could not save core settings in wave-db.json."};
         }
-        data_["core_settings"] = *settings;
+        data_["core_settings"] = std::move(normalized.settings);
+        data_.erase("core_settings_notice");
         return complete("Saved core settings for the next launch.");
     }
 
@@ -933,6 +935,9 @@ private:
     {
         if (core_.state() != "stopped") {
             return {false, "WaterWall must be installed and stopped before it can be started."};
+        }
+        if (data_.contains("core_settings_notice")) {
+            return {false, "Review and save the core settings in Settings → Core before starting WaterWall."};
         }
         auto paths = Json::array();
         auto& configs = data_["server"]["core"]["configs"];
