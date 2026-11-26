@@ -24,6 +24,12 @@ struct BotViewState {
         connecting,
         complete
     };
+    enum class Dialog {
+        none,
+        setup,
+        disconnect,
+        message
+    };
 
     nlohmann::json source;
     std::array<Notification, 14> rules{};
@@ -40,6 +46,8 @@ struct BotViewState {
     Save settings_save;
     Save overrides_save;
     Setup setup = Setup::intro;
+    Dialog requested_dialog = Dialog::none;
+    std::string dialog_error;
     bool notifications = false;
     bool allow_status = false;
     bool allow_config = false;
@@ -49,5 +57,6 @@ struct BotViewState {
 };
 
 void render_bot(BotViewState& state, PreviewSession& session, bool narrow);
+void render_bot_dialogs(BotViewState& state, PreviewSession& session);
 
 } // namespace wave

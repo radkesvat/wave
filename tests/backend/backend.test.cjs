@@ -213,21 +213,57 @@ test('publishes populated preview data and shares user changes and logs across b
     assert.equal(deleted.data.server.users_total, initial.users.length);
 });
 
-test('simulates preview setup, settings, bot actions, and console entirely in memory', async t => {
+test('validates preview setup and updates only the panel name and demo credentials', async t => {
     const { socket } = await connectPreview(t);
-    const setupCredentials = { username: 'preview-admin', password: 'demo-password' };
-    const setup = await requestPreview(socket, 'setup', {
-        name: 'Wave QA', domain: 'qa.example.invalid', ...setupCredentials,
-    });
-    assert.equal(setup.ok, true, setup.feedback);
-    assert.equal(setup.data.server.name, 'Wave QA');
-    assert.equal(setup.data.settings.admin_username, 'preview-admin');
-    assert.equal(setup.data.settings.password, undefined);
-    const signIn = await requestPreview(socket, 'sign_in', setupCredentials);
-    assert.equal(signIn.ok, true, signIn.feedback);
-    const invalid = await requestPreview(socket, 'sign_in', { ...setupCredentials, password: 'wrong' });
-    assert.equal(invalid.ok, false);
+    const saved = await requestPreview(socket, 'apply_settings', { settings: {
+        domain: 'qa.example.invalid', certificate_path: 'preview/qa.crt', private_key_path: 'preview/qa.key',
+        admin_username: 'settings-admin', password: 'existing-demo-password',
+    } });
+    assert.equal(saved.ok, true, saved.feedback);
 
+    const setupCredentials = { username: 'preview-admin', password: 'demo-password' };
+    const fields = { name: 'Wave QA', ...setupCredentials };
+    for (const invalidFields of [
+        { name: undefined }, { name: '  ' }, { name: 'x'.repeat(81) },
+        { username: undefined }, { username: 4 }, { username: 'x'.repeat(65) },
+        { password: undefined }, { password: '\t ' }, { password: 'x'.repeat(97) },
+    ]) {
+        const rejected = await requestPreview(socket, 'setup', { ...fields, ...invalidFields });
+        assert.equal(rejected.ok, false, rejected.feedback);
+        assert.match(rejected.feedback, /panel name and valid demo credentials/);
+        assert.deepEqual(rejected.data.settings, saved.data.settings);
+    }
+    const preservedSignIn = await requestPreview(socket, 'sign_in', {
+        username: 'settings-admin', password: 'existing-demo-password',
+    });
+    assert.equal(preservedSignIn.ok, true, preservedSignIn.feedback);
+
+    const closing = once(socket, 'close', { signal: AbortSignal.timeout(timeout) });
+    socket.close(1000);
+    await closing;
+    const retry = await connectPreview(t);
+    assert.deepEqual(retry.initial.settings, saved.data.settings);
+    const setup = await requestPreview(retry.socket, 'setup', fields);
+    assert.equal(setup.ok, true, setup.feedback);
+    assert.match(setup.feedback, /Completed first-run preview setup/);
+    assert.equal(setup.data.server.name, 'Wave QA');
+    const expected = { ...saved.data.settings, name: 'Wave QA', admin_username: 'preview-admin' };
+    assert.deepEqual(setup.data.settings, expected);
+    assert.equal(setup.data.settings.password, undefined);
+    const withLegacyFields = await requestPreview(retry.socket, 'setup', {
+        ...fields, domain: 'ignored.example.invalid', certificate_path: 'ignored.crt', private_key_path: 'ignored.key',
+    });
+    assert.equal(withLegacyFields.ok, true, withLegacyFields.feedback);
+    assert.deepEqual(withLegacyFields.data.settings, expected);
+
+    const signIn = await requestPreview(retry.socket, 'sign_in', setupCredentials);
+    assert.equal(signIn.ok, true, signIn.feedback);
+    const invalid = await requestPreview(retry.socket, 'sign_in', { ...setupCredentials, password: 'wrong' });
+    assert.equal(invalid.ok, false);
+});
+
+test('simulates preview settings, bot actions, and console entirely in memory', async t => {
+    const { socket } = await connectPreview(t);
     const settings = await requestPreview(socket, 'apply_settings', { settings: { port: 4070, multiplex: false } });
     assert.equal(settings.ok, true, settings.feedback);
     assert.equal(settings.data.settings.port, 4070);

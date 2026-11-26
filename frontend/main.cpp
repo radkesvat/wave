@@ -1,3 +1,4 @@
+#include "dialog.h"
 #include "panel.h"
 #include "preview_session.h"
 #include "theme.h"
@@ -37,8 +38,8 @@ EM_JS(void, register_panel_page, (int page, const char* label), {
     Module['registerPanelPage'](page, UTF8ToString(label));
 });
 
-EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools), {
-    Module['updateNavigation'](page, open, menu, tools);
+EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools, bool modal), {
+    Module['updateNavigation'](page, open, menu, tools, modal);
 });
 
 EM_JS(int, browser_panel_focus, (), { return Module['panelFocus'](); });
@@ -252,7 +253,7 @@ struct Application {
         }
         update_navigation(static_cast<int>(panel.page),
                           panel.navigation_open && panel.entry.page == wave::EntryPage::workspace,
-                          panel.menu_open, panel.tools_open);
+                          panel.menu_open, panel.tools_open, wave::dialog_open());
         if (!visible) {
             show_panel();
             visible = true;
@@ -271,7 +272,9 @@ void render_frame(void* context)
 
 extern "C" EMSCRIPTEN_KEEPALIVE void wave_activate_panel_control(int control)
 {
-    application.panel.browser_control = control;
+    if (!wave::dialog_open()) {
+        application.panel.browser_control = control;
+    }
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void wave_tap_panel(float x, float y)
@@ -288,6 +291,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wave_scroll_panel(float x, float y, float d
     auto& io = ImGui::GetIO();
     io.AddMousePosEvent(x, y);
     io.AddMouseWheelEvent(dx, dy);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE bool wave_dialog_at(float x, float y)
+{
+    return wave::dialog_at(x, y);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE int wave_topology_map_at(float x, float y)

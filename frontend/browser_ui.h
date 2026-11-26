@@ -4,7 +4,14 @@
 
 namespace wave {
 
-void fit_preview_dialog(float width, float max_height = 620.0f);
+struct CanvasViewport {
+    float left;
+    float top;
+    float width;
+    float height;
+};
+
+CanvasViewport visible_canvas();
 void download_preview_file(const char* filename, std::string_view contents, const char* media_type);
 
 } // namespace wave

@@ -184,12 +184,4 @@ void apply_text_scale(int viewport_width)
     style.ItemSpacing.y = compact ? 5.0f : 7.0f;
 }
 
-bool begin_modal(const char* name, bool* open, ImGuiWindowFlags flags)
-{
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, popup_radius);
-    const bool visible = ImGui::BeginPopupModal(name, open, flags);
-    ImGui::PopStyleVar();
-    return visible;
-}
-
 } // namespace wave::theme

@@ -14,6 +14,7 @@ configure_file(theme_swatches.h.in "${CMAKE_CURRENT_BINARY_DIR}/theme_swatches.h
 
 add_executable(wave
     browser_ui.cpp
+    dialog.cpp
     main.cpp
     panel.cpp
     preview_session.cpp

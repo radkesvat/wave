@@ -1,6 +1,6 @@
 #include "bot_view.h"
 
-#include "browser_ui.h"
+#include "dialog.h"
 #include "view_helpers.h"
 
 #include <utility>
@@ -12,6 +12,13 @@ namespace {
 using namespace view;
 using theme::Color;
 using theme::rgba;
+using Setup = BotViewState::Setup;
+
+constexpr const char* setup_title = "Set up a sample bot";
+constexpr const char* disconnect_title = "Disconnect sample bot";
+constexpr const char* message_title = "Preview bot message";
+constexpr const char* audiences[]{"All preview users", "Enabled preview users", "Preview admins"};
+constexpr const char* unavailable = "The preview connection is unavailable.";
 
 struct Option {
     const char* key;
@@ -69,15 +76,12 @@ void sync_bot(BotViewState& state, const Json& bot)
 
 void bot_setup_dialog(BotViewState& state, PreviewSession& session, const Json& bot)
 {
-    fit_preview_dialog(500);
-    if (!theme::begin_modal("Set up a sample bot", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        if (!ImGui::IsPopupOpen("Set up a sample bot")) {
-            session.abandon(state.connect_request);
-        }
+    if (!ImGui::IsPopupOpen(setup_title)) {
+        session.abandon(state.connect_request);
         return;
     }
     if (auto reply = session.take_reply(state.connect_request)) {
-        state.setup = reply->ok() ? BotViewState::Setup::complete : BotViewState::Setup::token;
+        state.setup = reply->ok() ? Setup::complete : Setup::token;
         if (reply->status == PreviewReply::Status::timed_out) {
             reply->message = "Preview did not confirm the bot connection. Try again.";
         } else if (reply->status == PreviewReply::Status::disconnected) {
@@ -85,59 +89,52 @@ void bot_setup_dialog(BotViewState& state, PreviewSession& session, const Json& 
         }
         state.connect_reply = std::move(reply);
     }
+
+    const auto setup = state.setup;
+    const bool token_valid = std::string_view(state.token.data()).size() >= 4;
+    const std::array<DialogAction, 3> actions{{{setup == Setup::complete ? "Done" : "Close"},
+                                               {setup == Setup::intro ? "Next" : "Back"},
+                                               {"Connect sample bot", !token_valid}}};
+    const std::size_t count = setup == Setup::token ? 3 : setup == Setup::intro ? 2 : 1;
+    Dialog frame(setup_title, setup == Setup::intro ? 480 : 440, std::span(actions).first(count));
+    if (!frame) {
+        return;
+    }
     switch (state.setup) {
-    case BotViewState::Setup::intro:
-        ImGui::SeparatorText("1. Bot setup");
+    case Setup::intro:
         ImGui::TextWrapped("Connect a sample bot to preview notifications, user configuration and messages.");
-        if (ImGui::Button("Next")) {
-            state.setup = BotViewState::Setup::token;
-        }
         break;
-    case BotViewState::Setup::token:
-        ImGui::SeparatorText("2. Demo token");
+    case Setup::token:
         edit("Sample token", state.token, "wave-preview-token");
         ImGui::TextWrapped("Use the supplied sample token or enter another demo value.");
-        ImGui::BeginDisabled(std::string_view(state.token.data()).size() < 4);
-        if (ImGui::Button("Connect sample bot")) {
-            state.connect_request =
-                session.submit({{"action", "bot_connect"}, {"token", state.token.data()}}, 5000);
-            if (state.connect_request) {
-                state.setup = BotViewState::Setup::connecting;
-                state.connect_reply.reset();
-            }
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::Button("Back")) {
-            state.setup = BotViewState::Setup::intro;
-        }
         if (state.connect_reply) {
             feedback(*state.connect_reply);
         }
         break;
-    case BotViewState::Setup::connecting:
-        ImGui::TextColored(rgba(Color::info), "Connecting the sample bot...");
+    case Setup::connecting:
+        wrapped("Connecting the sample bot…", Color::info);
         break;
-    case BotViewState::Setup::complete:
-        ImGui::PushStyleColor(ImGuiCol_Text, rgba(Color::success));
-        ImGui::SeparatorText("3. Sample bot connected");
-        ImGui::PopStyleColor();
+    case Setup::complete:
+        wrapped("Sample bot connected", Color::success);
         wrapped(string_field(bot, "admin_link"));
-        if (ImGui::Button("Done")) {
-            ImGui::CloseCurrentPopup();
-        }
         break;
     }
-    if (state.setup != BotViewState::Setup::complete) {
-        if (state.setup != BotViewState::Setup::connecting) {
-            ImGui::SameLine();
-        }
-        if (ImGui::Button("Close")) {
-            session.abandon(state.connect_request);
-            ImGui::CloseCurrentPopup();
+    const int action = frame.footer();
+    if (action == 0) {
+        session.abandon(state.connect_request);
+        ImGui::CloseCurrentPopup();
+    } else if (action == 1) {
+        state.setup = setup == Setup::intro ? Setup::token : Setup::intro;
+    } else if (action == 2 && std::string_view(state.token.data()).size() >= 4) {
+        state.connect_request =
+            session.submit({{"action", "bot_connect"}, {"token", state.token.data()}}, 5000);
+        if (state.connect_request) {
+            state.setup = Setup::connecting;
+            state.connect_reply.reset();
+        } else {
+            state.connect_reply = PreviewReply{PreviewReply::Status::disconnected, unavailable};
         }
     }
-    ImGui::EndPopup();
 }
 
 void bot_connection(BotViewState& state, PreviewSession& session, const Json& bot, bool narrow)
@@ -152,10 +149,10 @@ void bot_connection(BotViewState& state, PreviewSession& session, const Json& bo
     }
     if (ImGui::Button(connected ? "Open setup demo" : "Set up bot")) {
         session.abandon(state.connect_request);
-        state.setup = BotViewState::Setup::intro;
+        state.setup = Setup::intro;
         state.connect_reply.reset();
         fill(state.token, "wave-preview-token");
-        ImGui::OpenPopup("Set up a sample bot");
+        state.requested_dialog = BotViewState::Dialog::setup;
     }
     if (connected) {
         if (!narrow) {
@@ -168,27 +165,13 @@ void bot_connection(BotViewState& state, PreviewSession& session, const Json& bo
         }
         ImGui::SameLine();
         if (ImGui::Button("Disconnect")) {
-            ImGui::OpenPopup("Disconnect sample bot");
+            state.requested_dialog = BotViewState::Dialog::disconnect;
         }
     }
     if (state.access_link_copied && connected) {
         ImGui::TextColored(rgba(Color::success), "Sample access link copied");
     }
     feedback(session, {"bot_connect", "bot_disconnect"});
-    bot_setup_dialog(state, session, bot);
-    fit_preview_dialog(380);
-    if (theme::begin_modal("Disconnect sample bot", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextWrapped("Disconnect the bot from this preview process?");
-        if (ImGui::Button("Confirm disconnect") && session.send({{"action", "bot_disconnect"}})) {
-            state.access_link_copied = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel")) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
 }
 
 void submit_bot_save(BotViewState::Save& save, PreviewSession& session, Json settings)
@@ -198,8 +181,7 @@ void submit_bot_save(BotViewState::Save& save, PreviewSession& session, Json set
     if (save.request) {
         save.reply.reset();
     } else {
-        save.reply =
-            PreviewReply{PreviewReply::Status::disconnected, "The preview connection is unavailable."};
+        save.reply = PreviewReply{PreviewReply::Status::disconnected, unavailable};
     }
 }
 
@@ -316,7 +298,6 @@ void bot_overrides(BotViewState& state, PreviewSession& session)
 
 void bot_actions(BotViewState& state, PreviewSession& session, const Json& bot)
 {
-    constexpr const char* audiences[]{"All preview users", "Enabled preview users", "Preview admins"};
     ImGui::TextUnformatted("Message audience");
     ImGui::SetNextItemWidth(-1);
     ImGui::Combo("##bot-audience", &state.audience, audiences, IM_ARRAYSIZE(audiences));
@@ -324,7 +305,7 @@ void bot_actions(BotViewState& state, PreviewSession& session, const Json& bot)
     ImGui::InputTextMultiline("##bot-message", state.message.data(), state.message.size(), {-1, 76});
     ImGui::BeginDisabled(!state.message[0]);
     if (ImGui::Button("Message preview")) {
-        ImGui::OpenPopup("Preview bot message");
+        state.requested_dialog = BotViewState::Dialog::message;
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -338,27 +319,71 @@ void bot_actions(BotViewState& state, PreviewSession& session, const Json& bot)
         wrapped(message);
     }
     feedback(session, {"bot_action"});
-
-    fit_preview_dialog(460);
-    if (theme::begin_modal("Preview bot message", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        wrapped(audiences[state.audience]);
-        ImGui::Separator();
-        wrapped(state.message.data());
-        if (ImGui::Button("Simulate send") && session.send({{"action", "bot_action"},
-                                                            {"kind", "message"},
-                                                            {"message", state.message.data()},
-                                                            {"audience", audiences[state.audience]}})) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Close")) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
 }
 
 } // namespace
+
+void render_bot_dialogs(BotViewState& state, PreviewSession& session)
+{
+    const char* requested = nullptr;
+    switch (std::exchange(state.requested_dialog, BotViewState::Dialog::none)) {
+    case BotViewState::Dialog::setup:
+        requested = setup_title;
+        break;
+    case BotViewState::Dialog::disconnect:
+        requested = disconnect_title;
+        break;
+    case BotViewState::Dialog::message:
+        requested = message_title;
+        break;
+    case BotViewState::Dialog::none:
+        break;
+    }
+    if (requested) {
+        state.dialog_error.clear();
+        ImGui::OpenPopup(requested);
+    }
+
+    bot_setup_dialog(state, session, field(session.data(), "bot"));
+    if (Dialog frame{disconnect_title, 380, {{"Cancel"}, {"Confirm disconnect"}}}; frame) {
+        ImGui::TextWrapped("Disconnect the bot from this preview process?");
+        if (!state.dialog_error.empty()) {
+            wrapped(state.dialog_error, Color::error);
+        }
+        const int action = frame.footer();
+        if (action == 0) {
+            ImGui::CloseCurrentPopup();
+        } else if (action == 1) {
+            if (session.send({{"action", "bot_disconnect"}})) {
+                state.access_link_copied = false;
+                ImGui::CloseCurrentPopup();
+            } else {
+                state.dialog_error = unavailable;
+            }
+        }
+    }
+    if (Dialog frame{message_title, 460, {{"Close"}, {"Simulate send"}}}; frame) {
+        wrapped(audiences[state.audience]);
+        ImGui::Separator();
+        wrapped(state.message.data());
+        if (!state.dialog_error.empty()) {
+            wrapped(state.dialog_error, Color::error);
+        }
+        const int action = frame.footer();
+        if (action == 0) {
+            ImGui::CloseCurrentPopup();
+        } else if (action == 1) {
+            if (session.send({{"action", "bot_action"},
+                              {"kind", "message"},
+                              {"message", state.message.data()},
+                              {"audience", audiences[state.audience]}})) {
+                ImGui::CloseCurrentPopup();
+            } else {
+                state.dialog_error = unavailable;
+            }
+        }
+    }
+}
 
 void render_bot(BotViewState& state, PreviewSession& session, bool narrow)
 {
@@ -389,6 +414,7 @@ void render_bot(BotViewState& state, PreviewSession& session, bool narrow)
         }
         ImGui::EndTabBar();
     }
+    render_bot_dialogs(state, session);
 }
 
 } // namespace wave

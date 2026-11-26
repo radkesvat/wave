@@ -183,15 +183,45 @@ function assertRequest(request, expected) {
     return id;
 }
 
-async function openSetup(page) {
-    await canvasClick(page, 132, 23);
+async function openSetup(page, click = (x, y) => canvasClick(page, x, y)) {
+    await click(132, 23);
     await page.waitForFunction(() => document.getElementById('menu').getAttribute('aria-expanded') === 'true');
-    await canvasClick(page, 170, 160);
-    await page.getByRole('img', { name: /Wave first-run setup. Step 1 of 3/ }).waitFor();
-    await canvasClick(page, 449, 244);
-    await page.getByRole('img', { name: /Step 2 of 3/ }).waitFor();
-    await canvasClick(page, 495, 294);
-    await page.getByRole('img', { name: /Step 3 of 3/ }).waitFor();
+    await click(170, 160);
+    await page.getByRole('img', { name: 'Welcome to Wave. Step 1 of 3.' }).waitFor();
+}
+
+// Entry feedback changes the height of the centered dialog. Locate its thin outline before clicking.
+async function entryFrame(page) {
+    await settleCanvas(page);
+    const { width, height } = page.viewportSize();
+    const start = 114;
+    const { pixels } = await screenshotPixels(page, { x: Math.floor(width / 2), y: start, width: 1,
+        height: height - start });
+    const edge = [];
+    for (let i = 0; i < pixels.length; i += 4) {
+        const [r, g, b] = pixels.slice(i, i + 3);
+        if (r === 138 && g === 132 && b === 149) edge.push(start + i / 4);
+    }
+    assert.ok(edge.length >= 2, 'Expected an entry dialog outline');
+    return { top: edge[0], bottom: edge.at(-1) };
+}
+
+async function clickEntryFooter(page, x) {
+    const { bottom } = await entryFrame(page);
+    await canvasClick(page, x, bottom - 25);
+}
+
+async function openPanelDetails(page) {
+    await openSetup(page);
+    await clickEntryFooter(page, 860);
+    await page.getByRole('img', { name: 'Preview notes. Step 2 of 3.' }).waitFor();
+    await clickEntryFooter(page, 915);
+    await page.getByRole('img', { name: 'Panel details. Step 3 of 3.' }).waitFor();
+}
+
+async function useExampleCredentials(page) {
+    const { top } = await entryFrame(page);
+    await canvasClick(page, 460, top + 149);
 }
 
 for (const scale of [1, 2]) {
@@ -503,7 +533,7 @@ test('keeps an open Users edit draft while replacing rows and their configuratio
         await replaceText(page, 610, 104, 'Al');
         await canvasClick(page, 590, 171);
         await canvasClick(page, 610, 188);
-        await replaceText(page, 495, 212, 'Albright local');
+        await replaceText(page, 495, 220, 'Albright local');
 
         data.users = [
             { ...user, id: 5, name: 'Alpine new' },
@@ -511,7 +541,7 @@ test('keeps an open Users edit draft while replacing rows and their configuratio
         ];
         await preview.broadcast();
         await description(/Wave Users.*2 users/).waitFor();
-        await canvasClick(page, 481, 654);
+        await canvasClick(page, 820, 667);
         await description(/Applied the Users draft/).waitFor();
         assertRequest((await preview.action(0)).request, {
             action: 'edit_user', id: 2, name: 'Albright local',
@@ -519,7 +549,7 @@ test('keeps an open Users edit draft while replacing rows and their configuratio
 
         await canvasClick(page, 590, 171);
         await canvasClick(page, 625, 235);
-        await canvasClick(page, 490, 554);
+        await canvasClick(page, 710, 572);
         await page.waitForFunction(async text => (await navigator.clipboard.readText()) === text, configuration);
     } finally {
         await page.close();
@@ -562,8 +592,8 @@ test('merges a Users edit with changes from a second tab', async () => {
             await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
         }
         await openFirstEdit(editor);
-        await replaceText(editor, 495, 212, 'Avery Local');
-        await replaceText(editor, 457, 367, '25');
+        await replaceText(editor, 495, 220, 'Avery Local');
+        await replaceText(editor, 480, 375, '25');
 
         await canvasClick(other, 514, 171);
         assertRequest((await secondPreview.action(0)).request,
@@ -572,15 +602,15 @@ test('merges a Users edit with changes from a second tab', async () => {
         await editor.getByRole('img', { name: /Avery Brooks, disabled, 3\/5/ }).waitFor();
 
         await openFirstEdit(other);
-        await replaceText(other, 457, 399, '18');
-        await canvasClick(other, 481, 654);
+        await replaceText(other, 480, 408, '18');
+        await canvasClick(other, 820, 667);
         assertRequest((await secondPreview.action(1)).request, {
             action: 'edit_user', id: 1, options: { download_limit: 18 },
         });
         await firstPreview.broadcast();
         await editor.getByRole('img', { name: /Avery Brooks, disabled, 3\/18/ }).waitFor();
 
-        await canvasClick(editor, 481, 654);
+        await canvasClick(editor, 820, 667);
         assertRequest((await firstPreview.action(0)).request, {
             action: 'edit_user', id: 1, name: 'Avery Local', options: { upload_limit: 25 },
         });
@@ -682,7 +712,7 @@ test('narrow touch activates a switch and header controls and scrolls on a swipe
     }
 });
 
-test('first-run setup shows progress, validates input, and completes through the preview socket', async () => {
+test('first-run setup validates input, preserves the draft, and completes through the preview socket', async () => {
     const page = await browser.newPage({ viewport: desktop });
     const preview = await mockPreview(page, { handle(_data, _action, reply) {
         reply({ feedback: 'Applied demo setup.' });
@@ -691,17 +721,28 @@ test('first-run setup shows progress, validates input, and completes through the
     try {
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
-        await openSetup(page);
-        await canvasClick(page, 511, 327);
+        await openPanelDetails(page);
+        const { top } = await entryFrame(page);
+        await replaceText(page, 700, top + 49, '');
+        await clickEntryFooter(page, 830);
+        await page.getByRole('img', { name: /Enter a panel name/ }).waitFor();
+        await replaceText(page, 700, (await entryFrame(page)).top + 49, 'Demo Control Panel');
+        await clickEntryFooter(page, 830);
         await page.getByRole('img', { name: /Enter a demo username and password/ }).waitFor();
         assert.equal(preview.actions.length, 0);
-        await canvasClick(page, 458, 294);
-        await canvasClick(page, 511, 327);
-        await page.getByRole('img', { name: /Applied demo setup/ }).waitFor();
+        await useExampleCredentials(page);
+        await clickEntryFooter(page, 700);
+        await page.getByRole('img', { name: 'Preview notes. Step 2 of 3.' }).waitFor();
+        await clickEntryFooter(page, 915);
+        await page.getByRole('img', { name: 'Panel details. Step 3 of 3.' }).waitFor();
+        await clickEntryFooter(page, 830);
+        await page.getByRole('img', { name: 'Setup complete. Applied demo setup.' }).waitFor();
         assert.equal(preview.actions.length, 1);
         assertRequest(preview.actions[0].request, {
-            action: 'setup', name: 'Wave Preview', domain: 'wave.example', username: 'demo', password: 'wave-demo',
+            action: 'setup', name: 'Demo Control Panel', username: 'demo', password: 'wave-demo',
         });
+        await clickEntryFooter(page, 734);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
     } finally {
         await page.close();
     }
@@ -716,22 +757,22 @@ for (const acknowledged of [false, true]) {
         try {
             await page.goto(url);
             await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
-            await openSetup(page);
-            await canvasClick(page, 458, 294);
-            await canvasClick(page, 511, 327);
+            await openPanelDetails(page);
+            await useExampleCredentials(page);
+            await clickEntryFooter(page, 830);
             const { reply } = await preview.action(0);
 
             // Hold rendering so both socket events can precede the form's next frame.
-            await page.clock.pauseAt(60_000);
+            await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 500);
             if (acknowledged) reply({ feedback: 'Applied demo setup.' });
             await preview.close();
             await page.clock.resume();
             await settleCanvas(page);
 
-            const expected = acknowledged ? 'Applied demo setup.'
-                : 'The preview connection closed. Try again after reconnecting.';
+            const expected = acknowledged ? 'Setup complete. Applied demo setup.'
+                : 'Panel details. Step 3 of 3. The preview connection closed. Try again after reconnecting.';
             const description = await page.getByRole('img').getAttribute('aria-label');
-            assert.equal(description, `Wave first-run setup. Step 3 of 3. ${expected}`);
+            assert.equal(description, expected);
         } finally {
             await page.close();
         }
@@ -752,10 +793,10 @@ test('a reopened setup waits for its own reply and retries an active rejection',
             }
         };
     });
-    const pending = /Wave first-run setup\. Step 3 of 3\. Applying demo setup/;
+    const pending = 'Panel details. Step 3 of 3. Applying demo setup…';
     const description = name => page.getByRole('img', { name });
     async function submit(index) {
-        await canvasClick(page, 511, 327);
+        await clickEntryFooter(page, 830);
         await description(pending).waitFor();
         return preview.action(index);
     }
@@ -763,33 +804,188 @@ test('a reopened setup waits for its own reply and retries an active rejection',
     try {
         await page.goto(url);
         await description(/Wave Users.*2 users/).waitFor();
-        await openSetup(page);
-        await canvasClick(page, 458, 294);
+        await openPanelDetails(page);
+        await useExampleCredentials(page);
         const first = await submit(0);
+        await clickEntryFooter(page, 830);
+        assert.equal(preview.actions.length, 1);
+        await clickEntryFooter(page, 540);
+        await description(/Wave Users.*2 users/).waitFor();
 
-        await openSetup(page);
-        await canvasClick(page, 458, 294);
+        await openPanelDetails(page);
+        await clickEntryFooter(page, 830);
+        await description(/Enter a demo username and password/).waitFor();
+        await useExampleCredentials(page);
         const second = await submit(1);
-        first.reply({ ok: false, feedback: 'The first setup was rejected.' });
+        first.reply({ feedback: 'The first setup completed.' });
         await page.waitForFunction(id => window.lastPreviewRequestId === id, first.request.request_id);
         await settleCanvas(page);
         assert.equal(await description(pending).count(), 1);
-        second.reply({ feedback: 'The reopened setup completed.' });
-        await description(/The reopened setup completed/).waitFor();
-
-        await openSetup(page);
-        await canvasClick(page, 458, 294);
-        const third = await submit(2);
-        third.reply({ ok: false, feedback: 'The active setup was rejected.' });
+        second.reply({ ok: false, feedback: 'The active setup was rejected.' });
         await description(/The active setup was rejected/).waitFor();
-        const retry = await submit(3);
+        const retry = await submit(2);
         retry.reply({ feedback: 'The setup retry completed.' });
-        await description(/The setup retry completed/).waitFor();
+        await description('Setup complete. The setup retry completed.').waitFor();
 
-        const ids = [first, second, third, retry].map(({ request }) => assertRequest(request, {
-            action: 'setup', name: 'Wave Preview', domain: 'wave.example', username: 'demo', password: 'wave-demo',
+        const ids = [first, second, retry].map(({ request }) => assertRequest(request, {
+            action: 'setup', name: 'Wave Preview', username: 'demo', password: 'wave-demo',
         }));
         assert.equal(new Set(ids).size, ids.length);
+    } finally {
+        await page.close();
+    }
+});
+
+test('a timed-out setup keeps the draft available for retry', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    await page.clock.install({ time: 0 });
+    const preview = await mockPreview(page, { handle() {} });
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await openPanelDetails(page);
+        await useExampleCredentials(page);
+        await clickEntryFooter(page, 830);
+        const first = await preview.action(0);
+        await page.clock.fastForward(5100);
+        await page.getByRole('img', { name: 'Panel details. Step 3 of 3. The preview server did not reply. Try again.' }).waitFor();
+
+        await clickEntryFooter(page, 830);
+        const retry = await preview.action(1);
+        assert.notEqual(first.request.request_id, retry.request.request_id);
+        assertRequest(retry.request, { action: 'setup', name: 'Wave Preview', username: 'demo', password: 'wave-demo' });
+        retry.reply({ feedback: 'Applied demo setup.' });
+        await page.getByRole('img', { name: 'Setup complete. Applied demo setup.' }).waitFor();
+    } finally {
+        await page.close();
+    }
+});
+
+test('setup fits a narrow phone and supports touch and keyboard form navigation', async () => {
+    const phone = { width: 320, height: 568 };
+    const page = await browser.newPage({ viewport: phone, isMobile: true, hasTouch: true });
+    const preview = await mockPreview(page, { handle() {} });
+    async function tap(x, y) {
+        await page.touchscreen.tap(x, y);
+        await settleCanvas(page);
+    }
+    async function next() {
+        const { bottom } = await entryFrame(page);
+        await tap(248, bottom - 29);
+    }
+    async function expectFeedbackColor(red, green, blue) {
+        const { top, bottom } = await entryFrame(page);
+        const start = top + 26;
+        const { pixels } = await screenshotPixels(page,
+            { x: 24, y: start, width: 272, height: bottom - start - 91 });
+        assert.ok(pixels.some((value, i) => i % 4 === 0 && value === red &&
+            pixels[i + 1] === green && pixels[i + 2] === blue), 'Expected feedback inside the visible dialog body');
+    }
+
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await openSetup(page, tap);
+        const welcome = await entryFrame(page);
+        assert.ok(Math.abs((welcome.top + welcome.bottom) / 2 - (phone.height + 107) / 2) <= 2);
+        await next();
+        await page.getByRole('img', { name: 'Preview notes. Step 2 of 3.' }).waitFor();
+        await next();
+        await page.getByRole('img', { name: 'Panel details. Step 3 of 3.' }).waitFor();
+
+        const details = await entryFrame(page);
+        assert.ok(details.bottom < phone.height - 12, 'Wrapped footer stays inside the viewport');
+        await tap(90, details.top + 72);
+        const input = page.locator('#wave-text-input');
+        await input.waitFor({ state: 'visible' });
+        for (let i = 0; i < 2; i++) {
+            const before = await input.evaluate(element => parseFloat(element.style.top));
+            await page.keyboard.press('Tab');
+            await page.waitForFunction(previous => {
+                const field = document.getElementById('wave-text-input');
+                return field === document.activeElement && parseFloat(field.style.top) > previous + 40;
+            }, before);
+        }
+        await page.keyboard.insertText('phone-demo-pass');
+        await settleCanvas(page);
+        await page.setViewportSize({ width: phone.width, height: 360 });
+        await next();
+        const { request, reply } = await preview.action(0);
+        const expected = { action: 'setup', name: 'Wave Preview', username: 'demo', password: 'phone-demo-pass' };
+        assertRequest(request, expected);
+        await page.getByRole('img', { name: /Applying demo setup/ }).waitFor();
+        await expectFeedbackColor(81, 165, 246);
+        reply({ ok: false, feedback: 'The preview declined the request.' });
+        await page.getByRole('img', { name: /The preview declined the request/ }).waitFor();
+        await expectFeedbackColor(241, 127, 111);
+        await next();
+        const retry = await preview.action(1);
+        assertRequest(retry.request, expected);
+        retry.reply({ feedback: 'Applied demo setup.' });
+        await page.getByRole('img', { name: 'Setup complete. Applied demo setup.' }).waitFor();
+    } finally {
+        await page.close();
+    }
+});
+
+test('setup fields and actions are reachable at 320 × 256', async () => {
+    const page = await browser.newPage({ viewport: { width: 320, height: 256 }, isMobile: true, hasTouch: true });
+    const preview = await mockPreview(page, { handle() {} });
+    const description = name => page.getByRole('img', { name });
+    const touch = await page.context().newCDPSession(page);
+    async function tap(x, y) {
+        await page.touchscreen.tap(x, y);
+        await settleCanvas(page);
+    }
+    async function tapFooter(x) {
+        const { top, bottom } = await entryFrame(page);
+        for (let swipe = 0; swipe < 4; swipe++) {
+            await touch.send('Input.dispatchTouchEvent', {
+                type: 'touchStart', touchPoints: [{ x: 160, y: bottom - 20 }],
+            });
+            for (const y of [bottom - 40, top + 50, top + 39]) {
+                await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 160, y }] });
+                await settleCanvas(page);
+            }
+            await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        }
+        await tap(x, bottom - 29);
+    }
+
+    try {
+        await page.goto(url);
+        await description(/Wave Users.*2 users/).waitFor();
+        await openSetup(page, tap);
+        for (const title of ['Preview notes. Step 2 of 3.', 'Panel details. Step 3 of 3.']) {
+            await tapFooter(248);
+            await description(title).waitFor();
+        }
+
+        const { top } = await entryFrame(page);
+        await tap(90, top + 72);
+        const input = page.locator('#wave-text-input');
+        await input.waitFor({ state: 'visible', timeout: 5000 });
+        const expected = { action: 'setup', name: 'Compact Wave', username: 'compact-admin', password: 'compact-demo' };
+        for (const [index, value] of [expected.name, expected.username, expected.password].entries()) {
+            if (index > 0) {
+                await page.keyboard.press('Tab');
+                await settleCanvas(page);
+            }
+            await page.keyboard.press('Control+a');
+            await settleCanvas(page);
+            await page.keyboard.insertText(value);
+            await settleCanvas(page);
+        }
+
+        await tapFooter(145);
+        await description('Preview notes. Step 2 of 3.').waitFor();
+        await tapFooter(248);
+        await description('Panel details. Step 3 of 3.').waitFor();
+        await tapFooter(248);
+        const { request, reply } = await preview.action(0);
+        assertRequest(request, expected);
+        reply({ feedback: 'Applied demo setup.' });
+        await description('Setup complete. Applied demo setup.').waitFor();
     } finally {
         await page.close();
     }
@@ -816,7 +1012,7 @@ test('applies a populated Settings draft after a broadcast and a page change', a
         await openView(page, 'Server Status');
         await openView(page, 'Panel Settings');
         await canvasClick(page, 245, 414);
-        await canvasClick(page, 480, 424);
+        await canvasClick(page, 754, 436);
         await page.getByRole('img', { name: /Applied sample panel settings/ }).waitFor();
         assert.equal(preview.actions.length, 1);
         assertRequest(preview.actions[0].request, { action: 'apply_settings', settings: { ...original, name: 'Harbor QA' } });
@@ -832,7 +1028,7 @@ test('a later Settings save preserves a remote change received while the page wa
     const preview = await mockPreview(page, { data, handle() {} });
     const apply = async () => {
         await canvasClick(page, 245, 414);
-        await canvasClick(page, 480, 424);
+        await canvasClick(page, 754, 436);
     };
 
     try {
@@ -844,6 +1040,7 @@ test('a later Settings save preserves a remote change received while the page wa
         const first = await preview.action(0);
         assertRequest(first.request, { action: 'apply_settings', settings: { ...original, name: 'Harbor QA' } });
 
+        await canvasClick(page, 640, 445);
         await openView(page, 'Server Status');
         data.settings = first.request.settings;
         first.reply({ feedback: 'Applied the new panel name.' });
@@ -1116,6 +1313,81 @@ test('shows startup feedback and reports a missing Wasm asset', async () => {
         await assertStartupTheme();
     } finally {
         releaseWasm();
+        await page.close();
+    }
+});
+
+test('cancels the demo sign-out by keyboard and opens sign-in on confirmation', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    const preview = await mockPreview(page);
+    const openConfirmation = async () => {
+        await canvasClick(page, 134, 23);
+        await canvasClick(page, 172, 185);
+        await page.waitForFunction(() => document.getElementById('panel-controls').inert);
+    };
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*Sample data\./ }).waitFor();
+        await openConfirmation();
+        await page.keyboard.press('Tab');
+        await settleCanvas(page);
+        await page.keyboard.press('Space');
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        assert.equal(preview.actions.length, 0);
+
+        await openConfirmation();
+        await canvasClick(page, 757, 426);
+        assert.deepEqual((await preview.action(0)).request, { action: 'sign_out' });
+        await page.getByRole('img', { name: 'Demo sign-in.' }).waitFor();
+    } finally {
+        await page.close();
+    }
+});
+
+test('centers a dialog on a short scrolled phone and keeps its footer reachable during a touch swipe', async () => {
+    const viewport = { width: 390, height: 342 };
+    const page = await browser.newPage({ viewport, hasTouch: true });
+    const preview = await mockPreview(page);
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*Sample data\./ }).waitFor();
+        await waitForCanvas(page, viewport, true);
+        await page.evaluate(() => window.scrollTo(0, 135));
+        await settleCanvas(page);
+        await page.touchscreen.tap(63, 155);
+        await page.waitForFunction(() => document.getElementById('panel-controls').inert);
+        await settleCanvas(page);
+
+        // The border occupies the safe margin from top to bottom, including both square corners.
+        const outline = await screenshotPixels(page, { x: 12, y: 0, width: 1, height: viewport.height });
+        const edges = [];
+        for (let y = 0; y < outline.height; ++y) {
+            const pixel = outline.pixels.slice(4 * y, 4 * y + 3);
+            if (pixel.every((channel, index) => channel === [138, 132, 149][index])) edges.push(y);
+        }
+        assert.deepEqual([edges[0], edges.at(-1)], [12, 329]);
+        assert.equal(edges.length, 318);
+
+        const footer = { x: 149, y: 274, width: 203, height: 54 };
+        const body = { x: 28, y: 115, width: 220, height: 135 };
+        const initialFooter = await screenshotPixels(page, footer);
+        const initialBody = await screenshotPixels(page, body);
+        const touch = await page.context().newCDPSession(page);
+        await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 145, y: 245 }] });
+        for (const y of [210, 170, 126, 79, 54]) {
+            await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 145, y }] });
+            await settleCanvas(page);
+        }
+        await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await settleCanvas(page);
+        assert.equal(await page.evaluate(() => scrollY), 135);
+        assert.notDeepEqual(await screenshotPixels(page, body), initialBody);
+        assert.deepEqual(await screenshotPixels(page, footer), initialFooter);
+
+        await page.touchscreen.tap(205, 302);
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        assert.equal(preview.actions.length, 0);
+    } finally {
         await page.close();
     }
 });

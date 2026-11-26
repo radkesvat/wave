@@ -1,6 +1,6 @@
 #include "panel.h"
 
-#include "browser_ui.h"
+#include "dialog.h"
 #include "preview_session.h"
 #include "theme.h"
 #include "views/about_view.h"
@@ -37,6 +37,7 @@ constexpr float sidebar_width = 178;
 constexpr float wide_sidebar_width = 224;
 constexpr float desktop_header = 48;
 constexpr float narrow_header = 78;
+constexpr float welcome_height = 29;
 constexpr float breakpoint = 760;
 constexpr float nav_row = 34;
 constexpr float wide_nav_row = 38;
@@ -127,6 +128,18 @@ float draw_header(const PanelLayout& layout, ImVec2 viewport, int focus)
     draw.AddText({preview_x, text_y}, packed(Color::accent), preview);
     ImGui::PopFont();
     return menu_x;
+}
+
+void draw_welcome(float top, float width)
+{
+    auto& draw = *ImGui::GetWindowDrawList();
+    const float bottom = top + welcome_height;
+    draw.AddRectFilled({0, top}, {width, bottom}, packed(Color::toolbar));
+    draw.AddRectFilled({0, bottom - theme::border_width}, {width, bottom}, packed(Color::divider));
+    ImGui::PushFont(nullptr, theme::secondary_font_size);
+    draw.AddText({12, std::floor(top + (welcome_height - ImGui::GetFontSize()) * 0.5f)},
+                 packed(Color::primary_text), "Welcome");
+    ImGui::PopFont();
 }
 
 struct HeaderPopup {
@@ -334,7 +347,8 @@ void mini_keyboard(PanelState& state)
     ImGui::TextWrapped("Compose text with the keys below, then copy it into a preview field.");
     ImGui::SetNextItemWidth(-1);
     ImGui::InputText("##scratch", state.input_sample, sizeof(state.input_sample));
-    const float key_width = (ImGui::GetContentRegionAvail().x - 9 * ImGui::GetStyle().ItemSpacing.x) / 10;
+    constexpr float key_gap = 4;
+    const float key_width = std::max(1.0f, std::floor((ImGui::GetContentRegionAvail().x - 9 * key_gap) / 10));
     const auto append = [&state](char c) {
         const auto used = std::strlen(state.input_sample);
         if (used + 1 < sizeof(state.input_sample)) {
@@ -342,10 +356,11 @@ void mini_keyboard(PanelState& state)
             state.input_sample[used + 1] = 0;
         }
     };
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {3, ImGui::GetStyle().FramePadding.y});
     for (const std::string_view row : {"1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"}) {
         for (std::size_t i = 0; i < row.size(); ++i) {
             if (i != 0) {
-                ImGui::SameLine();
+                ImGui::SameLine(0, key_gap);
             }
             const char label[]{row[i], 0};
             if (ImGui::Button(label, {key_width, 29})) {
@@ -353,6 +368,7 @@ void mini_keyboard(PanelState& state)
             }
         }
     }
+    ImGui::PopStyleVar();
     if (ImGui::Button("Space")) {
         append(' ');
     }
@@ -385,19 +401,19 @@ void render_dialogs(PanelState& state, PreviewSession& session)
         if (!ImGui::IsPopupOpen(title)) {
             continue;
         }
-        fit_preview_dialog(dialog == PanelDialog::input ? 415 : 410);
-        if (!theme::begin_modal(title, nullptr, ImGuiWindowFlags_NoSavedSettings)) {
+        const bool sign_out = dialog == PanelDialog::sign_out;
+        const bool diagnostics = dialog == PanelDialog::diagnostics;
+        const float width = sign_out ? 350 : (diagnostics || dialog == PanelDialog::input ? 440 : 365);
+        const std::array actions = {DialogAction{sign_out ? "Cancel" : "Close"},
+                                    DialogAction{sign_out ? "Sign out" : "Refresh sample data"}};
+        const auto count = sign_out || diagnostics ? 2 : 1;
+        Dialog frame(title, width, std::span(actions).first(count));
+        if (!frame) {
             continue;
         }
         switch (dialog) {
         case PanelDialog::sign_out:
             ImGui::TextWrapped("Return to the demo sign-in screen?");
-            if (ImGui::Button("Sign out")) {
-                session.send({{"action", "sign_out"}});
-                open_workspace_entry(state, EntryPage::sign_in, session);
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::SameLine();
             break;
         case PanelDialog::version:
             ImGui::TextUnformatted("Wave 0.1.0 preview");
@@ -405,18 +421,14 @@ void render_dialogs(PanelState& state, PreviewSession& session)
             ImGui::TextLinkOpenURL("Project releases", "https://github.com/radkesvat/wave/releases");
             break;
         case PanelDialog::diagnostics:
-            ImGui::Text("Preview socket: %s", session.status() == PreviewStatus::ready     ? "Connected"
-                                              : session.status() == PreviewStatus::loading ? "Connecting"
-                                                                                           : "Unavailable");
-            ImGui::TextUnformatted("WaterWall: Disconnected");
-            ImGui::TextUnformatted("Transport: HTTP and JSON WebSocket");
-            ImGui::Text("Renderer: %.0f frames/s, %.2f× scale", ImGui::GetIO().Framerate,
-                        ImGui::GetIO().DisplayFramebufferScale.x);
-            if (ImGui::Button("Refresh sample data")) {
-                if (!session.send({{"action", "refresh"}})) {
-                    session.start();
-                }
-            }
+            ImGui::TextWrapped("Preview socket: %s", session.status() == PreviewStatus::ready ? "Connected"
+                                                     : session.status() == PreviewStatus::loading
+                                                         ? "Connecting"
+                                                         : "Unavailable");
+            ImGui::TextWrapped("WaterWall: Disconnected");
+            ImGui::TextWrapped("Transport: HTTP and JSON WebSocket");
+            ImGui::TextWrapped("Renderer: %.0f frames/s, %.2f× scale", ImGui::GetIO().Framerate,
+                               ImGui::GetIO().DisplayFramebufferScale.x);
             if (session.feedback_action() == "refresh") {
                 ImGui::TextWrapped("%.*s", static_cast<int>(session.feedback().size()),
                                    session.feedback().data());
@@ -428,10 +440,16 @@ void render_dialogs(PanelState& state, PreviewSession& session)
         case PanelDialog::none:
             break;
         }
-        if (ImGui::Button(dialog == PanelDialog::sign_out ? "Cancel" : "Close")) {
+        const int action = frame.footer();
+        if (action == 0) {
             ImGui::CloseCurrentPopup();
+        } else if (action == 1 && sign_out) {
+            session.send({{"action", "sign_out"}});
+            open_workspace_entry(state, EntryPage::sign_in, session);
+            ImGui::CloseCurrentPopup();
+        } else if (action == 1 && diagnostics && !session.send({{"action", "refresh"}})) {
+            session.start();
         }
-        ImGui::EndPopup();
     }
     if (state.metrics_open) {
         ImGui::SetNextWindowSize({std::min(520.0f, ImGui::GetIO().DisplaySize.x - 24), 350},
@@ -456,6 +474,10 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, const 
         }
         if (state.page == PanelPage::users && state.users.dialog) {
             render_users_dialog(state.users, session);
+        } else if (state.page == PanelPage::settings) {
+            render_settings_dialogs(state.settings, session);
+        } else if (state.page == PanelPage::bot) {
+            render_bot_dialogs(state.bot, session);
         }
         return;
     }
@@ -503,7 +525,7 @@ float panel_height(float viewport_width, const PanelState& state)
 {
     const PanelLayout layout(viewport_width, state);
     if (state.entry.page != EntryPage::workspace) {
-        return layout.header_height + 470;
+        return layout.header_height + welcome_height;
     }
     if (layout.narrow) {
         return layout.workspace.y + narrow_work_height + narrow_logs_height + 2 * margin;
@@ -539,12 +561,12 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
     state.browser_control = 0;
     layout = PanelLayout(viewport_width, state);
     if (state.entry.page != EntryPage::workspace) {
-        const float width = std::max(1.0f, std::min(460.0f, viewport.x - 2 * margin));
-        ImGui::SetCursorScreenPos({std::floor((viewport.x - width) * 0.5f), layout.workspace.y + 18});
-        if (begin_pane("Entry", {width, 408}, Color::canvas)) {
-            render_entry(state.entry, session);
+        float top = layout.header_height;
+        if (state.entry.page == EntryPage::setup) {
+            draw_welcome(top, viewport.x);
+            top += welcome_height;
         }
-        ImGui::EndChild();
+        render_entry(state.entry, session, top);
     } else {
         render_navigation(state, layout, viewport, browser_focus);
         const float width = std::max(1.0f, viewport.x - layout.workspace.x - margin);
@@ -577,12 +599,8 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
 std::string describe_panel(const PanelState& state, const PreviewSession& session,
                            const OverviewData* overview, bool overview_loading)
 {
-    if (state.entry.page == EntryPage::sign_in) {
-        return std::format("Wave demo sign-in. {}", state.entry.message);
-    }
-    if (state.entry.page == EntryPage::setup) {
-        return std::format("Wave first-run setup. Step {} of 3. {}", state.entry.step + 1,
-                           state.entry.message);
+    if (state.entry.page != EntryPage::workspace) {
+        return describe_entry(state.entry);
     }
     if (state.page == PanelPage::overview) {
         return describe_overview(overview, overview_loading);

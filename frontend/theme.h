@@ -56,6 +56,4 @@ ImVec4 rgba(Color color);
 void apply(bool high_contrast);
 void apply_text_scale(int viewport_width);
 
-bool begin_modal(const char* name, bool* open = nullptr, ImGuiWindowFlags flags = 0);
-
 } // namespace wave::theme

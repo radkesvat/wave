@@ -1,25 +1,52 @@
 #include "entry_view.h"
 
+#include "dialog.h"
 #include "view_helpers.h"
 
+#include <array>
 #include <cstdio>
+#include <format>
 #include <string_view>
 
 namespace wave {
 namespace {
 
 using theme::Color;
-using theme::rgba;
+
+constexpr char entry_popup[] = "###Entry dialog";
+constexpr std::array setup_titles{"Welcome to Wave", "Preview notes", "Panel details"};
+constexpr double entry_timeout_ms = 5000;
+
+const char* title(const EntryViewState& state)
+{
+    if (state.page == EntryPage::setup) {
+        return state.complete ? "Setup complete" : setup_titles[state.step];
+    }
+    return state.complete ? "Sign-in complete" : "Demo sign-in";
+}
+
+std::string step_progress(const EntryViewState& state)
+{
+    return std::format("Step {} of {}", state.step + 1, setup_titles.size());
+}
 
 bool blank(std::string_view value)
 {
     return value.find_first_not_of(" \r\t\n") == value.npos;
 }
 
-void field(const char* label, char* data, std::size_t size, ImGuiInputTextFlags flags = 0)
+void field(const char* label, char* data, std::size_t size, float label_width, ImGuiInputTextFlags flags = 0)
 {
+    const bool inline_label = label_width > 0;
+    const float field_x = ImGui::GetCursorPosX() + label_width + ImGui::GetStyle().ItemSpacing.x;
     ImGui::PushID(label);
+    if (inline_label) {
+        ImGui::AlignTextToFramePadding();
+    }
     ImGui::TextUnformatted(label);
+    if (inline_label) {
+        ImGui::SameLine(field_x);
+    }
     ImGui::SetNextItemWidth(-1);
     ImGui::InputText("##value", data, size, flags);
     ImGui::PopID();
@@ -27,18 +54,22 @@ void field(const char* label, char* data, std::size_t size, ImGuiInputTextFlags 
 
 void submit(EntryViewState& state, PreviewSession& session)
 {
+    state.reveal_feedback = true;
+    const bool setup = state.page == EntryPage::setup;
+    if (setup && blank(state.panel_name)) {
+        state.message = "Enter a panel name.";
+        return;
+    }
     if (blank(state.username) || blank(state.password)) {
         state.message = "Enter a demo username and password.";
         return;
     }
-    const bool setup = state.page == EntryPage::setup;
     nlohmann::json request{
         {"action", setup ? "setup" : "sign_in"}, {"username", state.username}, {"password", state.password}};
     if (setup) {
         request["name"] = state.panel_name;
-        request["domain"] = state.domain;
     }
-    state.request_id = session.submit(std::move(request));
+    state.request_id = session.submit(std::move(request), entry_timeout_ms);
     state.message = state.request_id ? (setup ? "Applying demo setup…" : "Checking demo credentials…")
                                      : "The preview connection is unavailable.";
 }
@@ -49,72 +80,69 @@ void receive_result(EntryViewState& state, PreviewSession& session)
     if (!reply) {
         return;
     }
-    if (reply->status == PreviewReply::Status::disconnected) {
-        state.message = "The preview connection closed. Try again after reconnecting.";
-    } else {
-        state.complete = reply->ok();
+    state.reveal_feedback = true;
+    switch (reply->status) {
+    case PreviewReply::Status::accepted:
+        state.complete = true;
+        [[fallthrough]];
+    case PreviewReply::Status::rejected:
         state.message = reply->message;
+        break;
+    case PreviewReply::Status::disconnected:
+        state.message = "The preview connection closed. Try again after reconnecting.";
+        break;
+    case PreviewReply::Status::timed_out:
+        state.message = "The preview server did not reply. Try again.";
+        break;
     }
 }
 
-void credentials(EntryViewState& state, bool setup)
+void leave_entry(EntryViewState& state, PreviewSession& session)
 {
-    field(setup ? "Demo administrator" : "Username", state.username, sizeof(state.username));
-    field("Demo password", state.password, sizeof(state.password), ImGuiInputTextFlags_Password);
+    ImGui::CloseCurrentPopup();
+    open_entry(state, EntryPage::workspace, session);
+}
+
+void render_form(EntryViewState& state)
+{
+    const bool setup = state.page == EntryPage::setup;
+    const char* username = setup ? "Demo administrator" : "Username";
+    constexpr char password[] = "Demo password";
+    float label_width = std::max(ImGui::CalcTextSize(username).x, ImGui::CalcTextSize(password).x);
+    if (setup) {
+        label_width = std::max(label_width, ImGui::CalcTextSize("Panel name").x);
+    }
+    if (ImGui::GetContentRegionAvail().x <
+        label_width + ImGui::GetStyle().ItemSpacing.x + 10 * ImGui::GetFontSize()) {
+        label_width = 0;
+    }
+
+    ImGui::BeginDisabled(state.request_id.has_value());
+    if (setup) {
+        field("Panel name", state.panel_name, sizeof(state.panel_name), label_width);
+    } else {
+        ImGui::TextWrapped("Use your saved demo credentials or the default example.");
+    }
+    field(username, state.username, sizeof(state.username), label_width);
+    field(password, state.password, sizeof(state.password), label_width, ImGuiInputTextFlags_Password);
     if (ImGui::Button("Use example")) {
         std::snprintf(state.username, sizeof(state.username), "demo");
         std::snprintf(state.password, sizeof(state.password), "wave-demo");
     }
+    ImGui::EndDisabled();
 }
 
-void render_setup(EntryViewState& state, PreviewSession& session)
+void render_feedback(EntryViewState& state, PreviewSession& session)
 {
-    ImGui::TextDisabled("Step %d of 3", state.step + 1);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, theme::square_radius);
-    ImGui::ProgressBar((state.step + 1.0f) / 3.0f, ImVec2(-1, 4), "");
-    ImGui::PopStyleVar();
-    ImGui::Spacing();
-    switch (state.step) {
-    case 0:
-        ImGui::TextUnformatted("Welcome to Wave");
-        ImGui::TextWrapped("Walk through first-run setup with sample values. The preview stores changes "
-                           "in memory for this Wave process.");
-        if (ImGui::Button("Continue")) {
-            ++state.step;
-            state.message.clear();
-        }
-        break;
-    case 1: {
-        field("Panel name", state.panel_name, sizeof(state.panel_name));
-        field("Example host", state.domain, sizeof(state.domain));
-        if (ImGui::Button("Back")) {
-            --state.step;
-            state.message.clear();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Continue")) {
-            const std::string_view domain = state.domain;
-            if (blank(state.panel_name) || domain.find('.') == domain.npos ||
-                domain.find_first_of(" /:\t\n") != domain.npos) {
-                state.message = "Enter a panel name and a host such as wave.example.";
-            } else {
-                ++state.step;
-                state.message.clear();
-            }
-        }
-        break;
+    if (!state.message.empty()) {
+        view::wrapped(state.message, state.request_id ? Color::info : Color::error);
     }
-    case 2:
-        credentials(state, true);
-        if (ImGui::Button("Back")) {
-            --state.step;
-            state.message.clear();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Finish setup")) {
-            submit(state, session);
-        }
-        break;
+    if (session.status() == PreviewStatus::unavailable && ImGui::Button("Reconnect")) {
+        session.start();
+    }
+    if (state.reveal_feedback) {
+        ImGui::SetScrollHereY(1);
+        state.reveal_feedback = false;
     }
 }
 
@@ -127,47 +155,110 @@ void open_entry(EntryViewState& state, EntryPage page, PreviewSession& session)
     state.page = page;
 }
 
-void render_entry(EntryViewState& state, PreviewSession& session)
+void render_entry(EntryViewState& state, PreviewSession& session, float entry_top)
 {
+    const bool setup = state.page == EntryPage::setup;
     receive_result(state, session);
-    ImGui::PushFont(nullptr, theme::title_font_size);
-    ImGui::TextUnformatted(state.page == EntryPage::setup ? "First-run setup" : "Demo sign-in");
-    ImGui::PopFont();
-    ImGui::Separator();
+    if (!ImGui::IsPopupOpen(entry_popup)) {
+        ImGui::OpenPopup(entry_popup);
+    }
+
+    std::string caption = title(state);
+    if (setup && !state.complete) {
+        caption += " · " + step_progress(state);
+    }
+    caption += entry_popup;
 
     if (state.complete) {
-        ImGui::TextColored(rgba(Color::success), "%s",
-                           state.page == EntryPage::setup ? "Setup complete" : "Sign-in complete");
-        ImGui::TextWrapped("%s", state.message.c_str());
-        if (ImGui::Button("Open workspace")) {
-            open_entry(state, EntryPage::workspace, session);
+        Dialog dialog(caption.c_str(), 390, {{"Open workspace"}}, nullptr, entry_top);
+        if (dialog) {
+            view::wrapped(state.message, Color::success);
+            if (dialog.footer() == 0) {
+                leave_entry(state, session);
+            }
         }
-        return;
-    }
-
-    ImGui::BeginDisabled(state.request_id.has_value());
-    if (state.page == EntryPage::setup) {
-        render_setup(state, session);
+    } else if (setup && state.step == 0) {
+        Dialog dialog(caption.c_str(), 590, {{"Back to workspace"}, {"Continue"}}, nullptr, entry_top);
+        if (dialog) {
+            ImGui::TextWrapped("Set a panel name and demo administrator credentials for this Wave preview.");
+            switch (dialog.footer()) {
+            case 0:
+                leave_entry(state, session);
+                break;
+            case 1:
+                ++state.step;
+                break;
+            }
+        }
+    } else if (setup && state.step == 1) {
+        Dialog dialog(caption.c_str(), 690, {{"Back to workspace"}, {"Back"}, {"Continue"}}, nullptr,
+                      entry_top);
+        if (dialog) {
+            ImGui::TextWrapped("Wave uses sample data in this preview.");
+            ImGui::TextWrapped("Setup changes last for the current Wave backend process.");
+            ImGui::TextWrapped("Enter demo credentials for this preview.");
+            switch (dialog.footer()) {
+            case 0:
+                leave_entry(state, session);
+                break;
+            case 1:
+                --state.step;
+                break;
+            case 2:
+                ++state.step;
+                break;
+            }
+        }
+    } else if (setup) {
+        const bool pending = state.request_id.has_value();
+        Dialog dialog(caption.c_str(), 500,
+                      {{"Back to workspace"}, {"Back", pending}, {"Finish setup", pending}}, nullptr,
+                      entry_top);
+        if (dialog) {
+            render_form(state);
+            render_feedback(state, session);
+            switch (dialog.footer()) {
+            case 0:
+                leave_entry(state, session);
+                break;
+            case 1:
+                --state.step;
+                state.message.clear();
+                break;
+            case 2:
+                submit(state, session);
+                break;
+            }
+        }
     } else {
-        ImGui::TextWrapped(
-            "Default example: demo / wave-demo. Use your saved demo credentials after a change.");
-        credentials(state, false);
-        if (ImGui::Button("Sign in")) {
-            submit(state, session);
+        Dialog dialog(caption.c_str(), 500,
+                      {{"Back to workspace"}, {"Sign in", state.request_id.has_value()}}, nullptr, entry_top);
+        if (dialog) {
+            render_form(state);
+            render_feedback(state, session);
+            switch (dialog.footer()) {
+            case 0:
+                leave_entry(state, session);
+                break;
+            case 1:
+                submit(state, session);
+                break;
+            }
         }
     }
-    ImGui::EndDisabled();
+}
 
+std::string describe_entry(const EntryViewState& state)
+{
+    std::string result = title(state);
+    result += '.';
+    if (state.page == EntryPage::setup && !state.complete) {
+        result += ' ' + step_progress(state) + '.';
+    }
     if (!state.message.empty()) {
-        view::wrapped(state.message, state.request_id ? Color::info : Color::error);
+        result += ' ' + state.message;
     }
-    if (session.status() == PreviewStatus::unavailable && ImGui::Button("Reconnect")) {
-        session.start();
-    }
-    ImGui::Spacing();
-    if (ImGui::Button("Back to workspace")) {
-        open_entry(state, EntryPage::workspace, session);
-    }
+    return result;
 }
 
 } // namespace wave

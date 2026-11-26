@@ -124,7 +124,8 @@
         }
 
         function usesDocumentScroll(event, bounds = canvas.getBoundingClientRect()) {
-          return bounds.height > innerHeight && event.clientX < bounds.right - 34;
+          return bounds.height > innerHeight && event.clientX < bounds.right - 34 &&
+              !Module['_wave_dialog_at'](event.clientX - bounds.left, event.clientY - bounds.top);
         }
 
         canvas.addEventListener("wheel", event => {
@@ -255,13 +256,16 @@
           canvas.setAttribute("aria-label", description);
         }
 
-        function updateNavigation(page, open, menuOpen, toolsOpen) {
+        function updateNavigation(page, open, menuOpen, toolsOpen, modal) {
           const updateExpanded = (element, expanded) => {
             const value = expanded ? "true" : "false";
             if (element.getAttribute("aria-expanded") !== value) element.setAttribute("aria-expanded", value);
           };
           updateExpanded(menu, menuOpen);
           updateExpanded(tools, toolsOpen);
+          if (controls.inert !== Boolean(modal)) {
+            controls.inert = modal;
+          }
           if (navigation.hidden === Boolean(open)) navigation.hidden = !open;
           if (page !== activePage) {
             pageLinks.get(activePage)?.removeAttribute("aria-current");

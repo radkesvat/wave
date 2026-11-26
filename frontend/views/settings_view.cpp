@@ -1,6 +1,6 @@
 #include "settings_view.h"
 
-#include "browser_ui.h"
+#include "dialog.h"
 #include "view_helpers.h"
 
 #include <utility>
@@ -11,7 +11,6 @@ namespace {
 
 using namespace view;
 using theme::Color;
-using theme::rgba;
 
 void sync_settings(SettingsViewState& state, const Json& settings)
 {
@@ -30,13 +29,11 @@ void sync_settings(SettingsViewState& state, const Json& settings)
     state.source = settings;
 }
 
-} // namespace
-
-void render_settings(SettingsViewState& state, PreviewSession& session, bool narrow)
+bool finish_settings_save(SettingsViewState& state, PreviewSession& session)
 {
-    const auto& settings = field(session.data(), "settings");
     if (auto reply = session.take_reply(state.apply_request)) {
-        if (reply->ok()) {
+        const bool saved = reply->ok();
+        if (saved) {
             state.dirty = false;
             state.source = nullptr;
             state.password.fill('\0');
@@ -46,7 +43,49 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
             reply->message = "The preview connection closed. Try again after reconnecting.";
         }
         state.apply_reply = std::move(reply);
+        return saved;
     }
+    return false;
+}
+
+void submit_settings(SettingsViewState& state, PreviewSession& session)
+{
+    Json draft = {{"name", state.name.data()},
+                  {"admin_username", state.username.data()},
+                  {"domain", state.domain.data()},
+                  {"port", state.port},
+                  {"websocket_path", state.websocket_path.data()},
+                  {"site_template", state.site_template.data()},
+                  {"certificate_path", state.certificate_path.data()},
+                  {"private_key_path", state.private_key_path.data()},
+                  {"multiplex", state.multiplex}};
+    if (state.password[0]) {
+        draft["password"] = state.password.data();
+    }
+    state.apply_request =
+        session.submit({{"action", "apply_settings"}, {"settings", std::move(draft)}}, 5000);
+    if (state.apply_request) {
+        state.apply_reply.reset();
+    } else {
+        state.apply_reply =
+            PreviewReply{PreviewReply::Status::disconnected, "The preview connection is unavailable."};
+    }
+}
+
+void show_settings_save(const SettingsViewState& state)
+{
+    if (state.apply_request) {
+        wrapped("Applying sample panel settings…", Color::info);
+    } else if (state.apply_reply) {
+        feedback(*state.apply_reply);
+    }
+}
+
+} // namespace
+
+void render_settings(SettingsViewState& state, PreviewSession& session, bool narrow)
+{
+    const auto& settings = field(session.data(), "settings");
     sync_settings(state, settings);
     ImGui::BeginDisabled(state.apply_request.has_value());
     const bool columns = !narrow && ImGui::GetContentRegionAvail().x >= 680 &&
@@ -85,6 +124,7 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
     }
     ImGui::BeginDisabled(!state.dirty || !valid);
     if (ImGui::Button("Apply changes")) {
+        state.apply_reply.reset();
         ImGui::OpenPopup("Apply preview settings");
     }
     ImGui::EndDisabled();
@@ -110,55 +150,39 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
         }
     }
     ImGui::EndDisabled();
-    if (state.apply_request) {
-        ImGui::TextColored(rgba(Color::info), "Applying sample panel settings...");
-    } else if (state.apply_reply) {
-        feedback(*state.apply_reply);
+    if (!ImGui::IsPopupOpen("Apply preview settings")) {
+        show_settings_save(state);
     }
+    render_settings_dialogs(state, session);
+}
 
-    fit_preview_dialog(430);
-    if (theme::begin_modal("Apply preview settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+void render_settings_dialogs(SettingsViewState& state, PreviewSession& session)
+{
+    const bool applied = finish_settings_save(state, session);
+    const bool pending = state.apply_request.has_value();
+    if (Dialog frame{
+            "Apply preview settings", 370, {{pending ? "Close" : "Cancel"}, {"Confirm apply", pending}}};
+        frame) {
         ImGui::TextWrapped("Save these values to this Wave process for the preview?");
-        if (ImGui::Button("Confirm apply")) {
-            Json draft = {{"name", state.name.data()},
-                          {"admin_username", state.username.data()},
-                          {"domain", state.domain.data()},
-                          {"port", state.port},
-                          {"websocket_path", state.websocket_path.data()},
-                          {"site_template", state.site_template.data()},
-                          {"certificate_path", state.certificate_path.data()},
-                          {"private_key_path", state.private_key_path.data()},
-                          {"multiplex", state.multiplex}};
-            if (state.password[0]) {
-                draft["password"] = state.password.data();
-            }
-            state.apply_request =
-                session.submit({{"action", "apply_settings"}, {"settings", std::move(draft)}}, 5000);
-            if (state.apply_request) {
-                state.apply_reply.reset();
-                ImGui::CloseCurrentPopup();
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel")) {
+        show_settings_save(state);
+        const int action = frame.footer();
+        if (action == 0 || applied) {
             ImGui::CloseCurrentPopup();
+        } else if (action == 1) {
+            submit_settings(state, session);
         }
-        ImGui::EndPopup();
     }
-    fit_preview_dialog(540);
-    if (theme::begin_modal("Sample backup", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (Dialog frame{"Sample backup", 540, {{"Close"}, {"Copy backup"}}}; frame) {
         ImGui::TextWrapped("Applied preview settings and sample user records");
         ImGui::InputTextMultiline("##sample-backup", state.backup.data(), state.backup.size() + 1, {-1, 170},
                                   ImGuiInputTextFlags_ReadOnly);
-        if (ImGui::Button("Copy backup")) {
+        feedback(session, {"backup_settings"});
+        const int action = frame.footer();
+        if (action == 0) {
+            ImGui::CloseCurrentPopup();
+        } else if (action == 1) {
             ImGui::SetClipboardText(state.backup.c_str());
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Close")) {
-            ImGui::CloseCurrentPopup();
-        }
-        feedback(session, {"backup_settings"});
-        ImGui::EndPopup();
     }
 }
 

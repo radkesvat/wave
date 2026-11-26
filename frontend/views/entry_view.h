@@ -18,15 +18,16 @@ struct EntryViewState {
     EntryPage page = EntryPage::workspace;
     int step = 0;
     bool complete = false;
+    bool reveal_feedback = false;
     std::optional<std::uint64_t> request_id;
     std::string message;
     char username[65] = "demo";
     char password[97] = "";
     char panel_name[81] = "Wave Preview";
-    char domain[161] = "wave.example";
 };
 
 void open_entry(EntryViewState& state, EntryPage page, PreviewSession& session);
-void render_entry(EntryViewState& state, PreviewSession& session);
+void render_entry(EntryViewState& state, PreviewSession& session, float entry_top);
+std::string describe_entry(const EntryViewState& state);
 
 } // namespace wave

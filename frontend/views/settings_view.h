@@ -28,5 +28,6 @@ struct SettingsViewState {
 };
 
 void render_settings(SettingsViewState& state, PreviewSession& session, bool narrow);
+void render_settings_dialogs(SettingsViewState& state, PreviewSession& session);
 
 } // namespace wave

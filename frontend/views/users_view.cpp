@@ -1,6 +1,7 @@
 #include "users_view.h"
 
 #include "browser_ui.h"
+#include "dialog.h"
 #include "preview_session.h"
 #include "view_helpers.h"
 
@@ -19,7 +20,7 @@ namespace wave {
 namespace {
 
 using Json = nlohmann::json;
-using Dialog = UsersViewState::Dialog;
+using UserDialog = UsersViewState::Dialog;
 using Column = UsersViewState::Column;
 using theme::Color;
 using view::button_width;
@@ -64,7 +65,7 @@ std::string remaining(int minutes)
     return std::format("{}m", minutes);
 }
 
-void open_dialog(UsersViewState& state, PreviewSession& session, Dialog dialog)
+void open_dialog(UsersViewState& state, PreviewSession& session, UserDialog dialog)
 {
     session.abandon(state.request_id);
     state.dialog = dialog;
@@ -74,16 +75,18 @@ void open_dialog(UsersViewState& state, PreviewSession& session, Dialog dialog)
     state.configuration.clear();
     state.qr.reset();
     state.local_feedback.clear();
+    state.reveal_dialog_feedback = false;
 }
 
-void open_user_dialog(UsersViewState& state, PreviewSession& session, Dialog dialog, const UserRecord& user)
+void open_user_dialog(UsersViewState& state, PreviewSession& session, UserDialog dialog,
+                      const UserRecord& user)
 {
     open_dialog(state, session, dialog);
     state.draft = make_draft(user);
-    if (dialog == Dialog::edit || dialog == Dialog::notes) {
+    if (dialog == UserDialog::edit || dialog == UserDialog::notes) {
         state.original_draft = state.draft;
     }
-    if (dialog == Dialog::share) {
+    if (dialog == UserDialog::share) {
         state.configuration = user.configuration;
         if (!state.configuration.empty() && state.configuration.size() <= 512) {
             state.qr =
@@ -129,16 +132,16 @@ void row_options(UsersViewState& state, PreviewSession& session, const UserRecor
     }
 
     if (ImGui::MenuItem("Edit")) {
-        open_user_dialog(state, session, Dialog::edit, user);
+        open_user_dialog(state, session, UserDialog::edit, user);
     }
     if (ImGui::MenuItem("Notes")) {
-        open_user_dialog(state, session, Dialog::notes, user);
+        open_user_dialog(state, session, UserDialog::notes, user);
     }
     if (ImGui::MenuItem("Share configuration")) {
-        open_user_dialog(state, session, Dialog::share, user);
+        open_user_dialog(state, session, UserDialog::share, user);
     }
     if (ImGui::MenuItem("Reset traffic")) {
-        open_user_dialog(state, session, Dialog::reset_traffic, user);
+        open_user_dialog(state, session, UserDialog::reset_traffic, user);
     }
     if (ImGui::BeginMenu("Bot actions")) {
         if (ImGui::MenuItem("Copy demo invite")) {
@@ -147,16 +150,16 @@ void row_options(UsersViewState& state, PreviewSession& session, const UserRecor
             state.local_feedback_color = Color::success;
         }
         if (ImGui::MenuItem("Send configuration")) {
-            open_user_dialog(state, session, Dialog::configuration, user);
+            open_user_dialog(state, session, UserDialog::configuration, user);
         }
         if (ImGui::MenuItem("Send message")) {
-            open_user_dialog(state, session, Dialog::message, user);
+            open_user_dialog(state, session, UserDialog::message, user);
         }
         ImGui::EndMenu();
     }
     ImGui::Separator();
     if (ImGui::MenuItem("Delete")) {
-        open_user_dialog(state, session, Dialog::remove, user);
+        open_user_dialog(state, session, UserDialog::remove, user);
     }
     ImGui::EndPopup();
 }
@@ -567,31 +570,47 @@ void compact_users(UsersViewState& state, PreviewSession& session, const std::ve
     ImGui::EndTable();
 }
 
+void user_limit(const char* label, int& value, bool stacked)
+{
+    if (stacked) {
+        view::edit_number(label, value);
+    } else {
+        ImGui::SetNextItemWidth(86);
+        ImGui::InputInt(label, &value, 0);
+    }
+}
+
 void user_form(UserDraft& draft, bool initial_focus)
 {
+    ImGui::TextUnformatted("User name");
     if (initial_focus) {
         ImGui::SetKeyboardFocusHere();
     }
     ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##user-name", "User name", draft.name.data(), draft.name.size());
+    ImGui::InputText("##user-name", draft.name.data(), draft.name.size());
     ImGui::Checkbox("Enabled", &draft.enabled);
 
     if (ImGui::CollapsingHeader("Connection and limits", ImGuiTreeNodeFlags_DefaultOpen)) {
         constexpr const char* protocols[] = {"TCP", "TCP + WebSocket"};
         const float protocol_width = button_width(protocols[1]) + ImGui::GetFrameHeight();
-        ImGui::SetNextItemWidth(protocol_width);
-        ImGui::Combo("Protocol", &draft.protocol, protocols, IM_ARRAYSIZE(protocols));
+        const float label_spacing = ImGui::GetStyle().ItemInnerSpacing.x;
+        const float available_width = ImGui::GetContentRegionAvail().x;
+        if (available_width < protocol_width + label_spacing + ImGui::CalcTextSize("Protocol").x) {
+            ImGui::TextUnformatted("Protocol");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::Combo("##protocol", &draft.protocol, protocols, IM_ARRAYSIZE(protocols));
+        } else {
+            ImGui::SetNextItemWidth(protocol_width);
+            ImGui::Combo("Protocol", &draft.protocol, protocols, IM_ARRAYSIZE(protocols));
+        }
         ImGui::TextWrapped("Set traffic, rate, and IP limits to 0 for unlimited.");
-        ImGui::SetNextItemWidth(86);
-        ImGui::InputInt("Upload cap (MiB/s)", &draft.upload_limit, 0);
-        ImGui::SetNextItemWidth(86);
-        ImGui::InputInt("Download cap (MiB/s)", &draft.download_limit, 0);
-        ImGui::SetNextItemWidth(86);
-        ImGui::InputInt("Traffic cap (GiB)", &draft.traffic_limit, 0);
-        ImGui::SetNextItemWidth(86);
-        ImGui::InputInt("IP cap", &draft.ip_limit, 0);
-        ImGui::SetNextItemWidth(86);
-        ImGui::InputInt("Minutes left", &draft.remaining_minutes, 0);
+        const bool stacked =
+            available_width < 86 + label_spacing + ImGui::CalcTextSize("Download cap (MiB/s)").x;
+        user_limit("Upload cap (MiB/s)", draft.upload_limit, stacked);
+        user_limit("Download cap (MiB/s)", draft.download_limit, stacked);
+        user_limit("Traffic cap (GiB)", draft.traffic_limit, stacked);
+        user_limit("IP cap", draft.ip_limit, stacked);
+        user_limit("Minutes left", draft.remaining_minutes, stacked);
         ImGui::TextDisabled("Use -1 for unlimited time.");
     }
     ImGui::TextDisabled("Notes");
@@ -666,7 +685,7 @@ void export_qr(const qrcodegen::QrCode& code)
     download_preview_file("wave-demo-qr.svg", svg, "image/svg+xml");
 }
 
-void configuration_dialog(UsersViewState& state)
+void configuration_preview(const UsersViewState& state)
 {
     ImGui::TextWrapped("Share the preview configuration for %s.", state.draft.name.data());
     if (!state.qr) {
@@ -693,42 +712,127 @@ void configuration_dialog(UsersViewState& state)
     }
     ImGui::Dummy({size, size});
     ImGui::TextWrapped("%s", state.configuration.c_str());
-    if (ImGui::Button("Copy configuration")) {
-        ImGui::SetClipboardText(state.configuration.c_str());
-        state.local_feedback = "Preview configuration copied.";
-        state.local_feedback_color = Color::success;
+}
+
+struct DialogSpec {
+    const char* title;
+    float width;
+    const char* secondary;
+    const char* primary;
+};
+
+DialogSpec dialog_spec(UserDialog dialog)
+{
+    switch (dialog) {
+    case UserDialog::create:
+        return {"Create user", 460, "Cancel", "Create"};
+    case UserDialog::edit:
+        return {"Edit user", 460, "Cancel", "Save changes"};
+    case UserDialog::notes:
+        return {"User notes", 480, "Close", "Edit notes"};
+    case UserDialog::share:
+        return {"Share configuration", 510, "Close", "Copy configuration"};
+    case UserDialog::reset_traffic:
+        return {"Reset traffic", 350, "Cancel", "Reset totals"};
+    case UserDialog::remove:
+        return {"Delete user", 340, "Cancel", "Delete user"};
+    case UserDialog::broadcast:
+        return {"Broadcast preview message", 480, "Cancel", "Simulate send"};
+    case UserDialog::bulk_configuration:
+        return {"Send configurations to all", 420, "Cancel", "Simulate send"};
+    case UserDialog::configuration:
+        return {"Send preview configuration", 420, "Cancel", "Simulate send"};
+    case UserDialog::message:
+        return {"Send preview message", 460, "Cancel", "Simulate send"};
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Download QR")) {
-        export_qr(*state.qr);
+    return {"User action", 350, "Cancel", "Confirm"};
+}
+
+void user_dialog_body(UsersViewState& state, UserDialog dialog, bool opening)
+{
+    switch (dialog) {
+    case UserDialog::create:
+    case UserDialog::edit:
+        user_form(state.draft, opening);
+        break;
+    case UserDialog::notes:
+        ImGui::TextWrapped("%s", state.draft.name.data());
+        ImGui::TextWrapped("%s", state.draft.notes[0] ? state.draft.notes.data() : "No notes for this user.");
+        break;
+    case UserDialog::share:
+        configuration_preview(state);
+        break;
+    case UserDialog::remove:
+        ImGui::TextWrapped("Delete the preview user %s?", state.draft.name.data());
+        break;
+    case UserDialog::reset_traffic:
+        ImGui::TextWrapped("Reset upload and download totals for %s?", state.draft.name.data());
+        break;
+    case UserDialog::broadcast:
+    case UserDialog::message:
+        if (dialog == UserDialog::broadcast) {
+            ImGui::TextUnformatted("Preview audience: all users");
+        } else {
+            ImGui::TextWrapped("Preview recipient: %s", state.draft.name.data());
+        }
+        ImGui::InputTextMultiline("##preview-message", state.message.data(), state.message.size(), {-1, 105});
+        break;
+    case UserDialog::bulk_configuration:
+    case UserDialog::configuration:
+        if (dialog == UserDialog::bulk_configuration) {
+            ImGui::TextWrapped("Simulate sending the latest configuration to all users.");
+        } else {
+            ImGui::TextWrapped("Simulate sending a configuration to %s.", state.draft.name.data());
+        }
+        break;
     }
 }
 
-const char* dialog_title(Dialog dialog)
+void apply_user_dialog(UsersViewState& state, PreviewSession& session, UserDialog dialog)
 {
     switch (dialog) {
-    case Dialog::create:
-        return "Create user";
-    case Dialog::edit:
-        return "Edit user";
-    case Dialog::notes:
-        return "User notes";
-    case Dialog::share:
-        return "Share configuration";
-    case Dialog::reset_traffic:
-        return "Reset traffic";
-    case Dialog::remove:
-        return "Delete user";
-    case Dialog::broadcast:
-        return "Broadcast preview message";
-    case Dialog::bulk_configuration:
-        return "Send configurations to all";
-    case Dialog::configuration:
-        return "Send preview configuration";
-    case Dialog::message:
-        return "Send preview message";
+    case UserDialog::create:
+    case UserDialog::edit:
+        submit_user(state, session, dialog == UserDialog::edit);
+        break;
+    case UserDialog::notes:
+        state.dialog = UserDialog::edit;
+        break;
+    case UserDialog::share:
+        ImGui::SetClipboardText(state.configuration.c_str());
+        state.local_feedback = "Preview configuration copied.";
+        state.local_feedback_color = Color::success;
+        break;
+    case UserDialog::reset_traffic:
+    case UserDialog::remove:
+        submit(state, session, dialog == UserDialog::remove ? "delete_user" : "reset_user_traffic",
+               {{"id", state.draft.id}});
+        break;
+    case UserDialog::broadcast:
+    case UserDialog::message: {
+        if (std::string_view(state.message.data()).find_first_not_of(" \r\n\t") == std::string_view::npos) {
+            state.local_feedback = "Enter a message to send.";
+            state.local_feedback_color = Color::error;
+            break;
+        }
+        Json request = {{"kind", dialog == UserDialog::broadcast ? "broadcast" : "message"},
+                        {"message", state.message.data()}};
+        if (dialog == UserDialog::message) {
+            request["id"] = state.draft.id;
+        }
+        submit(state, session, "user_bot_action", std::move(request));
+        break;
     }
-    return "User action";
+    case UserDialog::bulk_configuration:
+    case UserDialog::configuration: {
+        Json request = {{"kind", "configuration"}};
+        if (dialog == UserDialog::configuration) {
+            request["id"] = state.draft.id;
+        }
+        submit(state, session, "user_bot_action", std::move(request));
+        break;
+    }
+    }
 }
 
 void render_dialog(UsersViewState& state, PreviewSession& session)
@@ -736,119 +840,58 @@ void render_dialog(UsersViewState& state, PreviewSession& session)
     if (!state.dialog) {
         return;
     }
-    const bool opening = state.open_dialog;
+    const bool opening = std::exchange(state.open_dialog, false);
     if (opening) {
         ImGui::OpenPopup(dialog_id);
-        state.open_dialog = false;
     }
-
-    const auto dialog = *state.dialog;
-    const auto name = std::format("{}{}", dialog_title(dialog), dialog_id);
-    fit_preview_dialog(460);
-    bool open = true;
-    if (!theme::begin_modal(name.c_str(), &open, ImGuiWindowFlags_NoSavedSettings)) {
-        if (!ImGui::IsPopupOpen(dialog_id)) {
-            state.dialog.reset();
-            session.abandon(state.request_id);
-        }
+    if (!ImGui::IsPopupOpen(dialog_id)) {
+        state.dialog.reset();
+        session.abandon(state.request_id);
         return;
     }
 
-    if (const auto reply = session.take_reply(state.request_id)) {
-        if (reply->ok()) {
-            close_dialog(state, session);
-            ImGui::EndPopup();
-            return;
-        }
+    const auto reply = session.take_reply(state.request_id);
+    if (reply && !reply->ok()) {
         state.local_feedback = reply->status == PreviewReply::Status::disconnected
                                    ? "Preview connection unavailable."
                                    : reply->message;
         state.local_feedback_color = Color::error;
+        state.reveal_dialog_feedback = !state.local_feedback.empty();
     }
-
     const bool pending = state.request_id.has_value();
-    ImGui::BeginDisabled(pending);
-    switch (dialog) {
-    case Dialog::create:
-    case Dialog::edit:
-        user_form(state.draft, opening);
-        if (ImGui::Button(dialog == Dialog::create ? "Create" : "Save changes")) {
-            submit_user(state, session, dialog == Dialog::edit);
-        }
-        break;
-    case Dialog::notes:
-        ImGui::Text("%s", state.draft.name.data());
-        ImGui::TextWrapped("%s", state.draft.notes[0] ? state.draft.notes.data() : "No notes for this user.");
-        if (ImGui::Button("Edit notes")) {
-            state.dialog = Dialog::edit;
-        }
-        break;
-    case Dialog::share:
-        configuration_dialog(state);
-        break;
-    case Dialog::reset_traffic:
-    case Dialog::remove: {
-        const bool remove = dialog == Dialog::remove;
-        ImGui::TextWrapped(remove ? "Delete the preview user %s?"
-                                  : "Reset upload and download totals for %s?",
-                           state.draft.name.data());
-        if (ImGui::Button(remove ? "Delete user" : "Reset totals")) {
-            submit(state, session, remove ? "delete_user" : "reset_user_traffic", {{"id", state.draft.id}});
-        }
-        break;
+    const auto dialog = *state.dialog;
+    const auto spec = dialog_spec(dialog);
+    const auto name = std::format("{}{}", spec.title, dialog_id);
+    const bool sharing = dialog == UserDialog::share;
+    const std::array<DialogAction, 3> actions{{{spec.secondary}, {spec.primary, pending}, {"Download QR"}}};
+    const auto count = sharing ? (state.qr ? 3u : 1u) : 2u;
+    bool open = true;
+    wave::Dialog frame(name.c_str(), spec.width, std::span(actions).first(count), &open);
+    if (!frame) {
+        return;
     }
-    case Dialog::broadcast:
-    case Dialog::message:
-        if (dialog == Dialog::broadcast) {
-            ImGui::TextUnformatted("Preview audience: all users");
-        } else {
-            ImGui::Text("Preview recipient: %s", state.draft.name.data());
-        }
-        ImGui::InputTextMultiline("##preview-message", state.message.data(), state.message.size(), {-1, 105});
-        if (ImGui::Button("Simulate send")) {
-            if (std::string_view(state.message.data()).find_first_not_of(" \r\n\t") ==
-                std::string_view::npos) {
-                state.local_feedback = "Enter a message to send.";
-                state.local_feedback_color = Color::error;
-            } else {
-                Json request = {{"kind", dialog == Dialog::broadcast ? "broadcast" : "message"},
-                                {"message", state.message.data()}};
-                if (dialog == Dialog::message) {
-                    request["id"] = state.draft.id;
-                }
-                submit(state, session, "user_bot_action", std::move(request));
-            }
-        }
-        break;
-    case Dialog::bulk_configuration:
-    case Dialog::configuration:
-        if (dialog == Dialog::bulk_configuration) {
-            ImGui::TextWrapped("Simulate sending the latest configuration to all users.");
-        } else {
-            ImGui::TextWrapped("Simulate sending a configuration to %s.", state.draft.name.data());
-        }
-        if (ImGui::Button("Simulate send")) {
-            Json request = {{"kind", "configuration"}};
-            if (dialog == Dialog::configuration) {
-                request["id"] = state.draft.id;
-            }
-            submit(state, session, "user_bot_action", std::move(request));
-        }
-        break;
-    }
-    ImGui::EndDisabled();
 
-    if (dialog != Dialog::share) {
-        ImGui::SameLine();
-    }
-    if (ImGui::Button(dialog == Dialog::share || dialog == Dialog::notes ? "Close" : "Cancel") || !open) {
-        close_dialog(state, session);
-    } else if (pending) {
+    ImGui::BeginDisabled(pending);
+    user_dialog_body(state, dialog, opening);
+    ImGui::EndDisabled();
+    if (pending) {
         view::wrapped("Applying to preview…", Color::info);
     } else if (!state.local_feedback.empty()) {
         view::wrapped(state.local_feedback, state.local_feedback_color);
     }
-    ImGui::EndPopup();
+    if (std::exchange(state.reveal_dialog_feedback, false)) {
+        ImGui::SetScrollHereY(1);
+    }
+
+    const int action = frame.footer();
+    if (action == 0 || !open || (reply && reply->ok())) {
+        close_dialog(state, session);
+    } else if (action == 1) {
+        apply_user_dialog(state, session, dialog);
+        state.reveal_dialog_feedback = state.request_id.has_value() || !state.local_feedback.empty();
+    } else if (action == 2) {
+        export_qr(*state.qr);
+    }
 }
 
 } // namespace
@@ -865,7 +908,7 @@ void render_users(UsersViewState& state, PreviewSession& session)
     update_switch_requests(state, session, users.rows);
     ImGui::BeginDisabled(!ready);
     if (ImGui::Button("Create user")) {
-        open_dialog(state, session, Dialog::create);
+        open_dialog(state, session, UserDialog::create);
     }
     ImGui::SameLine();
     const float live_width = std::max(button_width("Live data"), button_width("Paused"));
@@ -883,10 +926,10 @@ void render_users(UsersViewState& state, PreviewSession& session)
     }
     if (ImGui::BeginPopup("User bot actions")) {
         if (ImGui::MenuItem("Send configurations to all")) {
-            open_dialog(state, session, Dialog::bulk_configuration);
+            open_dialog(state, session, UserDialog::bulk_configuration);
         }
         if (ImGui::MenuItem("Broadcast message")) {
-            open_dialog(state, session, Dialog::broadcast);
+            open_dialog(state, session, UserDialog::broadcast);
         }
         ImGui::EndPopup();
     }

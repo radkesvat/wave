@@ -1,21 +1,23 @@
 #include "browser_ui.h"
 
-#include "theme.h"
-
 #include <emscripten.h>
-#include <imgui.h>
-
-#include <algorithm>
 
 namespace wave {
 namespace {
 
 // clang-format off
-EM_JS(float, visible_top, (), {
-    return (window.visualViewport?.offsetTop ?? 0) - Module['canvas'].getBoundingClientRect().top;
+EM_JS(void, read_visible_canvas, (float* left, float* top, float* width, float* height), {
+    const canvas = Module['canvas'].getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const x = viewport?.offsetLeft ?? 0;
+    const y = viewport?.offsetTop ?? 0;
+    HEAPF32[left >> 2] = Math.max(0, x - canvas.left);
+    HEAPF32[top >> 2] = Math.max(0, y - canvas.top);
+    HEAPF32[width >> 2] = Math.max(0, Math.min(x + (viewport?.width ?? innerWidth), canvas.right) -
+        Math.max(x, canvas.left));
+    HEAPF32[height >> 2] = Math.max(0, Math.min(y + (viewport?.height ?? innerHeight), canvas.bottom) -
+        Math.max(y, canvas.top));
 });
-
-EM_JS(float, visible_height, (), { return window.visualViewport?.height ?? window.innerHeight; });
 
 EM_JS(void, download_file, (const char* filename, const char* contents, int length, const char* media_type), {
     const file = new Blob([UTF8ToString(contents, length)], { type: UTF8ToString(media_type) });
@@ -30,17 +32,11 @@ EM_JS(void, download_file, (const char* filename, const char* contents, int leng
 
 } // namespace
 
-void fit_preview_dialog(float width, float max_height)
+CanvasViewport visible_canvas()
 {
-    const float available_width = std::max(1.0f, ImGui::GetIO().DisplaySize.x - 24.0f);
-    const float height = visible_height();
-    const float available_height = std::max(1.0f, height - 24.0f);
-    ImGui::SetNextWindowPos({ImGui::GetIO().DisplaySize.x * 0.5f, visible_top() + height * 0.5f},
-                            ImGuiCond_Always, {0.5f, 0.5f});
-    const float scaled_width = width * ImGui::GetStyle().FontSizeBase / theme::secondary_font_size;
-    ImGui::SetNextWindowSize({std::min(scaled_width, available_width), 0.0f});
-    ImGui::SetNextWindowSizeConstraints({1.0f, 1.0f},
-                                        {available_width, std::min(max_height, available_height)});
+    CanvasViewport viewport{};
+    read_visible_canvas(&viewport.left, &viewport.top, &viewport.width, &viewport.height);
+    return viewport;
 }
 
 void download_preview_file(const char* filename, std::string_view contents, const char* media_type)

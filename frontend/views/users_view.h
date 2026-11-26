@@ -77,6 +77,7 @@ struct UsersViewState {
     std::optional<std::uint64_t> request_id;
     std::string local_feedback;
     theme::Color local_feedback_color = theme::Color::error;
+    bool reveal_dialog_feedback = false;
 };
 
 void render_users(UsersViewState& state, PreviewSession& session);

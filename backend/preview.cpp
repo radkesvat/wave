@@ -702,18 +702,15 @@ private:
     Reply setup(const Json& input)
     {
         const auto name = input.find("name");
-        const auto domain = input.find("domain");
         const auto username = input.find("username");
         const auto password = input.find("password");
         if (name == input.end() || !text_value(*name, 80, true) ||
-            domain == input.end() || !text_value(*domain, 160, true) ||
             username == input.end() || !text_value(*username, 64, true) ||
             password == input.end() || !text_value(*password, 96, true)) {
-            return {false, "Enter the preview name, domain, and demo account details."};
+            return {false, "Enter a panel name and valid demo credentials."};
         }
         auto& settings = data_["settings"];
         settings["name"] = *name;
-        settings["domain"] = *domain;
         settings["admin_username"] = *username;
         demo_password_ = password->get<std::string>();
         return complete("Completed first-run preview setup.");

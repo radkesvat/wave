@@ -146,8 +146,33 @@ Use the Users toolbar to search, sort, create, or pause sample records. Open
 a row's Options for edits, notes, QR sharing, and simulated bot actions. The
 Logs pane records demo changes and provides search, auto-scroll, copy, and
 clear controls. Menu opens version information, demo sign-in, first-run setup,
-and demo sign-out. Tools opens diagnostics and input helpers. The initial demo
-sign-in uses the username `demo` and password `wave-demo`.
+and demo sign-out. Tools opens diagnostics and input helpers.
+
+Preview dialogs share a square-cornered frame, a dark title strip, and a
+right-aligned action row below the body. Workspace dialogs center in the
+visible viewport, including when the page is scrolled. Entry dialogs center
+beneath Wave's header when there is room. In very short viewports, the
+dialog body and actions scroll together. At larger heights, the actions
+stay visible while a long body scrolls. Action rows wrap on narrow screens.
+
+### First-run setup
+
+Wave opens Users on a normal page load. Choose **Menu → First-run setup**
+to start with a fresh draft and see the Welcome strip beneath the header.
+Continue from **Welcome to Wave** through **Preview notes**, then enter a
+panel name, demo administrator name, and masked demo password in **Panel
+details**. **Use example** fills the initial demo credentials, `demo` and
+`wave-demo`. Select **Back** to review a step without losing the draft, or
+**Back to workspace** to leave the walkthrough.
+
+**Finish setup** saves the panel name and demo credentials for the current
+preview process. The dialog shows the request status and keeps the draft
+available after a rejection, timeout, or disconnect. When the server
+confirms, select **Open workspace**. Use your saved credentials from
+**Menu → Demo sign-in**. Set the domain and the paths to the certificate and
+private key in **Panel Settings**.
+
+### Preview controls and server options
 
 The Users table switches to a paginated layout when the work pane lacks room
 for the desktop columns and names. Drag a desktop column divider to resize
@@ -174,6 +199,12 @@ from the reply carrying its ID. Browsers still apply valid snapshot data
 when a reply arrives after the form has been closed or replaced. If the
 socket closes between render frames, the form can still read a reply it
 already received. A form still waiting for its reply reports the disconnect.
+
+First-run setup sends `action: "setup"` with `request_id`, `name`, `username`,
+and `password`. The server validates the name and both credentials before
+updating the panel name and the in-memory demo account. Existing domain,
+certificate, and private key settings are preserved. The preview snapshots
+omit the password.
 
 User edits send the user ID and changed fields. Connection and limit options
 are updated individually so changes from other browsers to untouched fields
