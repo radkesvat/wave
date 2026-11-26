@@ -323,10 +323,10 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
             if (selected) {
                 const auto min = ImGui::GetItemRectMin();
                 const auto max = ImGui::GetItemRectMax();
-                const float x = std::floor(min.x) - 1;
-                ImGui::GetWindowDrawList()->AddRectFilled({x, std::ceil(min.y) + 2},
-                                                          {x + theme::selection_width, std::floor(max.y) - 2},
-                                                          packed(Color::accent));
+                const float right = std::ceil(max.x) + 1;
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    {right - theme::selection_width, std::ceil(min.y) + 2}, {right, std::floor(max.y) - 2},
+                    packed(Color::accent));
             }
             if (focus == static_cast<int>(item.page)) {
                 focused_item = std::array{ImGui::GetItemRectMin(), ImGui::GetItemRectMax()};

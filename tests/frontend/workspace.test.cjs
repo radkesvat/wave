@@ -402,6 +402,10 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
             'Pointer focus leaves the canvas edge unchanged.');
         assert.ok((await page.screenshot({ clip: brandTile })).equals(unfocusedBrand),
             'Pointer focus leaves the brand tile unchanged.');
+        const selectionRow = await screenshotPixels(page, { x: 11, y: 110, width: 166, height: 1 });
+        const selectionPixels = selectionRow.pixels.slice(0, selectionRow.width * 4);
+        assert.deepEqual(colorRuns(selectionPixels, [[243, 129, 74]]), [[322, 326]],
+            'The selected Users row has a two-logical-pixel accent on its right edge.');
 
         const menu = page.getByRole('button', { name: 'Menu' });
         const tools = page.getByRole('button', { name: 'Tools' });

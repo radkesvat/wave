@@ -60,11 +60,12 @@ to show the compile and link commands. When switching SDK versions, add
 ## Workspace theme
 
 Wave starts with a near-black canvas, charcoal panes, and lavender text.
-Orange marks the active page, keyboard focus, and highlighted values. Green
-indicates success or an enabled state, blue indicates links and information,
-amber indicates warnings, and coral indicates errors. Panes, tabs, and
-controls use rounded corners. Table rows, plot grids, and progress fills
-keep straight edges. Borders use logical pixels so they scale with the canvas.
+Orange marks the right edge of the active navigation row, keyboard focus,
+and highlighted values. Green indicates success or an enabled state, blue
+indicates links and information, amber indicates warnings, and coral indicates
+errors. Panes, tabs, and controls use rounded corners. Table rows, plot grids,
+and progress fills keep straight edges. Borders use logical pixels so they
+scale with the canvas.
 
 Wave embeds Poppins Medium 4.004. Workspace text uses 23 logical pixels from
 1600 CSS pixels and 18 at narrower widths. Secondary text and headings use
