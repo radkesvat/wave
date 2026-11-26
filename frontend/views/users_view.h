@@ -58,6 +58,7 @@ struct UsersViewState {
     std::optional<Dialog> dialog;
     bool open_dialog = false;
     UserDraft draft;
+    UserDraft original_draft;
     std::array<char, 513> message{};
     std::string configuration;
     std::optional<qrcodegen::QrCode> qr;

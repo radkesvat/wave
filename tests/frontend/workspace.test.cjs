@@ -328,9 +328,7 @@ test('keeps an open Users edit draft while replacing rows and their configuratio
         await canvasClick(page, 481, 654);
         await description(/Applied the Users draft/).waitFor();
         assertRequest((await preview.action(0)).request, {
-            action: 'edit_user', id: 2, name: 'Albright local', notes: 'Original notes', enabled: true,
-            remaining_minutes: -1,
-            options: { protocol: 'tcp', upload_limit: 0, download_limit: 0, traffic_limit: 0, ip_limit: 0 },
+            action: 'edit_user', id: 2, name: 'Albright local',
         });
 
         await canvasClick(page, 747, 190);

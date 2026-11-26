@@ -146,6 +146,10 @@ when a reply arrives after the form has been closed or replaced. If the
 socket closes between render frames, the form can still read a reply it
 already received. A form still waiting for its reply reports the disconnect.
 
+User edits send the user ID and changed fields. Connection and limit options
+are updated individually so changes from other browsers to untouched fields
+are preserved.
+
 Both Telegram Bot forms use `apply_bot_settings`. Settings sends
 `notifications`, `allow_status`, `allow_config`, `notification_rules`, and
 `permissions`. Overrides sends `overrides` alone. The server merges the

@@ -75,6 +75,9 @@ void open_user_dialog(UsersViewState& state, PreviewSession& session, Dialog dia
 {
     open_dialog(state, session, dialog);
     state.draft = make_draft(user);
+    if (dialog == Dialog::edit || dialog == Dialog::notes) {
+        state.original_draft = state.draft;
+    }
     if (dialog == Dialog::share) {
         state.configuration = user.configuration;
         if (!state.configuration.empty() && state.configuration.size() <= 512) {
@@ -82,6 +85,14 @@ void open_user_dialog(UsersViewState& state, PreviewSession& session, Dialog dia
                 qrcodegen::QrCode::encodeText(state.configuration.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
         }
     }
+}
+
+void close_dialog(UsersViewState& state, PreviewSession& session)
+{
+    ImGui::CloseCurrentPopup();
+    state.dialog.reset();
+    session.abandon(state.request_id);
+    state.local_feedback.clear();
 }
 
 bool send(UsersViewState& state, PreviewSession& session, Json request)
@@ -416,17 +427,35 @@ void submit_user(UsersViewState& state, PreviewSession& session, bool editing)
         return;
     }
 
-    Json request = {{"name", draft.name.data()},
-                    {"enabled", draft.enabled},
-                    {"notes", draft.notes.data()},
-                    {"remaining_minutes", draft.remaining_minutes},
-                    {"options",
-                     {{"protocol", draft.protocol == 0 ? "tcp" : "tcp_websocket"},
-                      {"upload_limit", draft.upload_limit},
-                      {"download_limit", draft.download_limit},
-                      {"traffic_limit", draft.traffic_limit},
-                      {"ip_limit", draft.ip_limit}}}};
+    const auto& original = state.original_draft;
+    const auto add_field = [editing](Json& target, const char* key, auto value, auto initial_value) {
+        if (!editing || value != initial_value) {
+            target[key] = value;
+        }
+    };
+    Json request = Json::object();
+    add_field(request, "name", std::string_view(draft.name.data()), std::string_view(original.name.data()));
+    add_field(request, "enabled", draft.enabled, original.enabled);
+    add_field(request, "notes", std::string_view(draft.notes.data()),
+              std::string_view(original.notes.data()));
+    add_field(request, "remaining_minutes", draft.remaining_minutes, original.remaining_minutes);
+
+    Json options = Json::object();
+    if (!editing || draft.protocol != original.protocol) {
+        options["protocol"] = draft.protocol == 0 ? "tcp" : "tcp_websocket";
+    }
+    add_field(options, "upload_limit", draft.upload_limit, original.upload_limit);
+    add_field(options, "download_limit", draft.download_limit, original.download_limit);
+    add_field(options, "traffic_limit", draft.traffic_limit, original.traffic_limit);
+    add_field(options, "ip_limit", draft.ip_limit, original.ip_limit);
+    if (!options.empty()) {
+        request["options"] = std::move(options);
+    }
     if (editing) {
+        if (request.empty()) {
+            close_dialog(state, session);
+            return;
+        }
         request["id"] = draft.id;
     }
     submit(state, session, editing ? "edit_user" : "create_user", std::move(request));
@@ -513,14 +542,6 @@ const char* dialog_title(Dialog dialog)
         return "Send preview message";
     }
     return "User action";
-}
-
-void close_dialog(UsersViewState& state, PreviewSession& session)
-{
-    ImGui::CloseCurrentPopup();
-    state.dialog.reset();
-    session.abandon(state.request_id);
-    state.local_feedback.clear();
 }
 
 void render_dialog(UsersViewState& state, PreviewSession& session)
