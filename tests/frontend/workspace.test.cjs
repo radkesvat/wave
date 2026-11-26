@@ -258,6 +258,110 @@ for (const scale of [1, 2]) {
     });
 }
 
+for (const { scale, highContrast, normal, hovered } of [
+    { scale: 1, highContrast: false, normal: [138, 132, 149], hovered: [181, 180, 197] },
+    { scale: 2, highContrast: true, normal: [181, 176, 196], hovered: [211, 210, 229] },
+]) {
+    test(`draws an inset, rounded Logs scrollbar at ${scale}×${highContrast ? ' in High contrast' : ''}`, async () => {
+        const page = await browser.newPage({ viewport: desktop, deviceScaleFactor: scale });
+        const data = fixture();
+        data.logs = Array.from({ length: 30 }, (_, index) => ({
+            ts: '09:41:02', level: 'info', message: `Preview log entry ${index + 1}.`,
+        }));
+        await mockPreview(page, { data });
+        const track = { x: 1243, y: 654, width: 17, height: 126 };
+        const trackColor = [13, 11, 14];
+        const active = [243, 129, 74];
+
+        async function thumb(color) {
+            await settleCanvas(page);
+            const { pixels, width, height } = await screenshotPixels(page, track);
+            const at = (x, y, sample) => pixelMatches(pixels, (y * width + x) * 4, sample);
+            const rows = Array.from({ length: height }, (_, y) =>
+                Array.from({ length: width }, (_, x) => x).filter(x => at(x, y, color)));
+            const top = rows.findIndex(row => row.length > 0);
+            const bottom = rows.findLastIndex(row => row.length > 0);
+            assert.ok(top >= 0 && bottom > top, `Expected a scrollbar thumb with color ${color}.`);
+
+            const center = Math.floor((top + bottom) / 2);
+            const middle = rows[center];
+            const [left, right] = [middle[0], middle.at(-1)];
+            assert.ok(middle.length >= 7 * scale && middle.length <= 9 * scale,
+                'The visible grip fits inside the 13px track.');
+            assert.ok(at(left - scale, center, trackColor) && at(right + scale, center, trackColor),
+                'The dark track stays visible beside the thumb.');
+            return { top, bottom, center, left, right, middleWidth: middle.length,
+                firstWidth: rows[top].length, lastWidth: rows[bottom].length };
+        }
+
+        try {
+            await page.goto(url);
+            await page.getByRole('img', { name: /Wave Users.*30 log entries/ }).waitFor();
+            if (highContrast) {
+                await canvasClick(page, 132, 23);
+                await canvasClick(page, 165, 87);
+            }
+
+            await page.mouse.move(900, 708);
+            await page.mouse.wheel(0, 2400);
+            const atBottom = await thumb(normal);
+            assert.ok(atBottom.firstWidth < atBottom.middleWidth && atBottom.lastWidth < atBottom.middleWidth,
+                'Both ends taper into rounded caps.');
+
+            await page.mouse.wheel(0, -2400);
+            const atTop = await thumb(normal);
+            assert.ok(atTop.top < atBottom.top - 50 * scale, 'The wheel moves the thumb up the track.');
+            const x = track.x + (atTop.left + atTop.right) / (2 * scale);
+            const y = track.y + atTop.center / scale;
+            await page.mouse.move(x, y);
+            assert.equal((await thumb(hovered)).top, atTop.top);
+
+            await page.mouse.down();
+            await page.mouse.move(x, y + 30, { steps: 4 });
+            assert.ok((await thumb(active)).top > atTop.top + 20 * scale, 'The dragged thumb moves down the track.');
+            await page.mouse.up();
+        } finally {
+            await page.close();
+        }
+    });
+}
+
+test('updates the painted page scrollbar when High contrast changes', async () => {
+    const viewport = { ...desktop, height: 560 };
+    const page = await browser.newPage({ viewport });
+    await mockPreview(page);
+    const geometry = () => page.evaluate(() => ({
+        width: document.documentElement.clientWidth,
+        bodyWidth: document.body.clientWidth,
+        canvasWidth: document.getElementById('canvas').clientWidth,
+        offset: scrollY,
+    }));
+
+    try {
+        await page.goto(url);
+        await waitForCanvas(page, viewport, true);
+        await page.getByRole('img', { name: /Wave Users.*Sample data/ }).waitFor();
+        await page.evaluate(() => scrollTo(0, 10));
+        await settleCanvas(page);
+        const before = await geometry();
+        assert.equal(before.offset, 10);
+        assert.equal(before.canvasWidth, before.width);
+        assert.ok(before.width < viewport.width, 'The page has a classic scrollbar.');
+        const clip = { x: Math.floor((before.width + viewport.width) / 2), y: 40, width: 1, height: 480 };
+        const thumb = async color => colorRuns((await screenshotPixels(page, clip)).pixels, [color], 30);
+        const standard = await thumb([138, 132, 149]);
+        assert.equal(standard.length, 1);
+
+        await canvasClick(page, 132, 23 - before.offset);
+        await canvasClick(page, 165, 87 - before.offset);
+        // Capture the browser-painted thumb with the pointer still over the header.
+        assert.deepEqual(await thumb([181, 176, 196]), standard);
+        assert.deepEqual(await geometry(), before);
+    } finally {
+        await page.close();
+    }
+});
+
 test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async () => {
     const page = await browser.newPage({ viewport: desktop, deviceScaleFactor: 2 });
     let releaseSnapshot;
@@ -540,6 +644,12 @@ test('Server Status stacks the four cards in reading order and swipes through to
         await page.touchscreen.tap(70, 105);
         await page.getByRole('img', { name: /^Wave Server Status/ }).waitFor();
         await settleCanvas(page);
+        const scrollbar = await page.evaluate(() => ({
+            canvasWidth: document.querySelector('canvas').clientWidth,
+            thumbBorder: getComputedStyle(document.documentElement, '::-webkit-scrollbar-thumb').borderTopWidth,
+        }));
+        assert.deepEqual(scrollbar, { canvasWidth: portrait.width, thumbBorder: '0px' },
+            'Overlay scrollbars keep their native styling and the full canvas width.');
 
         const touch = await page.context().newCDPSession(page);
         const titles = new Set();
@@ -596,11 +706,18 @@ test('Server Status keeps the Traffic plot and Logs in place when phone legends 
     setRates(31.1, 61.1);
     const preview = await mockPreview(page, { data });
     async function trafficLayout() {
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        // The canvas can grow after switching views. Wait for the bottom of the current page.
+        await page.waitForFunction(() => {
+            const end = document.body.scrollHeight;
+            if (Math.ceil(scrollY + innerHeight) >= end) return true;
+            window.scrollTo(0, end);
+            return false;
+        });
         await settleCanvas(page);
         const { height, offset } = await page.evaluate(() => ({
             height: document.querySelector('canvas').clientHeight, offset: scrollY,
         }));
+        assert.ok(Math.ceil(offset + viewport.height) >= height, 'The Traffic plot is sampled at the page end.');
         const { pixels } = await screenshotPixels(page, { x: 32, y: 0, width: 1, height: viewport.height - 250 });
         const plot = colorRuns(pixels, [[13, 11, 14]], 80).at(-1);
         assert.ok(plot, 'The Traffic plot is visible above Logs.');

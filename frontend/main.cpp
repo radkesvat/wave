@@ -30,6 +30,26 @@ EM_JS(void, update_panel_description, (const char* description), {
     Module['updateDescription'](UTF8ToString(description));
 });
 
+EM_JS(void, set_scrollbar_colors, (ImU32 track, ImU32 thumb, ImU32 hover, ImU32 active), {
+    const root = document.documentElement;
+    const style = root.style;
+    const palette_changed = style.getPropertyValue("--scrollbar-thumb") !== "";
+    const rgb = color => "rgb(" + [color & 255, (color >> 8) & 255, (color >> 16) & 255].join(", ") + ")";
+    style.setProperty("--scrollbar-track", rgb(track));
+    style.setProperty("--scrollbar-thumb", rgb(thumb));
+    style.setProperty("--scrollbar-hover", rgb(hover));
+    style.setProperty("--scrollbar-active", rgb(active));
+    if (palette_changed && root.classList.contains("classic-scrollbars") && root.clientWidth < innerWidth &&
+        !matchMedia("(forced-colors: active)").matches && getComputedStyle(root).scrollbarColor === "auto") {
+        // Blink can keep the old thumb pixels until hover. Switching to native colors
+        // and back refreshes the scrollbar without changing its size or scroll position.
+        const previous = style.scrollbarColor;
+        style.scrollbarColor = rgb(thumb) + " " + rgb(track);
+        root.getBoundingClientRect();
+        style.scrollbarColor = previous;
+    }
+});
+
 EM_JS(void, register_header_controls, (int menu, int tools, int canvas), {
     Module['registerHeaderControls'](menu, tools, canvas);
 });
@@ -70,6 +90,14 @@ EM_JS(void, show_startup_error, (), {
     Module['onAbort']();
 });
 // clang-format on
+
+void apply_theme(bool high_contrast)
+{
+    wave::theme::apply(high_contrast);
+    set_scrollbar_colors(ImGui::GetColorU32(ImGuiCol_ScrollbarBg), ImGui::GetColorU32(ImGuiCol_ScrollbarGrab),
+                         ImGui::GetColorU32(ImGuiCol_ScrollbarGrabHovered),
+                         ImGui::GetColorU32(ImGuiCol_ScrollbarGrabActive));
+}
 
 struct Application {
     SDL_Window* window = nullptr;
@@ -145,7 +173,7 @@ struct Application {
         platform.Platform_OpenInShellFn = [](ImGuiContext*, const char* path) {
             return open_browser_link(path);
         };
-        wave::theme::apply(high_contrast);
+        apply_theme(high_contrast);
         install_text_input();
         register_header_controls(wave::panel_menu_control, wave::panel_tools_control,
                                  wave::panel_canvas_control);
@@ -223,7 +251,7 @@ struct Application {
 
         if (panel.high_contrast != high_contrast) {
             high_contrast = panel.high_contrast;
-            wave::theme::apply(high_contrast);
+            apply_theme(high_contrast);
         }
         wave::theme::apply_text_scale(viewport_width);
         ImGui_ImplOpenGL3_NewFrame();

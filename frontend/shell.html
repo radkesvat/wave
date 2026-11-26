@@ -16,7 +16,29 @@
 
       :root.server-status { scrollbar-gutter: stable; }
 
+      @media not (forced-colors: active) {
+        :root.classic-scrollbars::-webkit-scrollbar,
+        :root.classic-scrollbars::-webkit-scrollbar-track { background-color: var(--scrollbar-track); }
+        :root.classic-scrollbars::-webkit-scrollbar-thumb {
+          background: var(--scrollbar-thumb) padding-box;
+          border: 2px solid transparent;
+          border-radius: 9px;
+        }
+        :root.classic-scrollbars::-webkit-scrollbar-thumb:hover { background-color: var(--scrollbar-hover); }
+        :root.classic-scrollbars::-webkit-scrollbar-thumb:active { background-color: var(--scrollbar-active); }
+      }
+
       body { margin: 0; }
+
+      #scrollbar-probe {
+        position: fixed;
+        top: 0;
+        left: -100px;
+        width: 100px;
+        height: 100px;
+        overflow-y: scroll;
+        visibility: hidden;
+      }
 
       #canvas {
         display: block;
@@ -64,6 +86,7 @@
     </style>
   </head>
   <body>
+    <div id="scrollbar-probe" aria-hidden="true"></div>
     <div id="panel-controls" class="panel-controls" hidden>
       <button id="menu" type="button" aria-expanded="false">Menu</button>
       <button id="tools" type="button" aria-expanded="false">Tools</button>
@@ -92,6 +115,16 @@
         let touch = null;
         let writingClipboard = false;
         startup.hidden = false;
+
+        if (CSS.supports("selector(::-webkit-scrollbar-thumb)")) {
+          // Styling an overlay scrollbar can give the page a new gutter. Measure a native scrollbar.
+          const probe = document.getElementById("scrollbar-probe");
+          const updateScrollbarMode = () => {
+            document.documentElement.classList.toggle("classic-scrollbars", probe.clientWidth < probe.offsetWidth);
+          };
+          updateScrollbarMode();
+          new ResizeObserver(updateScrollbarMode).observe(probe);
+        }
 
         function registerControl(element, id, focusCanvas) {
           controlIds.set(element, id);

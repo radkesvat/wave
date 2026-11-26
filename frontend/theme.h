@@ -49,6 +49,7 @@ inline constexpr float control_radius = 5;
 inline constexpr float pane_radius = 9;
 inline constexpr float tab_radius = 7;
 inline constexpr float popup_radius = 8;
+inline constexpr float scrollbar_radius = 9;
 inline constexpr float border_width = 1;
 inline constexpr float selection_width = 2;
 inline constexpr float focus_width = 2;

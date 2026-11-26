@@ -182,11 +182,18 @@ in place. Swipe the panel to reach Logs. Swiping
 along a pane's right edge scrolls its contents. Drag directly on a topology
 map to pan it, or tap a node or link to inspect it.
 
+Wave's scrollable panes use inset, rounded scrollbar thumbs and share the
+same track, hover, and drag colors in each contrast mode. Classic page
+scrollbars use those colors and rounded ends where browser styling is
+supported. Overlay scrollbars use the browser's native appearance.
+
 Server Status shows CPU and Memory above Server Information and Traffic
 when the work pane can fit two columns. When space is tight, all four cards
 stack in that order. On a phone, swipe through the cards to reach Logs.
 At short desktop heights, scroll inside the work pane to see the rest of
-the grid.
+the grid. Server Status reserves the browser scrollbar gutter on platforms
+with a classic scrollbar, so the column count stays consistent as the page
+starts or stops scrolling.
 
 `--site-dir` selects a frontend build directory relative to the current
 working directory or by absolute path. It defaults to `build/web-release/site`

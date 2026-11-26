@@ -95,7 +95,7 @@ void apply(bool high_contrast)
     style.ChildRounding = square_radius;
     style.FrameRounding = control_radius;
     style.GrabRounding = control_radius;
-    style.ScrollbarRounding = square_radius;
+    style.ScrollbarRounding = scrollbar_radius;
     style.MenuItemRounding = control_radius;
     style.SelectableRounding = square_radius;
     style.PopupRounding = popup_radius;
