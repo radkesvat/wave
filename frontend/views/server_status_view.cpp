@@ -10,11 +10,13 @@ namespace wave {
 namespace {
 
 using namespace view;
+using theme::Color;
+using theme::packed;
 
 struct Series {
     const Json& samples;
     const char* name;
-    ImU32 color;
+    Color color;
 };
 
 void chart(const char* title, const char* unit, double ceiling, float height,
@@ -23,38 +25,46 @@ void chart(const char* title, const char* unit, double ceiling, float height,
     ImGui::SeparatorText(title);
     for (const auto& line : series) {
         if (!line.samples.empty()) {
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(line.color), "%s  %.1f %s", line.name,
-                               number(line.samples.back()), unit);
+            ImGui::TextColored(theme::rgba(line.color), "%s  %.1f %s", line.name, number(line.samples.back()),
+                               unit);
         }
     }
 
-    const ImVec2 corner = ImGui::GetCursorScreenPos();
+    const auto pos = ImGui::GetCursorScreenPos();
     const float width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
     ImGui::Dummy({width, height});
     auto& draw = *ImGui::GetWindowDrawList();
-    draw.AddRectFilled(corner, {corner.x + width, corner.y + height}, plot_surface, 6);
+    const ImVec2 corner{std::round(pos.x), std::round(pos.y)};
+    const ImVec2 end{std::round(pos.x + width), std::round(pos.y + height)};
+    const ImU32 grid = packed(Color::plot_grid);
+    const ImU32 label_color = packed(Color::secondary_text);
+    draw.AddRectFilled(corner, end, packed(Color::canvas));
+    draw.AddRect(corner, end, packed(Color::divider), theme::square_radius, theme::border_width);
     if (width < 92) {
         return;
     }
     const float left = corner.x + 37;
-    const float right = corner.x + width - 10;
+    const float right = end.x - 10;
     const float top = corner.y + 13;
-    const float bottom = corner.y + height - 25;
+    const float bottom = end.y - 25;
+    ImGui::PushFont(nullptr, theme::secondary_font_size);
     for (int tick = 0; tick <= 4; ++tick) {
-        const float y = bottom - (bottom - top) * tick / 4;
-        draw.AddLineH(left, right, y, plot_grid);
+        const float y = std::round(bottom - (bottom - top) * tick / 4);
+        draw.AddLineH(left, right, y, grid, theme::border_width);
         const auto label = std::format("{:.0f}", ceiling * tick / 4);
-        draw.AddText({left - ImGui::CalcTextSize(label.c_str()).x - 5, y - 8}, plot_muted, label.c_str());
+        draw.AddText({left - ImGui::CalcTextSize(label.c_str()).x - 5, y - theme::secondary_font_size / 2},
+                     label_color, label.c_str());
     }
-    draw.AddText({left, bottom + 5}, plot_muted, "Recent samples");
-    draw.AddText({right - ImGui::CalcTextSize("Now").x, bottom + 5}, plot_muted, "Now");
+    draw.AddText({left, bottom + 5}, label_color, "Recent samples");
+    draw.AddText({right - ImGui::CalcTextSize("Now").x, bottom + 5}, label_color, "Now");
+    ImGui::PopFont();
 
     const auto mouse = ImGui::GetIO().MousePos;
     const bool hovered =
         ImGui::IsItemHovered() && mouse.x >= left && mouse.x <= right && mouse.y >= top && mouse.y <= bottom;
     const float fraction = hovered ? (mouse.x - left) / (right - left) : 1;
     if (hovered) {
-        draw.AddLineV(mouse.x, top, bottom, plot_muted);
+        draw.AddLineV(std::round(mouse.x), top, bottom, label_color, theme::border_width);
     }
 
     constexpr std::size_t max_points = 120;
@@ -70,9 +80,10 @@ void chart(const char* title, const char* unit, double ceiling, float height,
             points[i] = {left + (right - left) * i / (count - 1),
                          bottom - (bottom - top) * static_cast<float>(rate)};
         }
-        draw.AddPolyline(points.data(), static_cast<int>(count), line.color, 2);
+        const ImU32 color = packed(line.color);
+        draw.AddPolyline(points.data(), static_cast<int>(count), color, 2);
         const auto selected = static_cast<std::size_t>(std::lround(fraction * (count - 1)));
-        draw.AddCircleFilled(points[selected], hovered ? 4 : 3, line.color);
+        draw.AddCircleFilled(points[selected], hovered ? 4 : 3, color);
     }
     if (hovered && ImGui::BeginTooltip()) {
         for (const auto& line : series) {
@@ -106,7 +117,7 @@ void server_info(const Json& server)
         auto row = [](const char* label, std::string_view value) {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::TextDisabled("%s", label);
+            ImGui::TextColored(theme::rgba(Color::secondary_text), "%s", label);
             ImGui::TableNextColumn();
             wrapped(value);
         };
@@ -138,12 +149,12 @@ void render_server_status(const nlohmann::json& server, bool narrow)
     if (columns) {
         ImGui::TableNextColumn();
     }
-    chart("CPU history", "%", 100, 145, {{array_field(server, "cpu_history"), "CPU", plot_mint}});
+    chart("CPU history", "%", 100, 145, {{array_field(server, "cpu_history"), "CPU", Color::accent}});
     if (columns) {
         ImGui::TableNextColumn();
     }
     chart("Memory history", "GiB", std::max(1.0, numeric_field(server, "memory_total_gib")), 145,
-          {{array_field(server, "memory_history"), "Memory", plot_blue}});
+          {{array_field(server, "memory_history"), "Memory", Color::info}});
     if (columns) {
         ImGui::EndTable();
     }
@@ -160,7 +171,7 @@ void render_server_status(const nlohmann::json& server, bool narrow)
     const auto& upload = array_field(server, "upload_history");
     const auto& download = array_field(server, "download_history");
     chart("Traffic history", "MiB/s", traffic_ceiling(upload, download), 168,
-          {{upload, "Upload", plot_mint}, {download, "Download", plot_amber}});
+          {{upload, "Upload", Color::info}, {download, "Download", Color::accent}});
     if (traffic_columns) {
         ImGui::EndTable();
     }

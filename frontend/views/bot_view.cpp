@@ -10,6 +10,8 @@ namespace wave {
 namespace {
 
 using namespace view;
+using theme::Color;
+using theme::rgba;
 
 struct Option {
     const char* key;
@@ -68,7 +70,7 @@ void sync_bot(BotViewState& state, const Json& bot)
 void bot_setup_dialog(BotViewState& state, PreviewSession& session, const Json& bot)
 {
     fit_preview_dialog(500);
-    if (!ImGui::BeginPopupModal("Set up a sample bot", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (!theme::begin_modal("Set up a sample bot", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         if (!ImGui::IsPopupOpen("Set up a sample bot")) {
             session.abandon(state.connect_request);
         }
@@ -114,10 +116,12 @@ void bot_setup_dialog(BotViewState& state, PreviewSession& session, const Json& 
         }
         break;
     case BotViewState::Setup::connecting:
-        ImGui::TextUnformatted("Connecting the sample bot...");
+        ImGui::TextColored(rgba(Color::info), "Connecting the sample bot...");
         break;
     case BotViewState::Setup::complete:
+        ImGui::PushStyleColor(ImGuiCol_Text, rgba(Color::success));
         ImGui::SeparatorText("3. Sample bot connected");
+        ImGui::PopStyleColor();
         wrapped(string_field(bot, "admin_link"));
         if (ImGui::Button("Done")) {
             ImGui::CloseCurrentPopup();
@@ -141,10 +145,10 @@ void bot_connection(BotViewState& state, PreviewSession& session, const Json& bo
     const bool connected = bool_field(bot, "connected");
     if (connected) {
         const auto name = string_field(bot, "name", "Wave sample bot");
-        ImGui::TextColored(mint, "Sample bot connected");
+        ImGui::TextColored(rgba(Color::success), "Sample bot connected");
         wrapped(name);
     } else {
-        ImGui::TextColored(warm, "Sample bot disconnected");
+        ImGui::TextColored(rgba(Color::warning), "Sample bot disconnected");
     }
     if (ImGui::Button(connected ? "Open setup demo" : "Set up bot")) {
         session.abandon(state.connect_request);
@@ -168,12 +172,12 @@ void bot_connection(BotViewState& state, PreviewSession& session, const Json& bo
         }
     }
     if (state.access_link_copied && connected) {
-        ImGui::TextColored(mint, "Sample access link copied");
+        ImGui::TextColored(rgba(Color::success), "Sample access link copied");
     }
     feedback(session, {"bot_connect", "bot_disconnect"});
     bot_setup_dialog(state, session, bot);
     fit_preview_dialog(380);
-    if (ImGui::BeginPopupModal("Disconnect sample bot", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (theme::begin_modal("Disconnect sample bot", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped("Disconnect the bot from this preview process?");
         if (ImGui::Button("Confirm disconnect") && session.send({{"action", "bot_disconnect"}})) {
             state.access_link_copied = false;
@@ -221,7 +225,7 @@ bool finish_bot_save(BotViewState::Save& save, PreviewSession& session, bool& di
 void show_bot_save(const BotViewState::Save& save)
 {
     if (save.request) {
-        ImGui::TextDisabled("Saving sample bot settings...");
+        ImGui::TextColored(rgba(Color::info), "Saving sample bot settings...");
     } else if (save.reply) {
         feedback(*save.reply);
     }
@@ -294,9 +298,7 @@ void bot_overrides(BotViewState& state, PreviewSession& session)
     state.overrides_dirty |= edit_number("Port override", state.port);
     const bool valid = state.port >= 0 && state.port <= 65535;
     if (!valid) {
-        ImGui::PushStyleColor(ImGuiCol_Text, warm);
-        ImGui::TextWrapped("Enter 0 for the default port or a value from 1 to 65535.");
-        ImGui::PopStyleColor();
+        wrapped("Enter 0 for the default port or a value from 1 to 65535.", Color::error);
     }
     ImGui::BeginDisabled(!state.overrides_dirty || !valid);
     if (ImGui::Button("Save overrides")) {
@@ -338,7 +340,7 @@ void bot_actions(BotViewState& state, PreviewSession& session, const Json& bot)
     feedback(session, {"bot_action"});
 
     fit_preview_dialog(460);
-    if (ImGui::BeginPopupModal("Preview bot message", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (theme::begin_modal("Preview bot message", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         wrapped(audiences[state.audience]);
         ImGui::Separator();
         wrapped(state.message.data());
@@ -367,7 +369,8 @@ void render_bot(BotViewState& state, PreviewSession& session, bool narrow)
         state.source = nullptr;
     }
     sync_bot(state, bot);
-    if (ImGui::BeginTabBar("bot-views", ImGuiTabBarFlags_FittingPolicyScroll)) {
+    if (ImGui::BeginTabBar("bot-views",
+                           ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_DrawSelectedOverline)) {
         if (ImGui::BeginTabItem("Connection")) {
             bot_connection(state, session, bot, narrow);
             ImGui::EndTabItem();

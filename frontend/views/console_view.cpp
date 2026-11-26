@@ -7,6 +7,8 @@ namespace wave {
 namespace {
 
 using namespace view;
+using theme::Color;
+using theme::rgba;
 
 using namespace std::string_view_literals;
 
@@ -50,7 +52,7 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
     const auto& lines = array_field(console, "output");
     const auto& history = array_field(console, "history");
     const bool running = bool_field(console, "running");
-    ImGui::TextColored(running ? mint : warm, "%s",
+    ImGui::TextColored(rgba(running ? Color::success : Color::warning), "%s",
                        running ? "Bash preview running" : "Bash preview stopped");
     ImGui::TextWrapped("Try help, uptime, whoami or status for canned responses.");
 
@@ -81,6 +83,7 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
     std::string copied;
     const auto last = lines.empty() ? ""sv : string_value(lines.back());
     const bool output_changed = state.output_size != lines.size() || last != state.last_line;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(Color::console));
     if (ImGui::BeginChild("console-output", {0, narrow ? 208.0f : 252.0f}, ImGuiChildFlags_Borders)) {
         for (const auto& line : lines) {
             const auto value = string_value(line);
@@ -88,9 +91,7 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
                 continue;
             }
             if (value.starts_with("$ ")) {
-                ImGui::PushStyleColor(ImGuiCol_Text, mint);
-                wrapped(value);
-                ImGui::PopStyleColor();
+                wrapped(value, Color::accent);
             } else {
                 wrapped(value);
             }
@@ -100,6 +101,7 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
         }
     }
     ImGui::EndChild();
+    ImGui::PopStyleColor();
     state.output_size = lines.size();
     state.last_line = last;
     if (copy) {
@@ -113,12 +115,17 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
         state.copied = true;
     }
     if (state.copied) {
-        ImGui::TextColored(mint, "Console output copied");
+        ImGui::TextColored(rgba(Color::success), "Console output copied");
     }
 
     ImGui::BeginDisabled(!running);
     ConsoleHistory navigation{history, state.history_position};
-    ImGui::SetNextItemWidth(narrow ? -1.0f : -170.0f);
+    constexpr const char* run_label = "Run";
+    constexpr const char* previous_label = "Previous";
+    constexpr const char* next_label = "Next";
+    const float controls_width = button_width(run_label) + button_width(previous_label) +
+                                 button_width(next_label) + 3 * ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SetNextItemWidth(narrow ? -1.0f : -controls_width);
     const bool submitted = ImGui::InputTextWithHint(
         "##console-command", "Demo command", state.command.data(), state.command.size(),
         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory, handle_console_history,
@@ -126,7 +133,7 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
     if (!narrow) {
         ImGui::SameLine();
     }
-    const bool run = ImGui::Button("Run");
+    const bool run = ImGui::Button(run_label);
     if ((submitted || run) && state.command[0] &&
         session.send({{"action", "console_command"}, {"input", state.command.data()}})) {
         state.command[0] = '\0';
@@ -134,11 +141,11 @@ void render_console(ConsoleViewState& state, PreviewSession& session, bool narro
         state.copied = false;
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton("Previous")) {
+    if (ImGui::SmallButton(previous_label)) {
         fill(state.command, history_step(history, state.history_position, -1));
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton("Next")) {
+    if (ImGui::SmallButton(next_label)) {
         fill(state.command, history_step(history, state.history_position, 1));
     }
     ImGui::EndDisabled();

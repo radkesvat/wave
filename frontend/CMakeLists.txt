@@ -6,11 +6,18 @@ FetchContent_Declare(imgui
 )
 FetchContent_MakeAvailable(imgui)
 
+set(WAVE_STARTUP_CANVAS 080C10)
+set(WAVE_STARTUP_TEXT EAEBFF)
+set(wave_shell "${CMAKE_CURRENT_BINARY_DIR}/shell.html")
+configure_file(shell.html "${wave_shell}" @ONLY)
+configure_file(theme_swatches.h.in "${CMAKE_CURRENT_BINARY_DIR}/theme_swatches.h" @ONLY)
+
 add_executable(wave
     browser_ui.cpp
     main.cpp
     panel.cpp
     preview_session.cpp
+    theme.cpp
     views/about_view.cpp
     views/bot_view.cpp
     views/console_view.cpp
@@ -38,6 +45,7 @@ set_target_properties(wave PROPERTIES
 )
 target_include_directories(wave PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_BINARY_DIR}"
     "${PROJECT_SOURCE_DIR}/common"
     "${imgui_SOURCE_DIR}"
     "${imgui_SOURCE_DIR}/backends"
@@ -50,8 +58,8 @@ target_compile_options(wave PRIVATE
     "$<$<CONFIG:Release>:-flto>"
 )
 
-set(wave_shell "${CMAKE_CURRENT_SOURCE_DIR}/shell.html")
-set(wave_font "${imgui_SOURCE_DIR}/misc/fonts/Karla-Regular.ttf")
+# Poppins Medium 4.004 from google/fonts at 7dc16b7de42db624b902f2292b68ed9e489e5053.
+set(wave_font "${CMAKE_CURRENT_SOURCE_DIR}/fonts/Poppins-Medium.ttf")
 set_property(TARGET wave APPEND PROPERTY LINK_DEPENDS "${wave_shell}" "${wave_font}")
 target_link_options(wave PRIVATE
     -sUSE_SDL=2
@@ -61,7 +69,7 @@ target_link_options(wave PRIVATE
     "$<$<CONFIG:Release>:-flto>"
     "$<$<CONFIG:Release>:-sENVIRONMENT=web>"
     "SHELL:--shell-file \"${wave_shell}\""
-    "SHELL:--embed-file \"${wave_font}@/karla.ttf\""
+    "SHELL:--embed-file \"${wave_font}@/poppins-medium.ttf\""
 )
 # Emscripten writes these assets when linking index.html.
 add_custom_command(TARGET wave POST_BUILD
@@ -72,7 +80,7 @@ add_custom_command(TARGET wave POST_BUILD
 
 configure_file("${imgui_SOURCE_DIR}/LICENSE.txt" "${CMAKE_BINARY_DIR}/site/licenses/dear-imgui.txt" COPYONLY)
 configure_file("${PROJECT_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/site/licenses/wave.txt" COPYONLY)
-configure_file("${PROJECT_SOURCE_DIR}/doc/licenses/karla.txt" "${CMAKE_BINARY_DIR}/site/licenses/karla.txt" COPYONLY)
+configure_file("${PROJECT_SOURCE_DIR}/doc/licenses/poppins.txt" "${CMAKE_BINARY_DIR}/site/licenses/poppins.txt" COPYONLY)
 configure_file("${nlohmann_json_SOURCE_DIR}/LICENSE.MIT" "${CMAKE_BINARY_DIR}/site/licenses/nlohmann-json.txt" COPYONLY)
 configure_file("${PROJECT_SOURCE_DIR}/doc/licenses/nlohmann-json-third-party.txt"
     "${CMAKE_BINARY_DIR}/site/licenses/nlohmann-json-third-party.txt" COPYONLY)

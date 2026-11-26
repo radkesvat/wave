@@ -1,12 +1,15 @@
 #include "logs_view.h"
 
 #include "preview_session.h"
+#include "view_helpers.h"
 
 #include <format>
 #include <string_view>
 
 namespace wave {
 namespace {
+
+using theme::Color;
 
 std::string_view log_field(const nlohmann::json& record, const char* name)
 {
@@ -17,15 +20,18 @@ std::string_view log_field(const nlohmann::json& record, const char* name)
     return field->get_ref<const std::string&>();
 }
 
-ImVec4 level_color(std::string_view level)
+Color level_color(std::string_view level)
 {
     if (level == "success") {
-        return {0.41f, 0.90f, 0.77f, 1.0f};
+        return Color::success;
     }
-    if (level == "warning" || level == "error") {
-        return {0.97f, 0.75f, 0.47f, 1.0f};
+    if (level == "warning") {
+        return Color::warning;
     }
-    return {0.62f, 0.74f, 0.83f, 1.0f};
+    if (level == "error") {
+        return Color::error;
+    }
+    return Color::info;
 }
 
 } // namespace
@@ -53,6 +59,7 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
         state.local_feedback.clear();
         if (!session.send({{"action", "clear_logs"}})) {
             state.local_feedback = "Could not clear preview logs.";
+            state.local_feedback_color = Color::error;
         }
     }
     ImGui::SameLine();
@@ -62,13 +69,14 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
     if (!narrow) {
         ImGui::SameLine();
     }
-    ImGui::SetNextItemWidth(-65.0f);
+    const float search_label_space = ImGui::CalcTextSize("Search").x + ImGui::GetStyle().ItemInnerSpacing.x;
+    ImGui::SetNextItemWidth(-search_label_space);
     const bool search_changed = state.search.DrawWithHint("Search##logs", "Message, level, or time");
     if (search_changed) {
         state.local_feedback.clear();
     }
     if (!state.local_feedback.empty()) {
-        ImGui::TextWrapped("%s", state.local_feedback.c_str());
+        view::wrapped(state.local_feedback, state.local_feedback_color);
     }
     if (!ready) {
         ImGui::TextDisabled("%s", session.status() == PreviewStatus::loading ? "Loading preview logs…"
@@ -79,7 +87,11 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
 
     std::string copied;
     int visible = 0;
-    if (ImGui::BeginChild("Log entries", {0, 0}, ImGuiChildFlags_Borders)) {
+    ImGui::PushStyleColor(ImGuiCol_Border, theme::rgba(Color::divider));
+    const bool entries_visible = ImGui::BeginChild("Log entries", {0, 0}, ImGuiChildFlags_Borders);
+    ImGui::PopStyleColor();
+    if (entries_visible) {
+        ImGui::PushFont(nullptr, theme::secondary_font_size);
         const bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
         for (const auto& log : *logs) {
             const auto timestamp = log_field(log, "ts");
@@ -99,10 +111,10 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
                 }
             }
             ++visible;
-            ImGui::TextDisabled("%.*s", static_cast<int>(timestamp.size()),
-                                timestamp.empty() ? "" : timestamp.data());
+            ImGui::TextColored(theme::rgba(Color::secondary_text), "%.*s", static_cast<int>(timestamp.size()),
+                               timestamp.empty() ? "" : timestamp.data());
             ImGui::SameLine();
-            ImGui::TextColored(level_color(level), "%.*s", static_cast<int>(level.size()),
+            ImGui::TextColored(theme::rgba(level_color(level)), "%.*s", static_cast<int>(level.size()),
                                level.empty() ? "" : level.data());
             if (!narrow) {
                 ImGui::SameLine();
@@ -117,6 +129,7 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
         } else if (state.auto_scroll && (at_bottom || turned_on)) {
             ImGui::SetScrollHereY(1.0f);
         }
+        ImGui::PopFont();
     }
     ImGui::EndChild();
 
@@ -127,6 +140,7 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
         state.local_feedback =
             visible == 0 ? "No matching entries to copy."
                          : std::format("Copied {} log {}.", visible, visible == 1 ? "entry" : "entries");
+        state.local_feedback_color = visible == 0 ? Color::info : Color::success;
     }
     ImGui::PopID();
 }

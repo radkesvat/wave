@@ -10,6 +10,8 @@ namespace wave {
 namespace {
 
 using namespace view;
+using theme::Color;
+using theme::rgba;
 
 void sync_settings(SettingsViewState& state, const Json& settings)
 {
@@ -79,9 +81,7 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
     const bool valid = state.name[0] && state.username[0] && state.domain[0] && state.site_template[0] &&
                        state.websocket_path[0] == '/' && state.port >= 1 && state.port <= 65535;
     if (state.dirty && !valid) {
-        ImGui::PushStyleColor(ImGuiCol_Text, warm);
-        ImGui::TextWrapped("Enter a panel name, admin name, domain, template, /path and port 1-65535.");
-        ImGui::PopStyleColor();
+        wrapped("Enter a panel name, admin name, domain, template, /path and port 1-65535.", Color::error);
     }
     ImGui::BeginDisabled(!state.dirty || !valid);
     if (ImGui::Button("Apply changes")) {
@@ -111,13 +111,13 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
     }
     ImGui::EndDisabled();
     if (state.apply_request) {
-        ImGui::TextDisabled("Applying sample panel settings...");
+        ImGui::TextColored(rgba(Color::info), "Applying sample panel settings...");
     } else if (state.apply_reply) {
         feedback(*state.apply_reply);
     }
 
     fit_preview_dialog(430);
-    if (ImGui::BeginPopupModal("Apply preview settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (theme::begin_modal("Apply preview settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped("Save these values to this Wave process for the preview?");
         if (ImGui::Button("Confirm apply")) {
             Json draft = {{"name", state.name.data()},
@@ -146,7 +146,7 @@ void render_settings(SettingsViewState& state, PreviewSession& session, bool nar
         ImGui::EndPopup();
     }
     fit_preview_dialog(540);
-    if (ImGui::BeginPopupModal("Sample backup", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (theme::begin_modal("Sample backup", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped("Applied preview settings and sample user records");
         ImGui::InputTextMultiline("##sample-backup", state.backup.data(), state.backup.size() + 1, {-1, 170},
                                   ImGuiInputTextFlags_ReadOnly);

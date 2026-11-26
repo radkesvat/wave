@@ -11,6 +11,8 @@ namespace wave {
 namespace {
 
 using namespace view;
+using theme::Color;
+using theme::packed;
 
 using Selection = TopologyViewState::Map::Selection;
 using Tab = TopologyViewState::Tab;
@@ -75,15 +77,16 @@ TopologyViewState::Bounds draw_topology(TopologyViewState::Map& state, const Jso
         state.offset_x = state.offset_y = 0;
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("%.0f%%", state.zoom * 100);
+    ImGui::TextColored(theme::rgba(Color::secondary_text), "%.0f%%", state.zoom * 100);
     ImGui::TextWrapped("Drag to pan. Select a node or connection to inspect it.");
 
     const float width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
     const float height = narrow ? 230.0f : 290.0f;
     state.width = width;
     state.height = height;
-    const auto corner = ImGui::GetCursorScreenPos();
-    const ImVec2 bottom{corner.x + width, corner.y + height};
+    const auto pos = ImGui::GetCursorScreenPos();
+    const ImVec2 corner{std::round(pos.x), std::round(pos.y)};
+    const ImVec2 bottom{std::round(pos.x + width), std::round(pos.y + height)};
     const bool selected = ImGui::InvisibleButton("##network-topology", {width, height});
     if (ImGui::IsItemActivated()) {
         state.graph_dragged = false;
@@ -96,16 +99,20 @@ TopologyViewState::Bounds draw_topology(TopologyViewState::Map& state, const Jso
     const bool inspect_graph = selected && !state.graph_dragged;
     const auto mouse = ImGui::GetIO().MousePos;
     auto& draw = *ImGui::GetWindowDrawList();
-    draw.AddRectFilled(corner, bottom, plot_surface, 6);
+    const ImU32 grid_color = packed(Color::plot_grid);
+    const ImU32 border = packed(Color::control_border);
+    const ImU32 accent = packed(Color::accent);
+    const ImU32 foreground = packed(Color::primary_text);
+    draw.AddRectFilled(corner, bottom, packed(Color::canvas));
     draw.PushClipRect(corner, bottom, true);
     const ImVec2 visible_min = draw.GetClipRectMin();
     const ImVec2 visible_max = draw.GetClipRectMax();
     constexpr float grid = 28;
-    for (float x = corner.x + std::fmod(state.offset_x, grid); x < bottom.x; x += grid) {
-        draw.AddLineV(x, corner.y, bottom.y, plot_grid);
+    for (float x = corner.x + std::round(std::fmod(state.offset_x, grid)); x < bottom.x; x += grid) {
+        draw.AddLineV(x, corner.y, bottom.y, grid_color, theme::border_width);
     }
-    for (float y = corner.y + std::fmod(state.offset_y, grid); y < bottom.y; y += grid) {
-        draw.AddLineH(corner.x, bottom.x, y, plot_grid);
+    for (float y = corner.y + std::round(std::fmod(state.offset_y, grid)); y < bottom.y; y += grid) {
+        draw.AddLineH(corner.x, bottom.x, y, grid_color, theme::border_width);
     }
 
     const float node_width = narrow ? 71.0f : 103.0f;
@@ -141,7 +148,8 @@ TopologyViewState::Bounds draw_topology(TopologyViewState::Map& state, const Jso
         }
         const auto id = string_field(link, "id");
         const bool active = state.selection == Selection::link && state.selected == id;
-        draw.AddLine(from->position, to->position, active ? plot_mint : plot_blue, active ? 3.0f : 1.5f);
+        draw.AddLine(from->position, to->position, active ? accent : packed(Color::info),
+                     active ? 3.0f : 1.5f);
         if (inspect_graph) {
             const float distance = distance_to_link(mouse, from->position, to->position);
             if (distance < nearest_distance) {
@@ -154,25 +162,30 @@ TopologyViewState::Bounds draw_topology(TopologyViewState::Map& state, const Jso
         inspect(state, Selection::link, nearest_link);
     }
     for (const auto& node : graph_nodes) {
-        const ImVec2 start{node.position.x - node_width / 2, node.position.y - node_height / 2};
+        const ImVec2 start{std::round(node.position.x - node_width / 2),
+                           std::round(node.position.y - node_height / 2)};
         const ImVec2 end{start.x + node_width, start.y + node_height};
         if (inspect_graph && mouse.x >= start.x && mouse.x <= end.x && mouse.y >= start.y &&
             mouse.y <= end.y) {
             inspect(state, Selection::node, node.id);
         }
         const bool active = state.selection == Selection::node && state.selected == node.id;
-        draw.AddRectFilled(start, end, IM_COL32(25, 50, 66, 255), 6);
-        draw.AddRect(start, end, active ? plot_mint : plot_blue, 6, active ? 2.5f : 1.0f);
+        draw.AddRectFilled(start, end, packed(active ? Color::selected : Color::raised),
+                           theme::control_radius);
+        draw.AddRect(start, end, active ? accent : border, theme::control_radius,
+                     active ? theme::selection_width : theme::border_width);
         const auto label = string_field(node.data, "label", node.id);
         auto* font = ImGui::GetFont();
         const float font_size = narrow ? 13.0f : 15.0f;
         const float wrap_width = node_width - 12;
         const auto* label_end = label.data() + label.size();
         const auto extent = font->CalcTextSizeA(font_size, FLT_MAX, wrap_width, label.data(), label_end);
-        draw.AddText(font, font_size, {node.position.x - extent.x / 2, node.position.y - extent.y / 2},
-                     IM_COL32(234, 243, 247, 255), label.data(), label_end, wrap_width);
+        draw.AddText(font, font_size,
+                     {start.x + (node_width - extent.x) / 2, start.y + (node_height - extent.y) / 2},
+                     foreground, label.data(), label_end, wrap_width);
     }
     draw.PopClipRect();
+    draw.AddRect(corner, bottom, border, theme::square_radius, theme::border_width);
     return {visible_min.x, visible_min.y, visible_max.x, visible_max.y};
 }
 
@@ -229,6 +242,19 @@ void topology_details(const TopologyViewState::Map& state, const Json& nodes, co
     }
 }
 
+bool topology_selectable(const char* label, bool selected)
+{
+    const bool pressed = ImGui::Selectable(label, selected);
+    if (selected && ImGui::IsItemVisible()) {
+        const auto min = ImGui::GetItemRectMin();
+        const auto max = ImGui::GetItemRectMax();
+        const ImVec2 start{std::round(min.x), std::round(min.y) + 2.0f};
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            start, {start.x + theme::selection_width, std::round(max.y) - 2.0f}, packed(Color::accent));
+    }
+    return pressed;
+}
+
 void render_map(TopologyViewState& view, Tab tab, const Json& topology, bool narrow)
 {
     auto& state = tab == Tab::inside ? view.inside_map : view.outside_map;
@@ -244,8 +270,8 @@ void render_map(TopologyViewState& view, Tab tab, const Json& topology, bool nar
             if (in_map(node, map)) {
                 const auto id = string_field(node, "id");
                 const auto label = std::format("{}##{}", string_field(node, "label"), id);
-                if (ImGui::Selectable(label.c_str(),
-                                      state.selection == Selection::node && state.selected == id)) {
+                if (topology_selectable(label.c_str(),
+                                        state.selection == Selection::node && state.selected == id)) {
                     inspect(state, Selection::node, id);
                 }
             }
@@ -256,8 +282,8 @@ void render_map(TopologyViewState& view, Tab tab, const Json& topology, bool nar
             if (in_map(link, map)) {
                 const auto id = string_field(link, "id");
                 const auto label = std::format("{}##{}", string_field(link, "label"), id);
-                if (ImGui::Selectable(label.c_str(),
-                                      state.selection == Selection::link && state.selected == id)) {
+                if (topology_selectable(label.c_str(),
+                                        state.selection == Selection::link && state.selected == id)) {
                     inspect(state, Selection::link, id);
                 }
             }
@@ -268,8 +294,8 @@ void render_map(TopologyViewState& view, Tab tab, const Json& topology, bool nar
             if (in_map(route, map)) {
                 const auto id = string_field(route, "id");
                 const auto label = std::format("{}##{}", string_field(route, "name"), id);
-                if (ImGui::Selectable(label.c_str(),
-                                      state.selection == Selection::route && state.selected == id)) {
+                if (topology_selectable(label.c_str(),
+                                        state.selection == Selection::route && state.selected == id)) {
                     inspect(state, Selection::route, id);
                 }
             }
@@ -308,7 +334,7 @@ void TopologyViewState::pan(Tab map, float dx, float dy)
 
 void render_topology(TopologyViewState& state, const nlohmann::json& topology, bool narrow)
 {
-    if (ImGui::BeginTabBar("topology-views")) {
+    if (ImGui::BeginTabBar("topology-views", ImGuiTabBarFlags_DrawSelectedOverline)) {
         if (ImGui::BeginTabItem("Inside Map")) {
             ImGui::PushID("inside-map");
             render_map(state, Tab::inside, topology, narrow);

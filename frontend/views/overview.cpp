@@ -1,5 +1,7 @@
 #include "overview.h"
 
+#include "theme.h"
+
 #include <imgui.h>
 
 #include <algorithm>
@@ -12,13 +14,9 @@
 namespace wave {
 namespace {
 
-constexpr ImU32 surface = IM_COL32(17, 32, 44, 255);
-constexpr ImU32 border = IM_COL32(38, 57, 72, 255);
-constexpr ImU32 foreground = IM_COL32(234, 243, 247, 255);
-constexpr ImU32 muted = IM_COL32(158, 181, 197, 255);
-constexpr ImU32 accent = IM_COL32(104, 229, 195, 255);
-constexpr ImU32 accent_surface = IM_COL32(23, 53, 56, 255);
-constexpr ImU32 amber = IM_COL32(246, 192, 119, 255);
+using theme::Color;
+using theme::packed;
+
 constexpr std::string_view status = "No WaterWall instance connected";
 constexpr std::string_view sample_label = "Sample data";
 constexpr std::string_view sample_loading = "Loading sample data";
@@ -70,29 +68,32 @@ float text_width(float size, std::string_view label)
     return ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0.0f, label.data(), label.data() + label.size()).x;
 }
 
-void panel(ImDrawList& draw, ImVec2 min, ImVec2 max)
+void panel(ImDrawList& draw, ImVec2 min, ImVec2 max, float rounding = theme::pane_radius)
 {
-    draw.AddRectFilled(min, max, surface, 14.0f);
-    draw.AddRect(min, max, border, 14.0f);
+    min = {std::round(min.x), std::round(min.y)};
+    max = {std::round(max.x), std::round(max.y)};
+    draw.AddRectFilled(min, max, packed(Color::toolbar), rounding);
+    draw.AddRect(min, max, packed(Color::divider), rounding, theme::border_width);
 }
 
 void draw_intro(ImDrawList& draw, const OverviewLayout& layout)
 {
     const float x = layout.left;
     const float y = layout.intro_y;
-    text(draw, {x, y}, layout.compact ? 45.0f : 54.0f, foreground, "Overview");
+    text(draw, {x, y}, theme::large_title_font_size, packed(Color::primary_text), "Overview");
 
-    const float status_y = y + (layout.compact ? 58.0f : 68.0f);
-    draw.AddCircleFilled({x + 5, status_y + 10}, 4.0f, amber);
-    text(draw, {x + 17, status_y}, layout.width < 280.0f ? 15.0f : 17.0f, muted, status,
+    const float status_y = y + theme::large_title_font_size + 14;
+    draw.AddCircleFilled({x + 5, status_y + 10}, 4.0f, packed(Color::warning));
+    text(draw, {x + 17, status_y}, theme::secondary_font_size, packed(Color::secondary_text), status,
          std::max(1.0f, layout.width - 17.0f));
 
-    const float pill_width = text_width(15.0f, sample_label) + 38.0f;
-    const float pill_x = layout.compact ? x : x + layout.width - pill_width;
-    const float pill_y = layout.compact ? layout.metrics_y - 47.0f : status_y - 6.0f;
-    draw.AddRectFilled({pill_x, pill_y}, {pill_x + pill_width, pill_y + 31}, accent_surface, 15.0f);
-    draw.AddCircleFilled({pill_x + 13, pill_y + 15.5f}, 3.0f, accent);
-    text(draw, {pill_x + 24, pill_y + 6}, 15.0f, accent, sample_label);
+    const float label_width = std::ceil(text_width(theme::secondary_font_size, sample_label)) + 38.0f;
+    const float label_x = std::round(layout.compact ? x : x + layout.width - label_width);
+    const float label_y = std::round(layout.compact ? layout.metrics_y - 47.0f : status_y - 6.0f);
+    panel(draw, {label_x, label_y}, {label_x + label_width, label_y + 31}, theme::control_radius);
+    draw.AddCircleFilled({label_x + 13, label_y + 15.5f}, 3.0f, packed(Color::accent));
+    text(draw, {label_x + 24, label_y + 6}, theme::secondary_font_size, packed(Color::primary_text),
+         sample_label);
 }
 
 enum class Metric {
@@ -103,11 +104,12 @@ enum class Metric {
 
 void draw_metric_icon(ImDrawList& draw, Metric metric, float x, float y)
 {
-    draw.AddRectFilled({x - 17, y - 17}, {x + 17, y + 17}, accent_surface, 9.0f);
+    const ImU32 accent = packed(Color::accent);
+    draw.AddRectFilled({x - 17, y - 17}, {x + 17, y + 17}, packed(Color::raised), theme::control_radius);
     switch (metric) {
     case Metric::cpu:
-        draw.AddRect({x - 6, y - 6}, {x + 6, y + 6}, accent, 2.0f);
-        draw.AddRectFilled({x - 2, y - 2}, {x + 2, y + 2}, accent, 1.0f);
+        draw.AddRect({x - 6, y - 6}, {x + 6, y + 6}, accent);
+        draw.AddRectFilled({x - 2, y - 2}, {x + 2, y + 2}, accent);
         for (const float offset : {-3.0f, 3.0f}) {
             draw.AddLine({x + offset, y - 9}, {x + offset, y - 6}, accent);
             draw.AddLine({x + offset, y + 6}, {x + offset, y + 9}, accent);
@@ -116,7 +118,7 @@ void draw_metric_icon(ImDrawList& draw, Metric metric, float x, float y)
         }
         break;
     case Metric::memory:
-        draw.AddRect({x - 9, y - 5}, {x + 9, y + 5}, accent, 2.0f);
+        draw.AddRect({x - 9, y - 5}, {x + 9, y + 5}, accent);
         for (const float offset : {-5.0f, 0.0f, 5.0f}) {
             draw.AddRectFilled({x + offset - 1, y - 2}, {x + offset + 1, y + 2}, accent);
             draw.AddLine({x + offset, y + 5}, {x + offset, y + 8}, accent);
@@ -142,16 +144,20 @@ void draw_metric(ImDrawList& draw, const OverviewLayout& layout, Metric metric, 
     const float y = layout.metrics_y + row * (layout.card_height + gap);
 
     panel(draw, {x, y}, {x + width, y + layout.card_height});
-    draw_metric_icon(draw, metric, x + width - 35, y + 33);
-    text(draw, {x + 20, y + 22}, 17.0f, muted, label);
-    text(draw, {x + 20, y + 48}, layout.compact ? 31.0f : 33.0f, foreground, value);
+    draw_metric_icon(draw, metric, std::round(x + width - 35), std::round(y + 33));
+    text(draw, {x + 20, y + 22}, theme::secondary_font_size, packed(Color::secondary_text), label);
+    const float value_size = text_width(theme::large_title_font_size, value) > width - 40.0f
+                                 ? theme::title_font_size
+                                 : theme::large_title_font_size;
+    text(draw, {x + 20, y + 48}, value_size, packed(Color::primary_text), value);
 
     if (fraction) {
-        const float bar_y = y + layout.card_height - 17.0f;
-        const float bar_width = width - 40.0f;
-        const float filled = bar_width * std::clamp(*fraction, 0.0f, 1.0f);
-        draw.AddRectFilled({x + 20, bar_y}, {x + 20 + bar_width, bar_y + 4}, border, 2.0f);
-        draw.AddRectFilled({x + 20, bar_y}, {x + 20 + filled, bar_y + 4}, accent, 2.0f);
+        const float bar_y = std::round(y + layout.card_height - 17.0f);
+        const float bar_left = std::round(x + 20.0f);
+        const float bar_right = std::round(x + width - 20.0f);
+        const float filled = std::round((bar_right - bar_left) * std::clamp(*fraction, 0.0f, 1.0f));
+        draw.AddRectFilled({bar_left, bar_y}, {bar_right, bar_y + 4}, packed(Color::plot_grid));
+        draw.AddRectFilled({bar_left, bar_y}, {bar_left + filled, bar_y + 4}, packed(Color::accent));
     }
 }
 
@@ -162,32 +168,29 @@ void draw_traffic(ImDrawList& draw, const OverviewLayout& layout, const Overview
     const float y = layout.chart_y;
     const float right_edge = x + layout.width;
     const float bottom_edge = y + layout.chart_height;
+    const ImU32 accent = packed(Color::accent);
+    const ImU32 label_color = packed(Color::secondary_text);
 
     panel(draw, {x, y}, {right_edge, bottom_edge});
-    text(draw, {x + 20, y + 19}, layout.compact ? 21.0f : 24.0f, foreground, "Download traffic");
-    text(draw, {x + 20, y + 50}, 15.0f, muted, "Recent samples");
+    text(draw, {x + 20, y + 19}, theme::title_font_size, packed(Color::primary_text), "Download traffic");
+    text(draw, {x + 20, y + 50}, theme::secondary_font_size, label_color, "Recent samples");
     const auto latest = std::format("{:.1f} MiB/s", samples.back());
-    const float latest_y = y + (layout.width < 260.0f ? 48.0f : 23.0f);
-    text(draw, {right_edge - 20 - text_width(19.0f, latest), latest_y}, 19.0f, accent, latest);
+    const float latest_width = text_width(theme::secondary_font_size, latest);
+    const float latest_y =
+        y +
+        (text_width(theme::title_font_size, "Download traffic") + latest_width + 50 > layout.width ? 72 : 23);
+    text(draw, {right_edge - 20 - latest_width, latest_y}, theme::secondary_font_size, accent, latest);
 
-    const float plot_left = x + 50.0f;
-    const float plot_right = right_edge - 24.0f;
-    const float plot_top = y + 97.0f;
-    const float plot_bottom = bottom_edge - 46.0f;
+    const float plot_left = std::round(x + 50.0f);
+    const float plot_right = std::round(right_edge - 24.0f);
+    const float plot_top = std::round(y + 97.0f);
+    const float plot_bottom = std::round(bottom_edge - 46.0f);
     constexpr int intervals = 4;
     const double maximum = *std::max_element(samples.begin(), samples.end());
     const double step = std::max(1.0, std::ceil(maximum / intervals));
     const double peak = intervals * step;
 
-    text(draw, {x + 20, y + 73}, 13.0f, muted, "MiB/s");
-    for (int i = 0; i <= intervals; ++i) {
-        const float line_y = plot_bottom - (plot_bottom - plot_top) * i / intervals;
-        const double tick = i * step;
-        const auto label = tick < 10000.0 ? std::format("{:.0f}", tick) : std::format("{:.0e}", tick);
-        text(draw, {plot_left - 10 - text_width(14.0f, label), line_y - 8}, 14.0f, muted, label);
-        draw.AddLine({plot_left, line_y}, {plot_right, line_y}, border);
-    }
-
+    draw.AddRectFilled({plot_left, plot_top}, {plot_right, plot_bottom}, packed(Color::canvas));
     std::array<ImVec2, std::tuple_size_v<decltype(data.download_mib_per_second)> + 2> points;
     for (std::size_t i = 0; i < samples.size(); ++i) {
         const float fraction = static_cast<float>(samples[i] / peak);
@@ -197,15 +200,24 @@ void draw_traffic(ImDrawList& draw, const OverviewLayout& layout, const Overview
     points[samples.size()] = {plot_right, plot_bottom};
     points[samples.size() + 1] = {plot_left, plot_bottom};
     if (maximum > 0.0) {
-        draw.AddConcavePolyFilled(points.data(), static_cast<int>(points.size()),
-                                  IM_COL32(104, 229, 195, 31));
+        draw.AddConcavePolyFilled(points.data(), static_cast<int>(points.size()), packed(Color::chart_fill));
+    }
+    text(draw, {x + 20, y + 73}, theme::annotation_font_size, label_color, "MiB/s");
+    for (int i = 0; i <= intervals; ++i) {
+        const float line_y = std::round(plot_bottom - (plot_bottom - plot_top) * i / intervals);
+        const double tick = i * step;
+        const auto label = tick < 10000.0 ? std::format("{:.0f}", tick) : std::format("{:.0e}", tick);
+        text(draw, {plot_left - 10 - text_width(theme::annotation_font_size, label), line_y - 8},
+             theme::annotation_font_size, label_color, label);
+        draw.AddLineH(plot_left, plot_right, line_y, packed(Color::plot_grid), theme::border_width);
     }
     draw.AddPolyline(points.data(), static_cast<int>(samples.size()), accent, 2.3f);
     draw.AddCircleFilled(points[samples.size() - 1], 4.0f, accent);
 
     constexpr std::string_view end = "Now";
-    text(draw, {plot_left, plot_bottom + 12}, 14.0f, muted, "Earlier");
-    text(draw, {plot_right - text_width(14.0f, end), plot_bottom + 12}, 14.0f, muted, end);
+    text(draw, {plot_left, plot_bottom + 12}, theme::annotation_font_size, label_color, "Earlier");
+    text(draw, {plot_right - text_width(theme::annotation_font_size, end), plot_bottom + 12},
+         theme::annotation_font_size, label_color, end);
 }
 
 float overview_height(float content_width, bool has_data)
@@ -223,7 +235,8 @@ void draw_overview(ImDrawList& draw, float x, float y, float width, const Overvi
     if (!data) {
         panel(draw, {layout.left, layout.metrics_y},
               {layout.left + layout.width, layout.metrics_y + empty_card_height});
-        text(draw, {layout.left + 20, layout.metrics_y + 30}, 19.0f, foreground,
+        text(draw, {layout.left + 20, layout.metrics_y + 30}, theme::secondary_font_size,
+             packed(loading ? Color::primary_text : Color::warning),
              loading ? sample_loading : sample_unavailable, std::max(1.0f, layout.width - 40.0f));
         return;
     }

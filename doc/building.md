@@ -57,6 +57,30 @@ license notices to its own `site/` directory. Add `--verbose` to a build command
 to show the compile and link commands. When switching SDK versions, add
 `--fresh` to the configure command to reset CMake's cached compiler and toolchain.
 
+## Workspace theme
+
+Wave starts with a near-black canvas, charcoal panes, and lavender text.
+Orange marks the active page, keyboard focus, and highlighted values. Green
+indicates success or an enabled state, blue indicates links and information,
+amber indicates warnings, and coral indicates errors. Panes, tabs, and
+controls use rounded corners. Table rows, plot grids, and progress fills
+keep straight edges. Borders use logical pixels so they scale with the canvas.
+
+Wave embeds Poppins Medium 4.004. Workspace text uses 23 logical pixels from
+1600 CSS pixels and 18 at narrower widths. Secondary text and headings use
+shared sizes. The font notice is available in About and under `site/licenses/`.
+
+The frontend theme defines the shared colors and geometry for ImGui widgets
+and custom drawing. `WAVE_STARTUP_CANVAS` and `WAVE_STARTUP_TEXT` in the
+frontend CMake file also generate the browser shell and a C++ swatch header.
+Rebuilding after a swatch change updates both the loading screen and the
+canvas with no additional asset requests.
+
+Choose **High contrast** in **Menu** to strengthen boundaries, secondary text,
+and keyboard focus. The workspace and its widgets apply the variant together
+on the next frame. Toggle it again to restore the default. Reloading starts
+with the default theme.
+
 ## Frontend tests
 
 The browser smoke tests live in `tests/frontend/`. Use Node.js 22 or later
@@ -125,9 +149,13 @@ clear controls. Menu opens version information, demo sign-in, first-run setup,
 and demo sign-out. Tools opens diagnostics and input helpers. The initial demo
 sign-in uses the username `demo` and password `wave-demo`.
 
-On narrow screens, the Users table provides page controls. Swipe the panel
-to reach Logs. Swiping along a pane's right edge scrolls its contents.
-Drag directly on a topology map to pan it, or tap a node or link to inspect it.
+The Users table switches to a paginated layout when the work pane lacks room
+for the desktop columns and names. Drag a desktop column divider to resize
+it for the current session. The enabled switch follows the latest preview
+state. Successful user changes appear in Logs while the Users table stays
+in place. Swipe the panel to reach Logs. Swiping
+along a pane's right edge scrolls its contents. Drag directly on a topology
+map to pan it, or tap a node or link to inspect it.
 
 `--site-dir` selects a frontend build directory relative to the current
 working directory or by absolute path. It defaults to `build/web-release/site`

@@ -1,5 +1,6 @@
 #include "panel.h"
 #include "preview_session.h"
+#include "theme.h"
 
 #include <GLES3/gl3.h>
 #include <SDL.h>
@@ -28,8 +29,8 @@ EM_JS(void, update_panel_description, (const char* description), {
     Module['updateDescription'](UTF8ToString(description));
 });
 
-EM_JS(void, register_header_controls, (int menu, int tools), {
-    Module['registerHeaderControls'](menu, tools);
+EM_JS(void, register_header_controls, (int menu, int tools, int canvas), {
+    Module['registerHeaderControls'](menu, tools, canvas);
 });
 
 EM_JS(void, register_panel_page, (int page, const char* label), {
@@ -41,6 +42,8 @@ EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools), {
 });
 
 EM_JS(int, browser_panel_focus, (), { return Module['panelFocus'](); });
+
+EM_JS(int, browser_viewport_width, (), { return window.innerWidth; });
 
 EM_JS(void, scroll_to_top, (), { window.scrollTo(0, 0); });
 
@@ -73,6 +76,7 @@ struct Application {
     bool imgui_sdl = false;
     bool imgui_gl = false;
     bool visible = false;
+    bool high_contrast = false;
     int minimum_height = 0;
     wave::PreviewSession session;
     wave::PanelState panel;
@@ -114,7 +118,8 @@ struct Application {
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.FontDefault = io.Fonts->AddFontFromFileTTF("/karla.ttf", 16.0f);
+        io.FontDefault =
+            io.Fonts->AddFontFromFileTTF("/poppins-medium.ttf", wave::theme::workspace_font_size);
         if (!io.FontDefault) {
             SDL_SetError("Could not load the embedded Wave font");
             return false;
@@ -139,9 +144,10 @@ struct Application {
         platform.Platform_OpenInShellFn = [](ImGuiContext*, const char* path) {
             return open_browser_link(path);
         };
-        wave::configure_panel_style();
+        wave::theme::apply(high_contrast);
         install_text_input();
-        register_header_controls(wave::panel_menu_control, wave::panel_tools_control);
+        register_header_controls(wave::panel_menu_control, wave::panel_tools_control,
+                                 wave::panel_canvas_control);
         for (const auto& item : wave::panel_navigation()) {
             register_panel_page(static_cast<int>(item.page), item.label);
         }
@@ -168,7 +174,7 @@ struct Application {
         SDL_Quit();
     }
 
-    bool fit_canvas()
+    bool fit_canvas(int viewport_width)
     {
         double css_width = 0;
         double css_height = 0;
@@ -177,8 +183,7 @@ struct Application {
             return false;
         }
 
-        const int width = static_cast<int>(css_width);
-        const int required_height = static_cast<int>(std::ceil(wave::panel_height(width, panel)));
+        const int required_height = static_cast<int>(std::ceil(wave::panel_height(viewport_width, panel)));
         if (minimum_height != required_height) {
             minimum_height = required_height;
             set_panel_height(minimum_height);
@@ -203,7 +208,9 @@ struct Application {
         session.update();
         const auto* data = session.overview();
         const bool loading = session.status() == wave::PreviewStatus::loading;
-        if (!fit_canvas()) {
+        // The responsive layout uses the viewport width even when a document scrollbar is present.
+        const int viewport_width = browser_viewport_width();
+        if (!fit_canvas(viewport_width)) {
             return;
         }
 
@@ -212,12 +219,17 @@ struct Application {
             ImGui_ImplSDL2_ProcessEvent(&event);
         }
 
+        if (panel.high_contrast != high_contrast) {
+            high_contrast = panel.high_contrast;
+            wave::theme::apply(high_contrast);
+        }
+        wave::theme::apply_text_scale(viewport_width);
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
         const auto previous_page = panel.page;
         const auto previous_entry = panel.entry.page;
-        wave::render_panel(panel, session, data, loading, browser_panel_focus());
+        wave::render_panel(panel, session, data, loading, viewport_width, browser_panel_focus());
         if (panel.page != previous_page || panel.entry.page != previous_entry) {
             scroll_to_top();
         }
@@ -227,6 +239,8 @@ struct Application {
         int drawable_height = 0;
         SDL_GL_GetDrawableSize(window, &drawable_width, &drawable_height);
         glViewport(0, 0, drawable_width, drawable_height);
+        const auto clear = wave::theme::rgba(wave::theme::Color::canvas);
+        glClearColor(clear.x, clear.y, clear.z, clear.w);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);

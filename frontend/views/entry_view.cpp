@@ -1,14 +1,15 @@
 #include "entry_view.h"
 
-#include "preview_session.h"
-
-#include <imgui.h>
+#include "view_helpers.h"
 
 #include <cstdio>
 #include <string_view>
 
 namespace wave {
 namespace {
+
+using theme::Color;
+using theme::rgba;
 
 bool blank(std::string_view value)
 {
@@ -69,7 +70,9 @@ void credentials(EntryViewState& state, bool setup)
 void render_setup(EntryViewState& state, PreviewSession& session)
 {
     ImGui::TextDisabled("Step %d of 3", state.step + 1);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, theme::square_radius);
     ImGui::ProgressBar((state.step + 1.0f) / 3.0f, ImVec2(-1, 4), "");
+    ImGui::PopStyleVar();
     ImGui::Spacing();
     switch (state.step) {
     case 0:
@@ -127,13 +130,14 @@ void open_entry(EntryViewState& state, EntryPage page, PreviewSession& session)
 void render_entry(EntryViewState& state, PreviewSession& session)
 {
     receive_result(state, session);
-    ImGui::PushFont(nullptr, 28.0f);
+    ImGui::PushFont(nullptr, theme::title_font_size);
     ImGui::TextUnformatted(state.page == EntryPage::setup ? "First-run setup" : "Demo sign-in");
     ImGui::PopFont();
     ImGui::Separator();
 
     if (state.complete) {
-        ImGui::TextUnformatted(state.page == EntryPage::setup ? "Setup complete" : "Sign-in complete");
+        ImGui::TextColored(rgba(Color::success), "%s",
+                           state.page == EntryPage::setup ? "Setup complete" : "Sign-in complete");
         ImGui::TextWrapped("%s", state.message.c_str());
         if (ImGui::Button("Open workspace")) {
             open_entry(state, EntryPage::workspace, session);
@@ -155,7 +159,7 @@ void render_entry(EntryViewState& state, PreviewSession& session)
     ImGui::EndDisabled();
 
     if (!state.message.empty()) {
-        ImGui::TextWrapped("%s", state.message.c_str());
+        view::wrapped(state.message, state.request_id ? Color::info : Color::error);
     }
     if (session.status() == PreviewStatus::unavailable && ImGui::Button("Reconnect")) {
         session.start();

@@ -2,8 +2,12 @@
 
 #include "browser_ui.h"
 #include "preview_session.h"
+#include "view_helpers.h"
+
+#include <imgui_internal.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <climits>
 #include <cmath>
 #include <format>
@@ -17,10 +21,11 @@ namespace {
 using Json = nlohmann::json;
 using Dialog = UsersViewState::Dialog;
 using Column = UsersViewState::Column;
+using theme::Color;
+using view::button_width;
 
-constexpr ImVec4 mint{0.41f, 0.90f, 0.77f, 1.0f};
-constexpr ImVec4 amber{0.97f, 0.75f, 0.47f, 1.0f};
 constexpr const char* dialog_id = "###user-dialog";
+constexpr const char* unavailable = "Preview connection unavailable. Try again after reconnecting.";
 
 template <std::size_t Size> void copy_field(std::array<char, Size>& destination, std::string_view value)
 {
@@ -99,7 +104,8 @@ bool send(UsersViewState& state, PreviewSession& session, Json request)
 {
     state.local_feedback.clear();
     if (!session.send(std::move(request))) {
-        state.local_feedback = "Preview connection unavailable. Try again after reconnecting.";
+        state.local_feedback = unavailable;
+        state.local_feedback_color = Color::error;
         return false;
     }
     return true;
@@ -109,8 +115,8 @@ void submit(UsersViewState& state, PreviewSession& session, const char* action, 
 {
     request["action"] = action;
     state.request_id = session.submit(std::move(request));
-    state.local_feedback =
-        state.request_id ? "" : "Preview connection unavailable. Try again after reconnecting.";
+    state.local_feedback = state.request_id ? "" : unavailable;
+    state.local_feedback_color = Color::error;
 }
 
 void row_options(UsersViewState& state, PreviewSession& session, const UserRecord& user)
@@ -138,6 +144,7 @@ void row_options(UsersViewState& state, PreviewSession& session, const UserRecor
         if (ImGui::MenuItem("Copy demo invite")) {
             ImGui::SetClipboardText(std::format("wave-preview://workspace/bot/invite/{}", user.id).c_str());
             state.local_feedback = "Demo invite copied.";
+            state.local_feedback_color = Color::success;
         }
         if (ImGui::MenuItem("Send configuration")) {
             open_user_dialog(state, session, Dialog::configuration, user);
@@ -154,18 +161,96 @@ void row_options(UsersViewState& state, PreviewSession& session, const UserRecor
     ImGui::EndPopup();
 }
 
+struct SwitchSize {
+    float width;
+    float height;
+    ImVec2 hit;
+};
+
+SwitchSize switch_size(bool compact)
+{
+    return compact ? SwitchSize{38, 22, {44, 44}}
+                   : SwitchSize{50, 28, {54, std::max(30.0f, ImGui::GetFrameHeight())}};
+}
+
+void update_switch_requests(UsersViewState& state, PreviewSession& session,
+                            const std::vector<UserRecord>& users)
+{
+    for (auto it = state.switches.begin(); it != state.switches.end();) {
+        auto& [user_id, attempt] = *it;
+        if (const auto reply = session.take_reply(attempt.request_id); reply && !reply->ok()) {
+            switch (reply->status) {
+            case PreviewReply::Status::timed_out:
+                attempt.error = "The preview did not confirm the change. Try again.";
+                break;
+            case PreviewReply::Status::disconnected:
+                attempt.error = unavailable;
+                break;
+            default:
+                attempt.error = reply->message;
+                break;
+            }
+        }
+        if (attempt.request_id) {
+            ++it;
+        } else if (attempt.error.empty()) {
+            it = state.switches.erase(it);
+        } else if (std::ranges::find(users, user_id, &UserRecord::id) == users.end()) {
+            state.local_feedback = std::move(attempt.error);
+            state.local_feedback_color = Color::error;
+            it = state.switches.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 void enabled_control(UsersViewState& state, PreviewSession& session, const UserRecord& user, bool compact)
 {
-    bool enabled = user.enabled;
-    ImGui::PushStyleColor(ImGuiCol_Text, enabled ? mint : amber);
-    if (ImGui::Checkbox(compact ? "##enabled" : (enabled ? "Enabled##enabled" : "Disabled##enabled"),
-                        &enabled)) {
-        send(state, session, {{"action", "set_user_enabled"}, {"id", user.id}, {"enabled", enabled}});
+    const auto size = switch_size(compact);
+    const auto it = state.switches.find(user.id);
+    const bool pending = it != state.switches.end() && it->second.request_id.has_value();
+    const char* error = it == state.switches.end() ? nullptr : it->second.error.c_str();
+    ImGui::BeginDisabled(pending);
+    const bool toggled = ImGui::InvisibleButton("##enabled", size.hit, ImGuiButtonFlags_EnableNav);
+    ImGui::EndDisabled();
+
+    if (ImGui::IsItemVisible()) {
+        const auto origin = ImGui::GetItemRectMin();
+        const ImVec2 min{origin.x + (size.hit.x - size.width) / 2, origin.y + (size.hit.y - size.height) / 2};
+        const ImVec2 max{min.x + size.width, min.y + size.height};
+        const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+        const bool failed = error && *error;
+        const auto track = user.enabled ? Color::accent : (hovered ? Color::hover : Color::raised);
+        const auto border = failed ? Color::error : Color::control_border;
+        const auto thumb = user.enabled ? Color::canvas : Color::primary_text;
+        const float radius = size.height / 2;
+        auto* draw = ImGui::GetWindowDrawList();
+        draw->AddRectFilled(min, max, theme::packed(track), radius);
+        if (!user.enabled || failed) {
+            draw->AddRect(min, max, theme::packed(border), radius, theme::border_width);
+        }
+        draw->AddCircleFilled({user.enabled ? max.x - radius : min.x + radius, min.y + radius}, radius - 3,
+                              theme::packed(thumb));
+        if (hovered && !pending) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled) ||
+            (ImGui::GetIO().NavVisible && ImGui::IsItemFocused())) {
+            const char* label = user.enabled ? "Enabled" : "Disabled";
+            if (failed) {
+                ImGui::SetTooltip("%s\n%s", label, error);
+            } else {
+                ImGui::SetTooltip("%s", label);
+            }
+        }
     }
-    if (compact && ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("%s", enabled ? "Enabled" : "Disabled");
+    if (toggled) {
+        auto& attempt = state.switches[user.id];
+        attempt.request_id = session.submit(
+            {{"action", "set_user_enabled"}, {"id", user.id}, {"enabled", !user.enabled}}, 5000);
+        attempt.error = attempt.request_id ? "" : unavailable;
     }
-    ImGui::PopStyleColor();
 }
 
 template <typename Value> int comparison(const Value& left, const Value& right)
@@ -212,28 +297,109 @@ std::vector<const UserRecord*> sorted_users(const std::vector<UserRecord>& users
     return order;
 }
 
-void desktop_users(UsersViewState& state, PreviewSession& session, const std::vector<UserRecord>& users)
+struct DesktopColumn {
+    const char* label;
+    Column id;
+    const char* sample;
+    int width_weight;
+    ImGuiTableColumnFlags flags = 0;
+};
+
+constexpr std::array desktop_columns{
+    DesktopColumn{"ID", Column::id, "9999", 0, ImGuiTableColumnFlags_DefaultSort},
+    DesktopColumn{"Name", Column::name, "Avery Brooks", 3},
+    DesktopColumn{"State", Column::enabled, "", 0},
+    DesktopColumn{"Actions", Column::actions, "", 0, ImGuiTableColumnFlags_NoSort},
+    DesktopColumn{"Upload / s", Column::upload_rate, "100.00 MiB", 1},
+    DesktopColumn{"Download / s", Column::download_rate, "100.00 MiB", 1},
+    DesktopColumn{"Total up", Column::upload_total, "999.9 GiB", 1},
+    DesktopColumn{"Total down", Column::download_total, "999.9 GiB", 1},
+    DesktopColumn{"Time left", Column::remaining, "3650d 23h", 1},
+};
+
+struct DesktopTableWidths {
+    std::array<float, desktop_columns.size()> minimum{};
+    std::array<float, desktop_columns.size()> initial{};
+    float minimum_table;
+};
+
+DesktopTableWidths measure_desktop_table(float available_width)
+{
+    DesktopTableWidths widths;
+    const auto& style = ImGui::GetStyle();
+    // ImGui adds a logical pixel at each outer edge and between columns.
+    const float borders = desktop_columns.size() + 1;
+    widths.minimum_table = style.ScrollbarSize + 2 * style.CellPadding.x * desktop_columns.size() + borders;
+    const float sort_arrow_width = std::floor(ImGui::GetFontSize() * 0.65f + style.FramePadding.x);
+    int total_weight = 0;
+    for (std::size_t i = 0; i < desktop_columns.size(); ++i) {
+        const auto& column = desktop_columns[i];
+        const float label_width = ImGui::CalcTextSize(column.label).x;
+        const float header_width =
+            label_width + ((column.flags & ImGuiTableColumnFlags_NoSort) ? 0 : sort_arrow_width);
+        float content = ImGui::CalcTextSize(column.sample).x;
+        if (column.id == Column::name) {
+            content = std::max(content + style.CellPadding.x, ImGui::GetFontSize() * 7);
+        } else if (column.id == Column::enabled) {
+            content = switch_size(false).hit.x;
+        } else if (column.id == Column::actions) {
+            content = button_width("Options");
+        }
+        widths.minimum[i] = std::ceil(std::max(header_width, content));
+        widths.minimum_table += widths.minimum[i];
+        total_weight += column.width_weight;
+    }
+    const float extra = std::max(0.0f, std::floor(available_width - widths.minimum_table));
+    float allocated = 0;
+    for (std::size_t i = 0; i < desktop_columns.size(); ++i) {
+        const float growth = std::floor(extra * desktop_columns[i].width_weight / total_weight);
+        widths.initial[i] = widths.minimum[i] + growth;
+        allocated += growth;
+    }
+    widths.initial[static_cast<std::size_t>(Column::name)] += extra - allocated;
+    return widths;
+}
+
+void setup_desktop_columns(UsersViewState& state, const DesktopTableWidths& widths)
+{
+    auto& table = *ImGui::GetCurrentTable();
+    const float font_scale = table.RefScale > 0 ? ImGui::GetFontSize() / table.RefScale : 1;
+    // During layout, ImGui applies the queued drag before scaling the column widths.
+    if (table.ResizedColumn != -1 && table.ResizedColumnNextWidth != FLT_MAX) {
+        const auto column = static_cast<std::size_t>(table.ResizedColumn);
+        const float minimum = widths.minimum[column] / font_scale;
+        table.ResizedColumnNextWidth = std::max(table.ResizedColumnNextWidth, minimum);
+    }
+
+    for (std::size_t i = 0; i < desktop_columns.size(); ++i) {
+        const auto& column = desktop_columns[i];
+        ImGui::TableSetupColumn(column.label, column.flags | ImGuiTableColumnFlags_WidthFixed,
+                                widths.initial[i], static_cast<ImGuiID>(column.id));
+
+        float& request = table.Columns[i].WidthRequest;
+        if (!table.IsInitializing && request > 0) {
+            if (std::abs(request - state.desktop_default_widths[i]) < 0.5f) {
+                request = widths.initial[i] / font_scale;
+            } else {
+                request = std::max(request, widths.minimum[i] / font_scale);
+            }
+        }
+        state.desktop_default_widths[i] = widths.initial[i];
+    }
+}
+
+void desktop_users(UsersViewState& state, PreviewSession& session, const std::vector<UserRecord>& users,
+                   const DesktopTableWidths& widths)
 {
     constexpr auto flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
                            ImGuiTableFlags_BordersOuter | ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY |
-                           ImGuiTableFlags_SizingStretchProp;
-    if (!ImGui::BeginTable("Users table", 9, flags, {0, 0})) {
+                           ImGuiTableFlags_ScrollX | ImGuiTableFlags_Resizable |
+                           ImGuiTableFlags_SizingFixedFit;
+    if (!ImGui::BeginTable("Users table", desktop_columns.size(), flags, {0, 0})) {
         return;
     }
 
-    constexpr auto fixed = ImGuiTableColumnFlags_WidthFixed;
-    ImGui::TableSetupColumn("ID", fixed | ImGuiTableColumnFlags_DefaultSort, 32,
-                            static_cast<ImGuiID>(Column::id));
-    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 1,
-                            static_cast<ImGuiID>(Column::name));
-    ImGui::TableSetupColumn("State", fixed, 91, static_cast<ImGuiID>(Column::enabled));
-    ImGui::TableSetupColumn("Actions", fixed | ImGuiTableColumnFlags_NoSort, 67,
-                            static_cast<ImGuiID>(Column::actions));
-    ImGui::TableSetupColumn("Upload / s", fixed, 87, static_cast<ImGuiID>(Column::upload_rate));
-    ImGui::TableSetupColumn("Download / s", fixed, 95, static_cast<ImGuiID>(Column::download_rate));
-    ImGui::TableSetupColumn("Total up", fixed, 77, static_cast<ImGuiID>(Column::upload_total));
-    ImGui::TableSetupColumn("Total down", fixed, 80, static_cast<ImGuiID>(Column::download_total));
-    ImGui::TableSetupColumn("Time left", fixed, 81, static_cast<ImGuiID>(Column::remaining));
+    setup_desktop_columns(state, widths);
     ImGui::TableSetupScrollFreeze(0, 1);
     ImGui::TableHeadersRow();
 
@@ -255,7 +421,8 @@ void desktop_users(UsersViewState& state, PreviewSession& session, const std::ve
         for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
             const auto& user = *order[i];
             ImGui::PushID(user.id);
-            ImGui::TableNextRow(ImGuiTableRowFlags_None, 30);
+            ImGui::TableNextRow(ImGuiTableRowFlags_None,
+                                switch_size(false).hit.y + 2 * ImGui::GetStyle().CellPadding.y);
             if (ImGui::TableNextColumn()) {
                 ImGui::TextDisabled("%d", user.id);
             }
@@ -307,7 +474,12 @@ void compact_users(UsersViewState& state, PreviewSession& session, const std::ve
                                   Column::upload_total,
                                   Column::download_total,
                                   Column::remaining};
-    ImGui::SetNextItemWidth(146);
+    const auto& style = ImGui::GetStyle();
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float sort_width =
+        ImGui::CalcTextSize("Total download").x + ImGui::GetFrameHeight() + 2 * style.FramePadding.x;
+    ImGui::SetNextItemWidth(
+        std::max(1.0f, std::min(sort_width, width - button_width("Descending") - style.ItemSpacing.x)));
     if (ImGui::Combo("##user-sort", &state.compact_sort, choices, IM_ARRAYSIZE(choices))) {
         state.compact_page = 0;
     }
@@ -319,7 +491,15 @@ void compact_users(UsersViewState& state, PreviewSession& session, const std::ve
     }
 
     const auto order = sorted_users(users, state);
-    const float row_height = 4 * ImGui::GetTextLineHeightWithSpacing() + 2 * ImGui::GetStyle().CellPadding.y;
+    const float traffic_font = width < 450 ? theme::annotation_font_size : theme::secondary_font_size;
+    ImGui::PushFont(nullptr, traffic_font);
+    const float traffic_text_width = ImGui::CalcTextSize("Down 10.00 MiB/s").x;
+    const float traffic_width = std::min(traffic_text_width + 4, std::floor(width * 0.4f));
+    const float traffic_height =
+        (traffic_width >= traffic_text_width ? 4 : 5) * ImGui::GetTextLineHeightWithSpacing();
+    ImGui::PopFont();
+    const float row_height =
+        std::max(traffic_height, 4 * ImGui::GetTextLineHeightWithSpacing()) + 2 * style.CellPadding.y;
     const float table_height = ImGui::GetContentRegionAvail().y - 2 * ImGui::GetFrameHeightWithSpacing();
     const int page_size = std::clamp(static_cast<int>(table_height / row_height), 2, 5);
     const int final_page = std::max(0, (static_cast<int>(order.size()) - 1) / page_size);
@@ -354,8 +534,9 @@ void compact_users(UsersViewState& state, PreviewSession& session, const std::ve
     }
 
     ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 1);
-    ImGui::TableSetupColumn("Traffic", ImGuiTableColumnFlags_WidthFixed, 110);
-    ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 68);
+    ImGui::TableSetupColumn("Traffic", ImGuiTableColumnFlags_WidthFixed, traffic_width);
+    ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed,
+                            std::max(button_width("Options"), ImGui::CalcTextSize("Actions").x));
     ImGui::TableHeadersRow();
     const int first = state.compact_page * page_size;
     const int last = std::min(first + page_size, static_cast<int>(order.size()));
@@ -369,15 +550,17 @@ void compact_users(UsersViewState& state, PreviewSession& session, const std::ve
         ImGui::TextWrapped("%s", remaining(user.remaining_minutes).c_str());
 
         ImGui::TableNextColumn();
-        ImGui::Text("Up %.2f MiB/s", user.upload_rate);
-        ImGui::Text("Down %.2f MiB/s", user.download_rate);
-        ImGui::TextDisabled("Up %.1f GiB", user.upload_total);
-        ImGui::TextDisabled("Down %.1f GiB", user.download_total);
+        ImGui::PushFont(nullptr, traffic_font);
+        ImGui::TextWrapped("Up %.2f MiB/s", user.upload_rate);
+        ImGui::TextWrapped("Down %.2f MiB/s", user.download_rate);
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::rgba(Color::secondary_text));
+        ImGui::TextWrapped("Up %.1f GiB", user.upload_total);
+        ImGui::TextWrapped("Down %.1f GiB", user.download_total);
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
 
         ImGui::TableNextColumn();
         enabled_control(state, session, user, true);
-        ImGui::SameLine(0, 3);
-        ImGui::TextColored(user.enabled ? mint : amber, "%s", user.enabled ? "On" : "Off");
         row_options(state, session, user);
         ImGui::PopID();
     }
@@ -395,7 +578,8 @@ void user_form(UserDraft& draft, bool initial_focus)
 
     if (ImGui::CollapsingHeader("Connection and limits", ImGuiTreeNodeFlags_DefaultOpen)) {
         constexpr const char* protocols[] = {"TCP", "TCP + WebSocket"};
-        ImGui::SetNextItemWidth(145);
+        const float protocol_width = button_width(protocols[1]) + ImGui::GetFrameHeight();
+        ImGui::SetNextItemWidth(protocol_width);
         ImGui::Combo("Protocol", &draft.protocol, protocols, IM_ARRAYSIZE(protocols));
         ImGui::TextWrapped("Set traffic, rate, and IP limits to 0 for unlimited.");
         ImGui::SetNextItemWidth(86);
@@ -419,11 +603,13 @@ void submit_user(UsersViewState& state, PreviewSession& session, bool editing)
     const auto& draft = state.draft;
     if (std::string_view(draft.name.data()).find_first_not_of(" \r\n\t") == std::string_view::npos) {
         state.local_feedback = "Enter a user name.";
+        state.local_feedback_color = Color::error;
         return;
     }
     if (draft.remaining_minutes < -1 ||
         std::min({draft.upload_limit, draft.download_limit, draft.traffic_limit, draft.ip_limit}) < 0) {
         state.local_feedback = "Enter nonnegative limits or -1 for unlimited time.";
+        state.local_feedback_color = Color::error;
         return;
     }
 
@@ -510,6 +696,7 @@ void configuration_dialog(UsersViewState& state)
     if (ImGui::Button("Copy configuration")) {
         ImGui::SetClipboardText(state.configuration.c_str());
         state.local_feedback = "Preview configuration copied.";
+        state.local_feedback_color = Color::success;
     }
     ImGui::SameLine();
     if (ImGui::Button("Download QR")) {
@@ -559,7 +746,7 @@ void render_dialog(UsersViewState& state, PreviewSession& session)
     const auto name = std::format("{}{}", dialog_title(dialog), dialog_id);
     fit_preview_dialog(460);
     bool open = true;
-    if (!ImGui::BeginPopupModal(name.c_str(), &open, ImGuiWindowFlags_NoSavedSettings)) {
+    if (!theme::begin_modal(name.c_str(), &open, ImGuiWindowFlags_NoSavedSettings)) {
         if (!ImGui::IsPopupOpen(dialog_id)) {
             state.dialog.reset();
             session.abandon(state.request_id);
@@ -576,6 +763,7 @@ void render_dialog(UsersViewState& state, PreviewSession& session)
         state.local_feedback = reply->status == PreviewReply::Status::disconnected
                                    ? "Preview connection unavailable."
                                    : reply->message;
+        state.local_feedback_color = Color::error;
     }
 
     const bool pending = state.request_id.has_value();
@@ -621,6 +809,7 @@ void render_dialog(UsersViewState& state, PreviewSession& session)
             if (std::string_view(state.message.data()).find_first_not_of(" \r\n\t") ==
                 std::string_view::npos) {
                 state.local_feedback = "Enter a message to send.";
+                state.local_feedback_color = Color::error;
             } else {
                 Json request = {{"kind", dialog == Dialog::broadcast ? "broadcast" : "message"},
                                 {"message", state.message.data()}};
@@ -655,34 +844,38 @@ void render_dialog(UsersViewState& state, PreviewSession& session)
     if (ImGui::Button(dialog == Dialog::share || dialog == Dialog::notes ? "Close" : "Cancel") || !open) {
         close_dialog(state, session);
     } else if (pending) {
-        ImGui::TextDisabled("Applying to preview…");
+        view::wrapped("Applying to preview…", Color::info);
     } else if (!state.local_feedback.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, amber);
-        ImGui::TextWrapped("%s", state.local_feedback.c_str());
-        ImGui::PopStyleColor();
+        view::wrapped(state.local_feedback, state.local_feedback_color);
     }
     ImGui::EndPopup();
 }
 
 } // namespace
 
-void render_users(UsersViewState& state, PreviewSession& session, bool narrow)
+void render_users(UsersViewState& state, PreviewSession& session)
 {
     ImGui::PushID("users");
     ImGui::TextUnformatted("Users");
     const bool ready = session.status() == PreviewStatus::ready;
     const auto& users = session.users();
     const float width = ImGui::GetContentRegionAvail().x;
-    const bool compact = narrow || width < 745.0f;
+    const auto desktop_widths = measure_desktop_table(width);
+    const bool compact = width < desktop_widths.minimum_table;
+    update_switch_requests(state, session, users.rows);
     ImGui::BeginDisabled(!ready);
     if (ImGui::Button("Create user")) {
         open_dialog(state, session, Dialog::create);
     }
     ImGui::SameLine();
-    if (ImGui::Button(users.live ? "Live data" : "Paused")) {
+    const float live_width = std::max(button_width("Live data"), button_width("Paused"));
+    const char* live_label = users.live ? "Live data" : "Paused";
+    if (ImGui::Button(live_label, {live_width, 0})) {
         send(state, session, {{"action", "set_users_live"}, {"live", !users.live}});
     }
-    if (width >= 285.0f) {
+    const auto& style = ImGui::GetStyle();
+    if (width >=
+        button_width("Create user") + live_width + button_width("Bot actions") + 2 * style.ItemSpacing.x) {
         ImGui::SameLine();
     }
     if (ImGui::Button("Bot actions")) {
@@ -702,7 +895,8 @@ void render_users(UsersViewState& state, PreviewSession& session, bool narrow)
     if (!compact) {
         ImGui::SameLine();
     }
-    ImGui::SetNextItemWidth(compact ? -64.0f : 190.0f);
+    const float search_label_width = ImGui::CalcTextSize("Search").x + style.ItemInnerSpacing.x;
+    ImGui::SetNextItemWidth(compact ? -search_label_width : ImGui::GetFontSize() * 11);
     if (state.search.DrawWithHint("Search##users", "Name")) {
         state.compact_page = 0;
     }
@@ -711,23 +905,26 @@ void render_users(UsersViewState& state, PreviewSession& session, bool narrow)
         ImGui::TextDisabled("%s", session.status() == PreviewStatus::loading ? "Loading preview users…"
                                                                              : "Preview users unavailable.");
     } else {
-        const auto action = session.feedback_action();
-        const auto feedback = session.feedback();
         if (!state.dialog && !state.local_feedback.empty()) {
-            ImGui::TextWrapped("%s", state.local_feedback.c_str());
-        } else if (!feedback.empty() && (action.ends_with("_user") || action.starts_with("set_user") ||
-                                         action.starts_with("user_") || action == "reset_user_traffic")) {
-            ImGui::PushStyleColor(ImGuiCol_Text, session.feedback_ok() ? mint : amber);
-            ImGui::TextWrapped("%.*s", static_cast<int>(feedback.size()), feedback.data());
-            ImGui::PopStyleColor();
+            view::wrapped(state.local_feedback, state.local_feedback_color);
+        } else if (const auto* feedback = session.feedback_for("set_users_live");
+                   feedback && !feedback->ok && !feedback->message.empty()) {
+            view::wrapped(feedback->message, Color::error);
         }
 
         if (compact) {
             compact_users(state, session, users.rows);
         } else {
-            desktop_users(state, session, users.rows);
+            desktop_users(state, session, users.rows, desktop_widths);
         }
     }
+    ImGui::PopID();
+    render_users_dialog(state, session);
+}
+
+void render_users_dialog(UsersViewState& state, PreviewSession& session)
+{
+    ImGui::PushID("users");
     render_dialog(state, session);
     ImGui::PopID();
 }

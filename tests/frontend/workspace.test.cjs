@@ -46,7 +46,10 @@ before(async () => {
     await once(server, 'listening');
     url = `http://127.0.0.1:${server.address().port}/`;
     previewUrl = `ws://127.0.0.1:${server.address().port}/ws/preview`;
-    browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader', '--disable-smooth-scrolling'] });
+    browser = await chromium.launch({
+        args: ['--enable-unsafe-swiftshader', '--disable-smooth-scrolling'],
+        ignoreDefaultArgs: ['--hide-scrollbars'],
+    });
 });
 
 after(async () => {
@@ -145,6 +148,19 @@ async function settleCanvas(page) {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
+async function screenshotPixels(page, clip) {
+    const screenshot = await page.screenshot({ clip, scale: 'device' });
+    return page.evaluate(async encoded => {
+        const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
+        const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const context = canvas.getContext('2d');
+        context.drawImage(bitmap, 0, 0);
+        const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
+        return { width: canvas.width, height: canvas.height, pixels: Array.from(data) };
+    }, screenshot.toString('base64'));
+}
+
 async function canvasClick(page, x, y) {
     await page.mouse.click(x, y, { delay: 40 });
     await settleCanvas(page);
@@ -155,7 +171,8 @@ async function replaceText(page, x, y, value) {
     await page.locator('#wave-text-input').waitFor({ state: 'visible' });
     await page.keyboard.press('Control+a');
     await settleCanvas(page);
-    await page.keyboard.insertText(value);
+    if (value) await page.keyboard.insertText(value);
+    else await page.keyboard.press('Backspace');
     await settleCanvas(page);
 }
 
@@ -177,6 +194,40 @@ async function openSetup(page) {
     await page.getByRole('img', { name: /Step 3 of 3/ }).waitFor();
 }
 
+for (const scale of [1, 2]) {
+    test(`draws a sharp header divider at ${scale}× device scale`, async () => {
+        const page = await browser.newPage({ viewport: desktop, deviceScaleFactor: scale });
+        await mockPreview(page);
+        try {
+            await page.goto(url);
+            await waitForCanvas(page, desktop, false);
+            await settleCanvas(page);
+
+            // A strip between the header controls and the status text spans both header edges.
+            const clip = { x: 900, y: 0, width: 2, height: 50 };
+            const { width, height, pixels } = await screenshotPixels(page, clip);
+            assert.equal(width, clip.width * scale);
+            assert.equal(height, clip.height * scale);
+            const expectedRows = [
+                [0, [243, 129, 74, 255]], [1, [243, 129, 74, 255]],
+                [2, [8, 7, 9, 255]], [46, [8, 7, 9, 255]],
+                [47, [61, 58, 67, 255]],
+                [48, [8, 12, 16, 255]], [49, [8, 12, 16, 255]],
+            ];
+            for (const [y, color] of expectedRows) {
+                const expected = Array.from({ length: width }, () => color).flat();
+                for (let offset = 0; offset < scale; offset++) {
+                    const start = (y * scale + offset) * width * 4;
+                    assert.deepEqual(pixels.slice(start, start + width * 4), expected,
+                        `Expected a solid color at logical row ${y}, device row offset ${offset}`);
+                }
+            }
+        } finally {
+            await page.close();
+        }
+    });
+}
+
 test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async () => {
     const page = await browser.newPage({ viewport: desktop, deviceScaleFactor: 2 });
     let releaseSnapshot;
@@ -190,6 +241,8 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
     try {
         assert.equal((await page.goto(url)).status(), 200);
         await waitForCanvas(page, desktop, false);
+        const canvas = page.locator('#canvas');
+        assert.equal(await canvas.evaluate(element => element.getBoundingClientRect().right), desktop.width);
         await page.getByRole('img', { name: /Wave Users.*Loading sample data/ }).waitFor();
         releaseSnapshot();
         await page.getByRole('img', { name: /Wave Users.*WaterWall disconnected.*2 users.*Preview fixture is ready/ }).waitFor();
@@ -205,6 +258,17 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
         await assertPage('Users');
         assert.deepEqual(await page.getByRole('navigation', { name: 'Wave' }).getByRole('link').allTextContents(), pages);
 
+        const headerEdge = { x: 900, y: 0, width: 2, height: 3 };
+        const brandTile = { x: 10, y: 8, width: 32, height: 32 };
+        const unfocusedEdge = await page.screenshot({ clip: headerEdge });
+        const unfocusedBrand = await page.screenshot({ clip: brandTile });
+        await canvasClick(page, 400, 30);
+        assert.equal(await page.evaluate(() => document.activeElement.id), 'canvas');
+        assert.ok((await page.screenshot({ clip: headerEdge })).equals(unfocusedEdge),
+            'Pointer focus leaves the canvas edge unchanged.');
+        assert.ok((await page.screenshot({ clip: brandTile })).equals(unfocusedBrand),
+            'Pointer focus leaves the brand tile unchanged.');
+
         const menu = page.getByRole('button', { name: 'Menu' });
         const tools = page.getByRole('button', { name: 'Tools' });
         for (const [button, other] of [[menu, tools], [tools, menu]]) {
@@ -212,8 +276,9 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
             await page.keyboard.press('Enter');
             await page.locator(`#${await button.getAttribute('id')}[aria-expanded="true"]`).waitFor();
             assert.equal(await other.getAttribute('aria-expanded'), 'false');
-            await canvasClick(page, 400, 30);
-            assert.equal(await button.getAttribute('aria-expanded'), 'false');
+            await button.focus();
+            await page.keyboard.press('Enter');
+            await page.locator(`#${await button.getAttribute('id')}[aria-expanded="false"]`).waitFor();
         }
 
         const firstNavRow = { x: 11, y: 61, width: 162, height: 34 };
@@ -231,6 +296,13 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
             await assertPage(name);
         }
         await page.getByRole('img', { name: /CPU utilization 63 percent.*Memory 4\.5 of 16\.0 GiB.*Latest 9\.6 MiB/ }).waitFor();
+        await page.keyboard.press('Tab');
+        assert.equal(await page.evaluate(() => document.activeElement.id), 'canvas');
+        await settleCanvas(page);
+        assert.ok((await page.screenshot({ clip: headerEdge })).equals(unfocusedEdge),
+            'Keyboard focus leaves the canvas edge unchanged.');
+        assert.ok(!(await page.screenshot({ clip: brandTile })).equals(unfocusedBrand),
+            'Keyboard focus is visible on the brand tile.');
 
         for (const [index, name] of pages.entries()) {
             await canvasClick(page, 65, 76 + 34 * index);
@@ -250,9 +322,13 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
         await page.mouse.wheel(0, 1500);
         await page.waitForFunction(() => Math.ceil(scrollY + innerHeight) >= document.body.scrollHeight);
 
-        await page.setViewportSize(desktop);
-        await waitForCanvas(page, desktop, false);
+        const breakpoint = { width: 760, height: desktop.height };
+        await page.setViewportSize(breakpoint);
+        await waitForCanvas(page, breakpoint, false);
+        assert.equal(await canvas.evaluate(element => element.getBoundingClientRect().right), breakpoint.width);
         assert.equal(await page.evaluate(() => scrollY), 0);
+        await canvasClick(page, 65, 76);
+        await assertPage('Server Status');
         assert.deepEqual(errors, []);
         assert.deepEqual(requests, new Set([url, `${url}index.js`, `${url}index.wasm`]));
     } finally {
@@ -261,7 +337,7 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
     }
 });
 
-test('pastes into user search on HTTP and mutates the matching row and Logs', async () => {
+test('pastes into user search and toggles the matching switch without shifting the table header', async () => {
     const page = await browser.newPage({ viewport: desktop });
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: url });
     const actions = [];
@@ -270,7 +346,7 @@ test('pastes into user search on HTTP and mutates the matching row and Logs', as
         const changed = data.users.find(row => row.id === action.id);
         assert.ok(changed && action.action === 'set_user_enabled');
         changed.enabled = action.enabled;
-        const message = `Disabled ${changed.name} in the preview.`;
+        const message = `${action.enabled ? 'Enabled' : 'Disabled'} ${changed.name} in the preview.`;
         data.logs.push({ ts: '09:41:13', level: 'success', message });
         reply({ feedback: message });
     } });
@@ -278,15 +354,125 @@ test('pastes into user search on HTTP and mutates the matching row and Logs', as
     try {
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
-        await page.mouse.click(540, 104);
+        await page.mouse.click(610, 104);
         await page.locator('#wave-text-input').waitFor({ state: 'visible' });
         await page.keyboard.type('unmatched');
         await page.keyboard.press('Control+a');
         await page.evaluate(() => navigator.clipboard.writeText('Bella'));
         await page.keyboard.press('Control+v');
-        await page.mouse.click(569, 165);
+        await settleCanvas(page);
+        await page.mouse.move(401, 51);
+        await settleCanvas(page);
+        const header = { x: 199, y: 123, width: 1040, height: 28 };
+        const before = await page.screenshot({ clip: header });
+        await canvasClick(page, 500, 171);
         await page.getByRole('img', { name: /2 log entries. Latest log: Disabled Bella Chen/ }).waitFor();
-        assert.deepEqual(actions, [{ action: 'set_user_enabled', id: 2, enabled: false }]);
+        await page.mouse.move(401, 51);
+        await settleCanvas(page);
+        assert.deepEqual(await page.screenshot({ clip: header }), before);
+        assert.equal(actions.length, 1);
+        assertRequest(actions[0], { action: 'set_user_enabled', id: 2, enabled: false });
+
+        await page.keyboard.press('ArrowRight');
+        await settleCanvas(page);
+        await page.keyboard.press('ArrowLeft');
+        await settleCanvas(page);
+        await page.keyboard.press('Space');
+        await page.getByRole('img', { name: /3 log entries. Latest log: Enabled Bella Chen/ }).waitFor();
+        assert.equal(actions.length, 2);
+        assertRequest(actions[1], { action: 'set_user_enabled', id: 2, enabled: true });
+    } finally {
+        await page.close();
+    }
+});
+
+test('resizes a Users column across rows and keeps its width through sorting and snapshots', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    const data = fixture();
+    data.users[0].name = 'Zed Brooks';
+    data.users[1].name = 'Avery Chen';
+    const preview = await mockPreview(page, { data });
+    async function dividers(y) {
+        const clip = { x: 222, y, width: 399, height: 1 };
+        const { pixels } = await screenshotPixels(page, clip);
+        const boundaries = [];
+        for (let i = 0; i < pixels.length; i += 4) {
+            if (pixels[i] === 61 && pixels[i + 1] === 58 && pixels[i + 2] === 67) {
+                boundaries.push(clip.x + i / 4);
+            }
+        }
+        return boundaries;
+    }
+
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        const [idDivider, nameDivider, stateDivider, actionsDivider] = await dividers(126);
+        assert.ok(idDivider < nameDivider && nameDivider < stateDivider && stateDivider < actionsDivider);
+        const actionsCell = { x: stateDivider + 3, y: 154, width: actionsDivider - stateDivider - 3, height: 36 };
+        const beforeResize = await page.screenshot({ clip: actionsCell });
+
+        await page.mouse.move(stateDivider, 137);
+        await page.mouse.down();
+        await settleCanvas(page);
+        await page.mouse.move(nameDivider + 6, 137, { steps: 4 });
+        await settleCanvas(page);
+        for (let frame = 0; frame < 8; frame++) {
+            await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+            assert.ok((await page.screenshot({ clip: actionsCell })).equals(beforeResize),
+                'The State column keeps its minimum width while the divider is held.');
+        }
+        await page.mouse.up();
+        await settleCanvas(page);
+
+        await page.mouse.move(nameDivider, 137);
+        await page.mouse.down();
+        await settleCanvas(page);
+        await page.mouse.move(nameDivider + 48, 137, { steps: 4 });
+        await settleCanvas(page);
+        await page.mouse.up();
+        await page.mouse.move(401, 51);
+        await settleCanvas(page);
+        const [resizedId, resizedName] = await dividers(126);
+        assert.equal(resizedId, idDivider);
+        assert.ok(resizedName > nameDivider + 35, 'Dragging expands the Name column.');
+        assert.deepEqual((await dividers(154)).slice(0, 2), [resizedId, resizedName]);
+
+        await canvasClick(page, idDivider + 30, 137);
+        await canvasClick(page, resizedName + 33, 171);
+        assertRequest((await preview.action(0)).request,
+            { action: 'set_user_enabled', id: 2, enabled: false });
+        await replaceText(page, 610, 104, 'Avery');
+        data.logs.push({ ts: '09:41:03', level: 'info', message: 'Received the latest rates.' });
+        await preview.broadcast();
+        await page.getByRole('img', { name: /Received the latest rates/ }).waitFor();
+        assert.deepEqual((await dividers(126)).slice(0, 2), [resizedId, resizedName]);
+    } finally {
+        await page.close();
+    }
+});
+
+test('keeps wide Console controls inside the command bar', async () => {
+    const page = await browser.newPage({ viewport: { width: 1920, height: 978 } });
+    const data = fixture();
+    data.console = { running: true, output: [], history: ['status'] };
+    await mockPreview(page, { data });
+
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await openView(page, 'Console');
+        await settleCanvas(page);
+
+        const { pixels } = await screenshotPixels(page, { x: 1600, y: 440, width: 304, height: 1 });
+        let edges = 0;
+        for (let i = 0; i < pixels.length; i += 4) {
+            if (pixels[i] === 138 && pixels[i + 1] === 132 && pixels[i + 2] === 149) {
+                edges++;
+            }
+        }
+        // The scan crosses the input's right edge and both edges of each button.
+        assert.equal(edges, 7, 'Run, Previous, and Next fit inside the Console pane.');
     } finally {
         await page.close();
     }
@@ -314,9 +500,9 @@ test('keeps an open Users edit draft while replacing rows and their configuratio
         await page.goto(url);
         await description(/Wave Users.*4 users/).waitFor();
         await canvasClick(page, 270, 137);
-        await replaceText(page, 540, 104, 'Al');
-        await canvasClick(page, 747, 167);
-        await canvasClick(page, 767, 184);
+        await replaceText(page, 610, 104, 'Al');
+        await canvasClick(page, 590, 171);
+        await canvasClick(page, 610, 188);
         await replaceText(page, 495, 212, 'Albright local');
 
         data.users = [
@@ -331,10 +517,101 @@ test('keeps an open Users edit draft while replacing rows and their configuratio
             action: 'edit_user', id: 2, name: 'Albright local',
         });
 
-        await canvasClick(page, 747, 190);
-        await canvasClick(page, 800, 253);
+        await canvasClick(page, 590, 171);
+        await canvasClick(page, 625, 235);
         await canvasClick(page, 490, 554);
         await page.waitForFunction(async text => (await navigator.clipboard.readText()) === text, configuration);
+    } finally {
+        await page.close();
+    }
+});
+
+test('merges a Users edit with changes from a second tab', async () => {
+    const context = await browser.newContext({ viewport: { width: 1320, height: 840 } });
+    const editor = await context.newPage();
+    const other = await context.newPage();
+    const data = fixture();
+    const row = data.users[0];
+    row.options = { upload_limit: 3, download_limit: 5 };
+    function handle(_data, request, reply) {
+        assert.equal(request.id, row.id);
+        if (request.action === 'set_user_enabled') {
+            row.enabled = request.enabled;
+        } else {
+            assert.equal(request.action, 'edit_user');
+            const { name, enabled, options } = request;
+            if (name !== undefined) row.name = name;
+            if (enabled !== undefined) row.enabled = enabled;
+            Object.assign(row.options, options);
+        }
+        data.logs.push({ ts: '09:41:03', level: 'info',
+            message: `${row.name}, ${row.enabled ? 'enabled' : 'disabled'}, ${row.options.upload_limit}/${row.options.download_limit}.` });
+        reply();
+    }
+    const firstPreview = await mockPreview(editor, { data, handle });
+    const secondPreview = await mockPreview(other, { data, handle });
+    async function openFirstEdit(page) {
+        await canvasClick(page, 590, 171);
+        await canvasClick(page, 610, 188);
+        await page.locator('#wave-text-input').waitFor({ state: 'visible' });
+    }
+
+    try {
+        await Promise.all([editor.goto(url), other.goto(url)]);
+        for (const page of [editor, other]) {
+            await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        }
+        await openFirstEdit(editor);
+        await replaceText(editor, 495, 212, 'Avery Local');
+        await replaceText(editor, 457, 367, '25');
+
+        await canvasClick(other, 514, 171);
+        assertRequest((await secondPreview.action(0)).request,
+            { action: 'set_user_enabled', id: 1, enabled: false });
+        await firstPreview.broadcast();
+        await editor.getByRole('img', { name: /Avery Brooks, disabled, 3\/5/ }).waitFor();
+
+        await openFirstEdit(other);
+        await replaceText(other, 457, 399, '18');
+        await canvasClick(other, 481, 654);
+        assertRequest((await secondPreview.action(1)).request, {
+            action: 'edit_user', id: 1, options: { download_limit: 18 },
+        });
+        await firstPreview.broadcast();
+        await editor.getByRole('img', { name: /Avery Brooks, disabled, 3\/18/ }).waitFor();
+
+        await canvasClick(editor, 481, 654);
+        assertRequest((await firstPreview.action(0)).request, {
+            action: 'edit_user', id: 1, name: 'Avery Local', options: { upload_limit: 25 },
+        });
+        await secondPreview.broadcast();
+        for (const page of [editor, other]) {
+            await page.getByRole('img', { name: /Avery Local, disabled, 25\/18/ }).waitFor();
+        }
+    } finally {
+        await context.close();
+    }
+});
+
+test('uses the compact Users table when a sidebar leaves too little room for names', async () => {
+    const page = await browser.newPage({ viewport: { width: 985, height: 800 } });
+    const preview = await mockPreview(page);
+    try {
+        await page.goto(url);
+        await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
+        await replaceText(page, 300, 136, 'Avery');
+        await canvasClick(page, 900, 266);
+        assertRequest((await preview.action(0)).request,
+            { action: 'set_user_enabled', id: 1, enabled: false });
+
+        const wider = { width: 1010, height: 800 };
+        await page.setViewportSize(wider);
+        await waitForCanvas(page, wider, false);
+        await replaceText(page, 300, 136, '');
+        await canvasClick(page, 380, 168);
+        await canvasClick(page, 925, 266);
+        assertRequest((await preview.action(1)).request,
+            { action: 'set_user_enabled', id: 2, enabled: false });
     } finally {
         await page.close();
     }
@@ -359,17 +636,17 @@ test('paginates the compact Users table and targets the replacement row', async 
         await page.getByRole('img', { name: /Replaced a compact row/ }).waitFor();
         await canvasClick(page, 144, 289);
         assert.deepEqual((await preview.action(0)).request, { action: 'set_users_live', live: true });
-        await canvasClick(page, 119, 421);
-        await canvasClick(page, 224, 485);
-        assert.deepEqual((await preview.action(1)).request, { action: 'set_user_enabled', id: 8, enabled: true });
+        await canvasClick(page, 121, 423);
+        await canvasClick(page, 234, 496);
+        assertRequest((await preview.action(1)).request, { action: 'set_user_enabled', id: 8, enabled: true });
     } finally {
         await page.close();
     }
 });
 
-test('narrow touch selects the workspace and swipes starting on Menu scroll without opening it', async () => {
+test('narrow touch activates a switch and header controls and scrolls on a swipe', async () => {
     const page = await browser.newPage({ viewport: portrait, hasTouch: true, isMobile: true });
-    await mockPreview(page);
+    const preview = await mockPreview(page);
     try {
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
@@ -379,6 +656,16 @@ test('narrow touch selects the workspace and swipes starting on Menu scroll with
         await page.getByRole('img', { name: /Wave Server Status/ }).waitFor();
         await page.touchscreen.tap(230, 105);
         await page.getByRole('img', { name: /Wave Users/ }).waitFor();
+
+        await page.touchscreen.tap(318, 463);
+        assertRequest((await preview.action(0)).request,
+            { action: 'set_user_enabled', id: 1, enabled: false });
+        for (const [id, x] of [['menu', 130], ['tools', 182]]) {
+            await page.touchscreen.tap(x, 24);
+            await page.locator(`#${id}[aria-expanded="true"]`).waitFor();
+            await page.touchscreen.tap(x, 24);
+            await page.locator(`#${id}[aria-expanded="false"]`).waitFor();
+        }
 
         const touch = await page.context().newCDPSession(page);
         const x = 130;
@@ -714,17 +1001,58 @@ test('touch drags stay on their topology map while swipes outside it scroll the 
         await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
         await settleCanvas(page);
     }
+    async function nodePosition() {
+        const clip = { x: 75, y: 385, width: 245, height: 115 };
+        const { width, pixels } = await screenshotPixels(page, clip);
+        let x = width;
+        let y = clip.height;
+        for (let i = 0; i < pixels.length; i += 4) {
+            if (pixels[i] === 43 && pixels[i + 1] === 39 && pixels[i + 2] === 48) {
+                x = Math.min(x, (i / 4) % width);
+                y = Math.min(y, Math.floor(i / 4 / width));
+            }
+        }
+        assert.ok(x < width, 'The raised node fill is visible.');
+        return { x: x + clip.x, y: y + clip.y };
+    }
+
     try {
         await page.goto(url);
         await page.getByRole('img', { name: /Wave Users.*2 users/ }).waitFor();
         await openView(page, 'Nodes & Routers');
         await waitForCanvas(page, portrait, true);
-        await settleCanvas(page);
-        const clip = { x: 40, y: 375, width: 310, height: 180 };
-        const before = await page.screenshot({ clip });
-        await swipe([{ x: 150, y: 520 }, { x: 180, y: 502 }, { x: 221, y: 479 }]);
-        assert.ok(!(await page.screenshot({ clip })).equals(before), 'The touch drag pans the map.');
+        const start = await nodePosition();
+        await swipe([{ x: 49, y: 365 }, { x: 65, y: 353 }, { x: 95, y: 337 }]);
+        const moved = await nodePosition();
+        assert.deepEqual(moved, { x: start.x + 46, y: start.y - 28 });
         assert.equal(await page.evaluate(() => scrollY), 0);
+
+        const edge = { x: moved.x + 30, y: moved.y - 2, width: 8, height: 5 };
+        const unselected = await page.screenshot({ clip: edge });
+        await page.touchscreen.tap(moved.x + 35, moved.y + 15);
+        await settleCanvas(page);
+        assert.notDeepEqual(await page.screenshot({ clip: edge }), unselected, 'A tap selects the node.');
+        const selected = await nodePosition();
+
+        await page.touchscreen.tap(158, 266);
+        await settleCanvas(page);
+        assert.deepEqual(await nodePosition(), start, 'The outside map has its own pan state.');
+        await swipe([{ x: 97, y: 400 }, { x: 125, y: 416 }]);
+        const outside = await nodePosition();
+        assert.deepEqual(outside, { x: start.x + 28, y: start.y + 16 });
+        assert.equal(await page.evaluate(() => scrollY), 0);
+
+        await page.mouse.move(85, 395);
+        await page.mouse.down();
+        await settleCanvas(page);
+        await page.mouse.move(60, 385);
+        await settleCanvas(page);
+        await page.mouse.up();
+        assert.deepEqual(await nodePosition(), { x: outside.x - 25, y: outside.y - 10 });
+
+        await page.touchscreen.tap(66, 266);
+        await settleCanvas(page);
+        assert.deepEqual(await nodePosition(), selected, 'The inside map kept its pan state and selection.');
         await swipe([{ x: 150, y: 690 }, { x: 150, y: 640 }, { x: 150, y: 560 }]);
         await page.waitForFunction(() => scrollY > 0);
     } finally {
@@ -753,6 +1081,8 @@ test('Overview shows loading and unavailable data, and About opens without previ
         await openView(page, 'About');
         await canvasClick(page, 329, 225);
         assert.equal(await page.evaluate(() => window.openedUrl), '/licenses/wave.txt');
+        await canvasClick(page, 300, 273);
+        assert.equal(await page.evaluate(() => window.openedUrl), '/licenses/poppins.txt');
     } finally {
         gate.resolve();
         await page.close();
@@ -761,6 +1091,16 @@ test('Overview shows loading and unavailable data, and About opens without previ
 
 test('shows startup feedback and reports a missing Wasm asset', async () => {
     const page = await browser.newPage();
+    const startup = page.getByRole('status');
+    const assertStartupTheme = async () => {
+        const colors = await startup.evaluate(element => ({
+            background: getComputedStyle(document.documentElement).backgroundColor,
+            text: getComputedStyle(element).color,
+            themeColor: document.querySelector('meta[name="theme-color"]').content.toLowerCase(),
+        }));
+        assert.deepEqual(colors, { background: 'rgb(8, 12, 16)', text: 'rgb(234, 235, 255)', themeColor: '#080c10' });
+        assert.equal(await page.locator('canvas').isVisible(), false);
+    };
     let releaseWasm;
     const loading = new Promise(resolve => { releaseWasm = resolve; });
     await page.route('**/index.wasm', async route => {
@@ -769,10 +1109,11 @@ test('shows startup feedback and reports a missing Wasm asset', async () => {
     });
     try {
         await page.goto(url, { waitUntil: 'domcontentloaded' });
-        assert.match(await page.getByRole('status').innerText(), /Loading Wave/);
+        assert.match(await startup.innerText(), /Loading Wave/);
+        await assertStartupTheme();
         releaseWasm();
         await page.getByText(/Wave could not start/).waitFor({ state: 'visible' });
-        assert.equal(await page.locator('canvas').isVisible(), false);
+        await assertStartupTheme();
     } finally {
         releaseWasm();
         await page.close();

@@ -1,10 +1,14 @@
 #pragma once
 
+#include "theme.h"
+
 #include <imgui.h>
 #include <qrcodegen.hpp>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 
@@ -47,7 +51,13 @@ struct UsersViewState {
         download_rate,
         upload_total,
         download_total,
-        remaining
+        remaining,
+        count
+    };
+
+    struct SwitchRequest {
+        std::optional<std::uint64_t> request_id;
+        std::string error;
     };
 
     ImGuiTextFilter search;
@@ -55,6 +65,8 @@ struct UsersViewState {
     bool descending = false;
     int compact_sort = 0;
     int compact_page = 0;
+    std::array<float, static_cast<std::size_t>(Column::count)> desktop_default_widths{};
+    std::map<int, SwitchRequest> switches;
     std::optional<Dialog> dialog;
     bool open_dialog = false;
     UserDraft draft;
@@ -64,8 +76,10 @@ struct UsersViewState {
     std::optional<qrcodegen::QrCode> qr;
     std::optional<std::uint64_t> request_id;
     std::string local_feedback;
+    theme::Color local_feedback_color = theme::Color::error;
 };
 
-void render_users(UsersViewState& state, PreviewSession& session, bool narrow);
+void render_users(UsersViewState& state, PreviewSession& session);
+void render_users_dialog(UsersViewState& state, PreviewSession& session);
 
 } // namespace wave

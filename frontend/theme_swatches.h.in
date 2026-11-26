@@ -1,0 +1,8 @@
+#pragma once
+
+namespace wave::theme {
+
+inline constexpr unsigned startup_canvas = 0x@WAVE_STARTUP_CANVAS@;
+inline constexpr unsigned startup_text = 0x@WAVE_STARTUP_TEXT@;
+
+} // namespace wave::theme

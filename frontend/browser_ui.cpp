@@ -1,5 +1,7 @@
 #include "browser_ui.h"
 
+#include "theme.h"
+
 #include <emscripten.h>
 #include <imgui.h>
 
@@ -35,7 +37,8 @@ void fit_preview_dialog(float width, float max_height)
     const float available_height = std::max(1.0f, height - 24.0f);
     ImGui::SetNextWindowPos({ImGui::GetIO().DisplaySize.x * 0.5f, visible_top() + height * 0.5f},
                             ImGuiCond_Always, {0.5f, 0.5f});
-    ImGui::SetNextWindowSize({std::min(width, available_width), 0.0f});
+    const float scaled_width = width * ImGui::GetStyle().FontSizeBase / theme::secondary_font_size;
+    ImGui::SetNextWindowSize({std::min(scaled_width, available_width), 0.0f});
     ImGui::SetNextWindowSizeConstraints({1.0f, 1.0f},
                                         {available_width, std::min(max_height, available_height)});
 }

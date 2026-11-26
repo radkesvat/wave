@@ -1,6 +1,7 @@
 #pragma once
 
 #include "preview_session.h"
+#include "theme.h"
 
 #include <imgui.h>
 #include <nlohmann/json.hpp>
@@ -14,15 +15,6 @@
 namespace wave::view {
 
 using Json = nlohmann::json;
-
-inline constexpr ImVec4 mint{0.40f, 0.90f, 0.77f, 1.0f};
-inline constexpr ImVec4 warm{0.98f, 0.74f, 0.47f, 1.0f};
-inline constexpr ImU32 plot_surface = IM_COL32(14, 25, 36, 255);
-inline constexpr ImU32 plot_grid = IM_COL32(38, 57, 72, 255);
-inline constexpr ImU32 plot_muted = IM_COL32(161, 184, 197, 255);
-inline constexpr ImU32 plot_mint = IM_COL32(104, 229, 195, 255);
-inline constexpr ImU32 plot_blue = IM_COL32(121, 175, 244, 255);
-inline constexpr ImU32 plot_amber = IM_COL32(246, 192, 119, 255);
 
 inline const Json& field(const Json& object, std::string_view key)
 {
@@ -75,6 +67,11 @@ inline const Json& array_field(const Json& object, std::string_view key)
     return value.is_array() ? value : empty;
 }
 
+inline float button_width(const char* label)
+{
+    return ImGui::CalcTextSize(label, nullptr, true).x + 2 * ImGui::GetStyle().FramePadding.x;
+}
+
 inline void text(std::string_view value)
 {
     ImGui::TextUnformatted(value.data(), value.data() + value.size());
@@ -85,6 +82,13 @@ inline void wrapped(std::string_view value)
     ImGui::PushTextWrapPos();
     text(value);
     ImGui::PopTextWrapPos();
+}
+
+inline void wrapped(std::string_view value, theme::Color color)
+{
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::rgba(color));
+    wrapped(value);
+    ImGui::PopStyleColor();
 }
 
 template <std::size_t N> inline void fill(std::array<char, N>& buffer, std::string_view value)
@@ -126,18 +130,14 @@ inline void feedback(const PreviewSession& session, std::initializer_list<std::s
         }
     }
     if (latest && !latest->message.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, latest->ok ? mint : warm);
-        wrapped(latest->message);
-        ImGui::PopStyleColor();
+        wrapped(latest->message, latest->ok ? theme::Color::success : theme::Color::error);
     }
 }
 
 inline void feedback(const PreviewReply& reply)
 {
     if (!reply.message.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, reply.ok() ? mint : warm);
-        wrapped(reply.message);
-        ImGui::PopStyleColor();
+        wrapped(reply.message, reply.ok() ? theme::Color::success : theme::Color::error);
     }
 }
 

@@ -2,6 +2,7 @@
 
 #include "browser_ui.h"
 #include "preview_session.h"
+#include "theme.h"
 #include "views/about_view.h"
 #include "views/overview.h"
 #include "views/server_status_view.h"
@@ -12,9 +13,13 @@
 #include <array>
 #include <cstring>
 #include <format>
+#include <optional>
 
 namespace wave {
 namespace {
+
+using theme::Color;
+using theme::packed;
 
 constexpr std::array navigation{
     PanelNavigationItem{"Server Status", PanelPage::server},
@@ -27,20 +32,15 @@ constexpr std::array navigation{
     PanelNavigationItem{"Overview", PanelPage::overview},
 };
 
-constexpr ImU32 background = IM_COL32(11, 20, 30, 255);
-constexpr ImU32 chrome = IM_COL32(17, 31, 43, 255);
-constexpr ImU32 border = IM_COL32(41, 62, 76, 255);
-constexpr ImU32 accent = IM_COL32(104, 229, 195, 255);
-constexpr ImU32 accent_surface = IM_COL32(23, 53, 56, 255);
-constexpr ImU32 foreground = IM_COL32(234, 243, 247, 255);
-constexpr ImU32 muted = IM_COL32(173, 197, 211, 255);
-constexpr ImU32 amber = IM_COL32(246, 192, 119, 255);
 constexpr float margin = 10;
 constexpr float sidebar_width = 178;
+constexpr float wide_sidebar_width = 224;
 constexpr float desktop_header = 48;
 constexpr float narrow_header = 78;
 constexpr float breakpoint = 760;
 constexpr float nav_row = 34;
+constexpr float wide_nav_row = 38;
+constexpr float header_button_height = 34;
 constexpr int narrow_navigation_columns = 2;
 constexpr auto narrow_navigation_rows =
     (navigation.size() + narrow_navigation_columns - 1) / narrow_navigation_columns;
@@ -51,43 +51,154 @@ constexpr float narrow_logs_height = 232;
 struct PanelLayout {
     bool narrow;
     bool sidebar;
+    bool wide;
+    float navigation_width;
     float header_height;
     ImVec2 workspace;
 
     PanelLayout(float width, const PanelState& state)
         : narrow(width < breakpoint),
           sidebar(state.navigation_open && state.entry.page == EntryPage::workspace),
+          wide(width >= theme::workspace_font_breakpoint),
+          navigation_width(wide ? wide_sidebar_width : sidebar_width),
           header_height(narrow ? narrow_header : desktop_header),
-          workspace{margin + (sidebar && !narrow ? sidebar_width : 0),
+          workspace{margin + (sidebar && !narrow ? navigation_width : 0),
                     header_height + margin + (sidebar && narrow ? narrow_navigation_height : 0)}
     {
     }
 };
 
-void focus_outline()
+void focus_outline(ImVec2 min, ImVec2 max, float rounding = theme::square_radius)
 {
-    const ImVec2 min = ImGui::GetItemRectMin();
-    const ImVec2 max = ImGui::GetItemRectMax();
-    ImGui::GetWindowDrawList()->AddRect({min.x - 1, min.y - 1}, {max.x + 1, max.y + 1}, accent, 6, 2);
+    ImGui::GetWindowDrawList()->AddRect({min.x - 1, min.y - 1}, {max.x + 1, max.y + 1}, packed(Color::focus),
+                                        rounding, theme::focus_width);
 }
 
-void draw_header(const PanelLayout& layout, ImVec2 viewport)
+bool begin_pane(const char* name, ImVec2 size, Color surface, ImGuiWindowFlags flags = 0)
+{
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::rgba(surface));
+    ImGui::PushStyleColor(ImGuiCol_Border, theme::rgba(Color::divider));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, theme::pane_radius);
+    const bool visible = ImGui::BeginChild(name, size, ImGuiChildFlags_Borders, flags);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(2);
+    return visible;
+}
+
+float draw_header(const PanelLayout& layout, ImVec2 viewport, int focus)
 {
     auto& draw = *ImGui::GetWindowDrawList();
-    draw.AddRectFilled({0, 0}, {viewport.x, layout.header_height}, chrome);
-    draw.AddLineH(0, viewport.x, layout.header_height - 1, border);
-    draw.AddRectFilled({12, 10}, {40, 38}, accent_surface, 7);
+    draw.AddRectFilled({0, 0}, {viewport.x, layout.header_height}, packed(Color::header));
+    draw.AddRectFilled({0, 0}, {viewport.x, theme::selection_width}, packed(Color::accent));
+    draw.AddRectFilled({0, layout.header_height - theme::border_width}, {viewport.x, layout.header_height},
+                       packed(Color::divider));
+    draw.AddRectFilled({12, 10}, {40, 38}, packed(Color::raised), theme::control_radius);
+    if (focus == panel_canvas_control) {
+        focus_outline({12, 10}, {40, 38}, theme::control_radius);
+    }
     constexpr ImVec2 wave[] = {{17, 26}, {22, 21}, {25, 21}, {29, 27}, {31, 27}, {35, 22}};
-    draw.AddPolyline(wave, IM_ARRAYSIZE(wave), accent, 2);
-    draw.AddText(ImGui::GetFont(), 21, {47, 13}, foreground, "Wave");
+    draw.AddPolyline(wave, IM_ARRAYSIZE(wave), packed(Color::accent), 2);
+    const float title_size = layout.wide ? theme::title_font_size : theme::workspace_font_size;
+    constexpr float title_x = 47;
+    ImGui::PushFont(nullptr, title_size);
+    draw.AddText({title_x, std::floor((desktop_header - title_size) / 2)}, packed(Color::primary_text),
+                 "Wave");
+    const float menu_x = title_x + ImGui::CalcTextSize("Wave").x + 8;
+    ImGui::PopFont();
 
     constexpr char status[] = "WaterWall disconnected";
-    const float x = layout.narrow ? 78 : viewport.x - 176;
-    const float y = layout.narrow ? 55 : 16;
-    draw.AddCircleFilled({x, y + 8}, 3, amber);
-    draw.AddText(ImGui::GetFont(), 15, {x + 8, y}, muted, status);
-    const float preview_x = layout.narrow ? 12 : x - 75;
-    draw.AddText(ImGui::GetFont(), 15, {preview_x, y}, accent, "Preview");
+    constexpr char preview[] = "Preview";
+    float status_size = theme::secondary_font_size;
+    ImGui::PushFont(nullptr, status_size);
+    float preview_width = ImGui::CalcTextSize(preview).x;
+    const float status_width = ImGui::CalcTextSize(status).x;
+    if (layout.narrow && preview_width + status_width + 46 > viewport.x) {
+        status_size = theme::annotation_font_size;
+        ImGui::PopFont();
+        ImGui::PushFont(nullptr, status_size);
+        preview_width = ImGui::CalcTextSize(preview).x;
+    }
+    const float status_x = layout.narrow ? 12 + preview_width + 22 : viewport.x - 24 - status_width;
+    const float preview_x = layout.narrow ? 12 : status_x - 22 - preview_width;
+    const float center_y = layout.narrow ? 64 : desktop_header / 2;
+    const float text_y = std::floor(center_y - status_size / 2);
+    draw.AddCircleFilled({status_x - 9, center_y}, 3, packed(Color::warning));
+    draw.AddText({status_x, text_y}, packed(Color::secondary_text), status);
+    draw.AddText({preview_x, text_y}, packed(Color::accent), preview);
+    ImGui::PopFont();
+    return menu_x;
+}
+
+struct HeaderPopup {
+    const char* label;
+    const char* name;
+    const char* longest_item;
+    int control;
+};
+
+constexpr HeaderPopup menu{"Menu", "Wave menu", "Version information", panel_menu_control};
+constexpr HeaderPopup tools{"Tools", "Wave tools", "Connection diagnostics", panel_tools_control};
+
+struct HeaderTrigger {
+    ImVec2 anchor;
+    bool close;
+};
+
+HeaderTrigger draw_header_trigger(const HeaderPopup& popup, const PanelState& state, int focus,
+                                  bool header_popup_open)
+{
+    const bool open = ImGui::IsPopupOpen(popup.name);
+    ImGui::PushStyleColor(ImGuiCol_Button, theme::rgba(open ? Color::selected : Color::header));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    const bool pressed = ImGui::Button(popup.label, {0, header_button_height});
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    if (open) {
+        const float inset = ImGui::GetStyle().FramePadding.x;
+        ImGui::GetWindowDrawList()->AddLineH(min.x + inset, max.x - inset, max.y - 3, packed(Color::accent),
+                                             theme::selection_width);
+    }
+    if (focus == popup.control) {
+        focus_outline(min, max, theme::control_radius);
+    }
+
+    // When a header popup owns hover, pressing either trigger should still toggle or switch it.
+    const bool popup_click =
+        header_popup_open && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup | ImGuiHoveredFlags_NoNavOverride);
+    const bool activate = pressed || popup_click || state.browser_control == popup.control;
+    if (activate && !open) {
+        ImGui::OpenPopup(popup.name);
+    }
+    return {{min.x, max.y + 1}, activate && open};
+}
+
+bool begin_header_popup(const HeaderPopup& popup, HeaderTrigger trigger)
+{
+    if (!ImGui::IsPopupOpen(popup.name)) {
+        return false;
+    }
+    const auto& style = ImGui::GetStyle();
+    const float display_width = ImGui::GetIO().DisplaySize.x;
+    const float safe_x = style.DisplaySafeAreaPadding.x;
+    const float content_width = ImGui::CalcTextSize(popup.longest_item).x + ImGui::GetFontSize() * 1.2f +
+                                style.ItemInnerSpacing.x + 2 * style.WindowPadding.x + 2;
+    const float width = std::min(std::ceil(content_width), std::max(1.0f, display_width - 2 * safe_x));
+    trigger.anchor.x = std::clamp(trigger.anchor.x, safe_x, std::max(safe_x, display_width - width - safe_x));
+    ImGui::SetNextWindowPos(trigger.anchor);
+    ImGui::SetNextWindowSize({width, 0});
+    if (!ImGui::BeginPopup(popup.name)) {
+        return false;
+    }
+    if (trigger.close) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return false;
+    }
+    return true;
 }
 
 void open_workspace_entry(PanelState& state, EntryPage page, PreviewSession& session)
@@ -98,25 +209,21 @@ void open_workspace_entry(PanelState& state, EntryPage page, PreviewSession& ses
     }
 }
 
-void render_menus(PanelState& state, int focus, PreviewSession& session)
+void render_menus(PanelState& state, float x, int focus, PreviewSession& session)
 {
-    ImGui::SetCursorScreenPos({104, 9});
-    if (ImGui::Button("Menu", {55, 30}) || state.browser_control == panel_menu_control) {
-        ImGui::OpenPopup("Wave menu");
-    }
-    if (focus == panel_menu_control) {
-        focus_outline();
-    }
-    ImGui::SetNextWindowPos({104, 42}, ImGuiCond_Appearing);
-    state.menu_open = ImGui::BeginPopup("Wave menu");
-    if (state.menu_open) {
+    ImGui::PushFont(nullptr, theme::secondary_font_size);
+    ImGui::SetCursorScreenPos({x, (desktop_header - header_button_height) / 2});
+    const bool header_popup_open = ImGui::IsPopupOpen(menu.name) || ImGui::IsPopupOpen(tools.name);
+    const auto menu_trigger = draw_header_trigger(menu, state, focus, header_popup_open);
+    ImGui::SameLine(0, 2);
+    const auto tools_trigger = draw_header_trigger(tools, state, focus, header_popup_open);
+    if (begin_header_popup(menu, menu_trigger)) {
         if (ImGui::MenuItem("Show sidebar", nullptr, state.navigation_open,
                             state.entry.page == EntryPage::workspace)) {
             state.navigation_open = !state.navigation_open;
         }
         if (ImGui::MenuItem("High contrast", nullptr, state.high_contrast)) {
             state.high_contrast = !state.high_contrast;
-            configure_panel_style(state.high_contrast);
         }
         if (ImGui::MenuItem("Version information")) {
             state.requested_dialog = PanelDialog::version;
@@ -134,16 +241,7 @@ void render_menus(PanelState& state, int focus, PreviewSession& session)
         ImGui::EndPopup();
     }
 
-    ImGui::SetCursorScreenPos({165, 9});
-    if (ImGui::Button("Tools", {55, 30}) || state.browser_control == panel_tools_control) {
-        ImGui::OpenPopup("Wave tools");
-    }
-    if (focus == panel_tools_control) {
-        focus_outline();
-    }
-    ImGui::SetNextWindowPos({std::min(165.0f, ImGui::GetIO().DisplaySize.x - 195), 42}, ImGuiCond_Appearing);
-    state.tools_open = ImGui::BeginPopup("Wave tools");
-    if (state.tools_open) {
+    if (begin_header_popup(tools, tools_trigger)) {
         if (ImGui::MenuItem("Connection diagnostics")) {
             state.requested_dialog = PanelDialog::diagnostics;
         }
@@ -153,6 +251,9 @@ void render_menus(PanelState& state, int focus, PreviewSession& session)
         }
         ImGui::EndPopup();
     }
+    state.menu_open = ImGui::IsPopupOpen(menu.name);
+    state.tools_open = ImGui::IsPopupOpen(tools.name);
+    ImGui::PopFont();
 }
 
 void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 viewport, int focus)
@@ -161,27 +262,52 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
         return;
     }
     const int columns = layout.narrow ? narrow_navigation_columns : 1;
-    const float width = layout.narrow ? viewport.x - 2 * margin : sidebar_width - margin;
-    const float item_width = (width - (columns + 1) * 6) / columns;
+    const float width = layout.narrow ? viewport.x - 2 * margin : layout.navigation_width - margin;
+    const float row_height = layout.wide ? wide_nav_row : nav_row;
+    const float item_width = std::floor((width - (columns + 1) * 6) / columns);
     ImGui::SetCursorScreenPos({margin, layout.header_height + margin});
     const float height =
         layout.narrow ? narrow_navigation_height - margin : viewport.y - layout.header_height - 2 * margin;
-    if (ImGui::BeginChild("Navigation", {width, height}, ImGuiChildFlags_Borders,
-                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
-        ImGui::SetCursorPosY(5);
+    if (begin_pane("Navigation", {width, height}, Color::pane,
+                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+        std::optional<std::array<ImVec2, 2>> focused_item;
+        ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, {0.0f, 0.5f});
         for (std::size_t i = 0; i < navigation.size(); ++i) {
             const int row = static_cast<int>(i) / columns;
             const int column = static_cast<int>(i) % columns;
-            ImGui::SetCursorPos({7 + column * (item_width + 5), 5 + row * nav_row});
+            ImGui::SetCursorPos({7 + column * (item_width + 5), 5 + row * row_height});
             const auto& item = navigation[i];
-            if (ImGui::Selectable(item.label, state.page == item.page, ImGuiSelectableFlags_NoAutoClosePopups,
-                                  {item_width - 4, 29})) {
+            const bool selected = state.page == item.page;
+            const bool smaller_label = layout.narrow && ImGui::CalcTextSize(item.label).x > item_width - 4;
+            if (smaller_label) {
+                ImGui::PushFont(nullptr, theme::annotation_font_size);
+            }
+            const bool activate =
+                ImGui::Selectable(item.label, selected, ImGuiSelectableFlags_NoAutoClosePopups,
+                                  {item_width - 4, row_height - 5});
+            if (smaller_label) {
+                ImGui::PopFont();
+            }
+            if (activate) {
                 state.page = item.page;
             }
+            if (selected) {
+                const auto min = ImGui::GetItemRectMin();
+                const auto max = ImGui::GetItemRectMax();
+                const float x = std::floor(min.x) - 1;
+                ImGui::GetWindowDrawList()->AddRectFilled({x, std::ceil(min.y) + 2},
+                                                          {x + theme::selection_width, std::floor(max.y) - 2},
+                                                          packed(Color::accent));
+            }
             if (focus == static_cast<int>(item.page)) {
-                focus_outline();
+                focused_item = std::array{ImGui::GetItemRectMin(), ImGui::GetItemRectMax()};
             }
         }
+        // Selectable backgrounds include the spacing between rows. Draw focus above neighboring rows.
+        if (focused_item) {
+            focus_outline((*focused_item)[0], (*focused_item)[1]);
+        }
+        ImGui::PopStyleVar();
     }
     ImGui::EndChild();
 }
@@ -260,7 +386,7 @@ void render_dialogs(PanelState& state, PreviewSession& session)
             continue;
         }
         fit_preview_dialog(dialog == PanelDialog::input ? 415 : 410);
-        if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_NoSavedSettings)) {
+        if (!theme::begin_modal(title, nullptr, ImGuiWindowFlags_NoSavedSettings)) {
             continue;
         }
         switch (dialog) {
@@ -321,18 +447,21 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, const 
         ImGui::TextUnformatted(panel_page_name(state.page));
         ImGui::Separator();
         if (session.status() == PreviewStatus::loading) {
-            ImGui::TextUnformatted("Loading sample data…");
+            ImGui::TextColored(theme::rgba(Color::secondary_text), "Loading sample data…");
         } else {
-            ImGui::TextUnformatted("Sample data unavailable.");
+            ImGui::TextColored(theme::rgba(Color::warning), "Sample data unavailable.");
             if (ImGui::Button("Reconnect")) {
                 session.start();
             }
+        }
+        if (state.page == PanelPage::users && state.users.dialog) {
+            render_users_dialog(state.users, session);
         }
         return;
     }
     switch (state.page) {
     case PanelPage::users:
-        render_users(state.users, session, narrow);
+        render_users(state.users, session);
         break;
     case PanelPage::server:
         render_server_status(session.data()["server"], narrow);
@@ -382,54 +511,8 @@ float panel_height(float viewport_width, const PanelState& state)
     return 666;
 }
 
-void configure_panel_style(bool high_contrast)
-{
-    ImGui::StyleColorsDark();
-    auto& style = ImGui::GetStyle();
-    style.WindowPadding = {11, 9};
-    style.FramePadding = {8, 5};
-    style.ItemSpacing = {7, 7};
-    style.CellPadding = {7, 5};
-    style.FrameRounding = 5;
-    style.ChildRounding = 7;
-    style.PopupRounding = 7;
-    style.ScrollbarRounding = 6;
-    style.ScrollbarSize = 13;
-    auto* colors = style.Colors;
-    const auto color = [](ImU32 value) { return ImGui::ColorConvertU32ToFloat4(value); };
-    colors[ImGuiCol_Text] = color(foreground);
-    colors[ImGuiCol_TextDisabled] = color(high_contrast ? foreground : muted);
-    colors[ImGuiCol_WindowBg] = color(background);
-    colors[ImGuiCol_ChildBg] = color(IM_COL32(17, 31, 43, 255));
-    colors[ImGuiCol_PopupBg] = color(IM_COL32(18, 33, 46, 255));
-    colors[ImGuiCol_Border] = color(high_contrast ? muted : border);
-    colors[ImGuiCol_FrameBg] = color(IM_COL32(26, 47, 62, 255));
-    colors[ImGuiCol_FrameBgHovered] = color(IM_COL32(37, 65, 77, 255));
-    colors[ImGuiCol_FrameBgActive] = colors[ImGuiCol_FrameBgHovered];
-    colors[ImGuiCol_Button] = color(IM_COL32(33, 55, 70, 255));
-    colors[ImGuiCol_ButtonHovered] = color(IM_COL32(39, 79, 81, 255));
-    colors[ImGuiCol_ButtonActive] = colors[ImGuiCol_ButtonHovered];
-    colors[ImGuiCol_Header] = color(IM_COL32(30, 86, 79, 255));
-    colors[ImGuiCol_HeaderHovered] = color(IM_COL32(37, 72, 75, 255));
-    colors[ImGuiCol_HeaderActive] = colors[ImGuiCol_Header];
-    colors[ImGuiCol_Tab] = colors[ImGuiCol_FrameBg];
-    colors[ImGuiCol_TabHovered] = colors[ImGuiCol_ButtonHovered];
-    colors[ImGuiCol_TabSelected] = colors[ImGuiCol_Header];
-    colors[ImGuiCol_TabSelectedOverline] = color(accent);
-    colors[ImGuiCol_CheckMark] = color(accent);
-    colors[ImGuiCol_NavCursor] = color(accent);
-    colors[ImGuiCol_PlotHistogram] = color(accent);
-    colors[ImGuiCol_ScrollbarBg] = color(background);
-    colors[ImGuiCol_ScrollbarGrab] = color(IM_COL32(53, 78, 93, 255));
-    colors[ImGuiCol_TableHeaderBg] = color(IM_COL32(25, 47, 62, 255));
-    colors[ImGuiCol_TableBorderStrong] = color(border);
-    colors[ImGuiCol_TableBorderLight] = color(IM_COL32(28, 48, 62, 255));
-    colors[ImGuiCol_TableRowBg] = color(IM_COL32(17, 32, 44, 255));
-    colors[ImGuiCol_TableRowBgAlt] = color(IM_COL32(22, 40, 54, 255));
-}
-
 void render_panel(PanelState& state, PreviewSession& session, const OverviewData* overview,
-                  bool overview_loading, int browser_focus)
+                  bool overview_loading, float viewport_width, int browser_focus)
 {
     state.topology.visible_map = TopologyViewState::Tab::none;
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
@@ -450,15 +533,15 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
                      ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar(2);
 
-    PanelLayout layout(viewport.x, state);
-    draw_header(layout, viewport);
-    render_menus(state, browser_focus, session);
+    PanelLayout layout(viewport_width, state);
+    const float menu_x = draw_header(layout, viewport, browser_focus);
+    render_menus(state, menu_x, browser_focus, session);
     state.browser_control = 0;
-    layout = PanelLayout(viewport.x, state);
+    layout = PanelLayout(viewport_width, state);
     if (state.entry.page != EntryPage::workspace) {
         const float width = std::max(1.0f, std::min(460.0f, viewport.x - 2 * margin));
-        ImGui::SetCursorScreenPos({(viewport.x - width) * 0.5f, layout.workspace.y + 18});
-        if (ImGui::BeginChild("Entry", {width, 408}, ImGuiChildFlags_Borders)) {
+        ImGui::SetCursorScreenPos({std::floor((viewport.x - width) * 0.5f), layout.workspace.y + 18});
+        if (begin_pane("Entry", {width, 408}, Color::canvas)) {
             render_entry(state.entry, session);
         }
         ImGui::EndChild();
@@ -466,20 +549,20 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
         render_navigation(state, layout, viewport, browser_focus);
         const float width = std::max(1.0f, viewport.x - layout.workspace.x - margin);
         const float logs_height =
-            layout.narrow ? narrow_logs_height : std::clamp(viewport.y * 0.25f, 195.0f, 244.0f);
+            layout.narrow ? narrow_logs_height : std::floor(std::clamp(viewport.y * 0.25f, 195.0f, 244.0f));
         const float work_height =
             layout.narrow ? narrow_work_height
                           : std::max(1.0f, viewport.y - layout.workspace.y - logs_height - 2 * margin);
         ImGui::PushID(static_cast<int>(state.page));
         ImGui::SetCursorScreenPos(layout.workspace);
-        if (ImGui::BeginChild("View", {width, work_height}, ImGuiChildFlags_Borders)) {
+        if (begin_pane("View", {width, work_height}, Color::canvas)) {
             render_view(state, session, layout.narrow, overview, overview_loading);
         }
         ImGui::EndChild();
         ImGui::PopID();
 
         ImGui::SetCursorScreenPos({layout.workspace.x, layout.workspace.y + work_height + margin});
-        if (ImGui::BeginChild("Logs pane", {width, logs_height}, ImGuiChildFlags_Borders)) {
+        if (begin_pane("Logs pane", {width, logs_height}, Color::pane)) {
             render_logs(state.logs, session, layout.narrow);
         }
         ImGui::EndChild();

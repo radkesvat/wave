@@ -36,6 +36,7 @@ enum class PanelDialog {
 
 inline constexpr int panel_menu_control = 1;
 inline constexpr int panel_tools_control = 2;
+inline constexpr int panel_canvas_control = 3;
 
 struct PanelNavigationItem {
     const char* label;
@@ -64,9 +65,8 @@ struct PanelState {
 const char* panel_page_name(PanelPage page);
 std::span<const PanelNavigationItem> panel_navigation();
 float panel_height(float viewport_width, const PanelState& state);
-void configure_panel_style(bool high_contrast = false);
 void render_panel(PanelState& state, PreviewSession& session, const OverviewData* overview,
-                  bool overview_loading, int browser_focus);
+                  bool overview_loading, float viewport_width, int browser_focus);
 std::string describe_panel(const PanelState& state, const PreviewSession& session,
                            const OverviewData* overview, bool overview_loading);
 
