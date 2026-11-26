@@ -1,8 +1,9 @@
 #include "core_config_files.h"
 
-#include <nlohmann/json.hpp>
+#include <openssl/sha.h>
 
 #include <cerrno>
+#include <cstdlib>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -17,7 +18,7 @@ constexpr char config_file[] = "config.json";
 
 bool trusted_path(const fs::path& path, mode_t type)
 {
-    struct stat info {};
+    struct stat info{};
     if (::lstat(path.c_str(), &info) != 0) {
         return false;
     }
@@ -60,6 +61,20 @@ bool sync_directory(const fs::path& path)
     return saved;
 }
 
+std::string revision_of(std::string_view contents)
+{
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(contents.data()), contents.size(), digest);
+    constexpr char hex[] = "0123456789abcdef";
+    std::string revision;
+    revision.reserve(2 * sizeof(digest));
+    for (const auto byte : digest) {
+        revision.push_back(hex[byte >> 4]);
+        revision.push_back(hex[byte & 0xf]);
+    }
+    return revision;
+}
+
 } // namespace
 
 CoreConfigFiles::CoreConfigFiles(const fs::path& directory) : root_(directory / configs_directory)
@@ -79,13 +94,88 @@ bool CoreConfigFiles::available(std::string_view name) const
            trusted_path(directory / config_file, S_IFREG);
 }
 
+CoreConfigDocument CoreConfigFiles::read(std::string_view name) const
+{
+    if (!available(name)) {
+        return {{}, {}, "The config file is missing or unsafe."};
+    }
+    const auto path = root_ / name / config_file;
+    const int file = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (file < 0) {
+        return {{}, {}, "Could not open the config file."};
+    }
+    struct stat info{};
+    if (::fstat(file, &info) != 0 || !S_ISREG(info.st_mode) || (info.st_mode & (S_IWGRP | S_IWOTH)) ||
+        (info.st_uid != ::geteuid() && info.st_uid != 0)) {
+        ::close(file);
+        return {{}, {}, "The config file is unsafe."};
+    }
+    std::string contents;
+    char buffer[4096];
+    for (;;) {
+        const auto count = ::read(file, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count < 0) {
+            ::close(file);
+            return {{}, {}, "Could not read the config file."};
+        }
+        if (count == 0) {
+            break;
+        }
+        if (contents.size() + static_cast<std::size_t>(count) > max_core_config_bytes) {
+            ::close(file);
+            return {{}, {}, "Wave can edit configs up to 256 KiB."};
+        }
+        contents.append(buffer, static_cast<std::size_t>(count));
+    }
+    ::close(file);
+    bool too_deep = false;
+    auto value = nlohmann::json::parse(
+        contents,
+        [&too_deep](int depth, auto, auto&) {
+            too_deep |= depth > max_core_config_depth;
+            return !too_deep;
+        },
+        false);
+    if (too_deep || !value.is_object()) {
+        return {{}, {}, "The config file must contain a valid JSON object up to 64 levels deep."};
+    }
+    return {std::move(value), revision_of(contents), {}};
+}
+
+std::optional<std::string> CoreConfigFiles::save(std::string_view name, std::string_view serialized) const
+{
+    if (serialized.size() > max_core_config_bytes || !available(name)) {
+        return std::nullopt;
+    }
+    const auto directory = root_ / name;
+    auto pending = (directory / ".config-XXXXXX").string();
+    const int file = ::mkostemp(pending.data(), O_CLOEXEC);
+    if (file < 0) {
+        return std::nullopt;
+    }
+    const bool saved = write_config(file, serialized);
+    ::close(file);
+    if (!saved || ::rename(pending.c_str(), (directory / config_file).c_str()) != 0) {
+        ::unlink(pending.c_str());
+        return std::nullopt;
+    }
+    // Once renamed, the new config is visible and may reference newly created databases.
+    sync_directory(directory);
+    return revision_of(serialized);
+}
+
 bool CoreConfigFiles::create(std::string_view name, bool reuse_existing, bool& created) const
 {
     created = false;
     const auto directory = root_ / name;
     const auto path = directory / config_file;
-    const nlohmann::json config{{"name", name}, {"config-version", 1}, {"core-minimum-version", 0},
-                               {"nodes", nlohmann::json::array()}};
+    const nlohmann::json config{{"name", name},
+                                {"config-version", 1},
+                                {"core-minimum-version", 0},
+                                {"nodes", nlohmann::json::array()}};
     const auto contents = config.dump(2) + '\n';
     if (!prepare_root(root_)) {
         return false;

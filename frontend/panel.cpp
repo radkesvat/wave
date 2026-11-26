@@ -17,6 +17,7 @@
 #include <array>
 #include <cstring>
 #include <format>
+#include <limits>
 
 namespace wave {
 namespace {
@@ -26,14 +27,11 @@ using theme::packed;
 
 constexpr std::array navigation{
     PanelNavigationItem{"Server Status", PanelPage::server},
-    PanelNavigationItem{"Users", PanelPage::users},
-    PanelNavigationItem{"Nodes & Routers", PanelPage::topology},
     PanelNavigationItem{"Console", PanelPage::console},
     PanelNavigationItem{"Settings", PanelPage::settings},
     PanelNavigationItem{"About", PanelPage::about},
 };
-constexpr std::size_t footer_item_count = 3;
-constexpr auto first_footer_item = navigation.size() - footer_item_count;
+constexpr auto footer_item_count = navigation.size() - 1;
 
 constexpr float margin = 10;
 constexpr float sidebar_width = 178;
@@ -46,9 +44,7 @@ constexpr float wide_nav_row = 38;
 constexpr ImVec2 nav_inset{7, 5};
 constexpr float nav_status_gap = 4;
 constexpr float header_button_height = 34;
-constexpr std::array narrow_navigation_columns{std::size_t{1}, first_footer_item - 1, footer_item_count};
-constexpr float narrow_navigation_height =
-    narrow_navigation_columns.size() * nav_row + 2 * margin + nav_status_gap;
+constexpr std::size_t narrow_config_rows = 3;
 constexpr float narrow_work_height = 660;
 constexpr float narrow_logs_height = 232;
 constexpr float desktop_logs_min_height = 195;
@@ -59,6 +55,7 @@ struct PanelLayout {
     bool sidebar;
     bool wide;
     float navigation_width;
+    float narrow_navigation_height;
     float header_height;
     ImVec2 workspace;
 
@@ -67,6 +64,8 @@ struct PanelLayout {
           sidebar(state.navigation_open && state.entry.page == EntryPage::workspace),
           wide(width >= theme::workspace_font_breakpoint),
           navigation_width(wide ? wide_sidebar_width : sidebar_width),
+          narrow_navigation_height((2 + std::min(state.config_items.size(), narrow_config_rows)) * nav_row +
+                                   2 * margin + nav_status_gap),
           header_height(narrow ? narrow_header : desktop_header),
           workspace{margin + (sidebar && !narrow ? navigation_width : 0),
                     header_height + margin + (sidebar && narrow ? narrow_navigation_height : 0)}
@@ -100,7 +99,8 @@ bool begin_pane(const char* name, ImVec2 size, Color surface, ImGuiWindowFlags f
     return visible;
 }
 
-float draw_header(const PanelLayout& layout, ImVec2 viewport, bool in_workspace)
+float draw_header(const PanelLayout& layout, ImVec2 viewport, bool in_workspace,
+                  const PreviewSession& session)
 {
     auto& draw = *ImGui::GetWindowDrawList();
     draw.AddRectFilled({0, 0}, {viewport.x, layout.header_height}, packed(Color::header));
@@ -121,25 +121,21 @@ float draw_header(const PanelLayout& layout, ImVec2 viewport, bool in_workspace)
     if (!in_workspace) {
         return menu_x;
     }
-    constexpr char status[] = "WaterWall disconnected";
-    constexpr char preview[] = "Preview";
-    float status_size = theme::secondary_font_size;
+    const auto& core = view::field(view::field(session.data(), "server"), "core");
+    const auto core_state = view::string_field(core, "state");
+    const auto status = session.ready() && !core_state.empty()       ? std::format("WaterWall {}", core_state)
+                        : session.status() == PreviewStatus::loading ? "Connecting to Wave…"
+                                                                     : "Wave disconnected";
+    const float status_size = theme::secondary_font_size;
     ImGui::PushFont(nullptr, status_size);
-    float preview_width = ImGui::CalcTextSize(preview).x;
-    const float status_width = ImGui::CalcTextSize(status).x;
-    if (layout.narrow && preview_width + status_width + 46 > viewport.x) {
-        status_size = theme::annotation_font_size;
-        ImGui::PopFont();
-        ImGui::PushFont(nullptr, status_size);
-        preview_width = ImGui::CalcTextSize(preview).x;
-    }
-    const float status_x = layout.narrow ? 12 + preview_width + 22 : viewport.x - 24 - status_width;
-    const float preview_x = layout.narrow ? 12 : status_x - 22 - preview_width;
+    const float status_width = ImGui::CalcTextSize(status.c_str()).x;
+    const float status_x = layout.narrow ? 23 : viewport.x - 24 - status_width;
     const float center_y = layout.narrow ? 64 : desktop_header / 2;
     const float text_y = std::floor(center_y - status_size / 2);
-    draw.AddCircleFilled({status_x - 9, center_y}, 3, packed(Color::warning));
-    draw.AddText({status_x, text_y}, packed(Color::secondary_text), status);
-    draw.AddText({preview_x, text_y}, packed(Color::accent), preview);
+    draw.AddCircleFilled(
+        {status_x - 9, center_y}, 3,
+        packed(session.ready() && core_state == "running" ? Color::success : Color::warning));
+    draw.AddText({status_x, text_y}, packed(Color::secondary_text), status.c_str());
     ImGui::PopFont();
     return menu_x;
 }
@@ -243,7 +239,7 @@ void render_menus(PanelState& state, float x, int focus, PreviewSession& session
             state.requested_dialog = PanelDialog::sign_out;
         }
         ImGui::Separator();
-        render_panel_config_menu(state.panel_controls, session);
+        render_create_config_menu(state.panel_controls, session);
         ImGui::EndPopup();
     }
 
@@ -265,6 +261,131 @@ void render_menus(PanelState& state, float x, int focus, PreviewSession& session
     ImGui::PopFont();
 }
 
+const view::Json& config_registry(const PreviewSession& session)
+{
+    const auto& server = view::field(session.data(), "server");
+    return view::array_field(view::field(server, "core"), "configs");
+}
+
+void sync_configs(PanelState& state, PreviewSession& session)
+{
+    if (!session.ready()) {
+        return;
+    }
+    std::vector<PanelConfigItem> items;
+    for (const auto& config : config_registry(session)) {
+        const auto& key = view::field(config, "id");
+        const auto name = view::string_field(config, "name");
+        if (key.is_number_integer() && !name.empty()) {
+            const auto id = key.get<std::uint64_t>();
+            if (id > 0 && id <= std::numeric_limits<int>::max()) {
+                items.push_back({static_cast<int>(id), std::string(name)});
+            }
+        }
+    }
+    if (state.config_items == items) {
+        return;
+    }
+    state.config_items = std::move(items);
+    const auto exists = [&](int id) {
+        return std::ranges::find(state.config_items, id, &PanelConfigItem::id) != state.config_items.end();
+    };
+    for (auto it = state.workspaces.begin(); it != state.workspaces.end();) {
+        if (exists(it->first)) {
+            ++it;
+        } else {
+            abandon_config_workspace(it->second, session);
+            it = state.workspaces.erase(it);
+        }
+    }
+    if (state.page == PanelPage::config && !exists(state.config_id)) {
+        state.page = PanelPage::server;
+        state.config_id = 0;
+    }
+}
+
+void select_page(PanelState& state, int control)
+{
+    if (control < 0) {
+        if (std::ranges::any_of(state.config_items,
+                                [control](const auto& item) { return -item.id == control; })) {
+            state.page = PanelPage::config;
+            state.config_id = -control;
+        }
+        return;
+    }
+    const auto item =
+        std::ranges::find(navigation, static_cast<PanelPage>(control), &PanelNavigationItem::page);
+    if (item != navigation.end()) {
+        state.page = item->page;
+    }
+}
+
+void navigation_link(PanelState& state, int control, std::string_view label, float left, float top,
+                     float width, float item_height, bool narrow)
+{
+    const float item_width = width - 2 * nav_inset.x;
+    ImGui::SetCursorPos({left + nav_inset.x, top});
+    const auto position = ImGui::GetCursorScreenPos();
+    const bool selected = state.page_control() == control;
+    const auto flags = ImGuiSelectableFlags_NoAutoClosePopups;
+    ImGui::PushID(control);
+    if (ImGui::Selectable("##link", selected, flags, {item_width, item_height})) {
+        select_page(state, control);
+    }
+    const bool smaller_label =
+        narrow && ImGui::CalcTextSize(label.data(), label.data() + label.size()).x > item_width;
+    if (smaller_label) {
+        ImGui::PushFont(nullptr, theme::annotation_font_size);
+    }
+    auto& draw = *ImGui::GetWindowDrawList();
+    const ImVec2 start{position.x, position.y + std::floor((item_height - ImGui::GetFontSize()) / 2)};
+    const float right = position.x + item_width;
+    ImGui::RenderTextEllipsis(&draw, start, {right, position.y + item_height}, right, label.data(),
+                              label.data() + label.size(), nullptr);
+    if (smaller_label) {
+        ImGui::PopFont();
+    }
+    if (selected) {
+        const auto min = ImGui::GetItemRectMin();
+        const auto max = ImGui::GetItemRectMax();
+        const float edge = std::min(max.x, draw.GetClipRectMax().x);
+        draw.AddRectFilled({edge - theme::selection_width, min.y}, {edge, max.y}, packed(Color::accent));
+    }
+    ImGui::PopID();
+}
+
+void navigation_divider(float width, float top, float thickness = theme::border_width)
+{
+    const auto origin = ImGui::GetWindowPos();
+    ImGui::GetWindowDrawList()->AddLineH(origin.x, origin.x + width, origin.y + top, packed(Color::divider),
+                                         thickness);
+}
+
+void render_config_links(PanelState& state, float width, float top, float height, float row_height,
+                         bool narrow)
+{
+    if (height <= 0 || state.config_items.empty()) {
+        return;
+    }
+    ImGui::SetCursorPos({0, top});
+    if (ImGui::BeginChild("Config links", {width, height}, ImGuiChildFlags_NavFlattened)) {
+        const auto position = ImGui::GetWindowPos();
+        const auto size = ImGui::GetWindowSize();
+        if (ImGui::GetScrollMaxY() > 0) {
+            state.config_nav_scroll_bounds = {position.x, position.y, size.x, size.y};
+        }
+        const float content_width = ImGui::GetContentRegionAvail().x;
+        for (std::size_t index = 0; index < state.config_items.size(); ++index) {
+            const auto& item = state.config_items[index];
+            const float y = index * row_height;
+            navigation_link(state, -item.id, item.name, 0, y, content_width, row_height - 4, narrow);
+            navigation_divider(content_width, y + row_height - 2 - ImGui::GetScrollY());
+        }
+    }
+    ImGui::EndChild();
+}
+
 void render_navigation(PanelState& state, const PanelLayout& layout, float canvas_width,
                        float viewport_height)
 {
@@ -274,68 +395,50 @@ void render_navigation(PanelState& state, const PanelLayout& layout, float canva
     const float width = layout.narrow ? canvas_width - 2 * margin : layout.navigation_width - margin;
     const float row_height = layout.wide ? wide_nav_row : nav_row;
     const float item_height = row_height - 4;
-    const auto rows = layout.narrow ? narrow_navigation_columns.size() : navigation.size();
-    ImGui::SetCursorScreenPos({margin, layout.header_height + margin});
-    const float min_height = 2 * nav_inset.y + rows * row_height + nav_status_gap;
+    const float min_height =
+        2 * nav_inset.y + (navigation.size() + !state.config_items.empty()) * row_height + nav_status_gap;
     const float height = layout.narrow
-                             ? narrow_navigation_height - margin
+                             ? layout.narrow_navigation_height - margin
                              : std::max(min_height, viewport_height - layout.header_height - 2 * margin);
-    const float footer_offset = layout.narrow ? 0 : height - min_height;
-    // Share the workspace focus scope so Tab can reach its controls after a sidebar click.
+    const float footer_y = height - nav_inset.y - (layout.narrow ? 1 : footer_item_count) * row_height;
+    const float config_y = nav_inset.y + row_height + nav_status_gap;
+    const float config_height = std::min(state.config_items.size() * row_height, footer_y - config_y);
+    ImGui::SetCursorScreenPos({margin, layout.header_height + margin});
+
     if (begin_pane("Navigation", {width, height}, Color::pane,
                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse,
                    ImGuiChildFlags_NavFlattened)) {
         ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
-        ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, {0.0f, 0.5f});
         // Selectable expands its hitbox by half the item spacing around the label area.
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {2 * nav_inset.x, 0});
+        navigation_link(state, static_cast<int>(navigation.front().page), navigation.front().label, 0,
+                        nav_inset.y, width, item_height, layout.narrow);
+        navigation_divider(width, nav_inset.y + row_height, 2 * theme::border_width);
+
+        render_config_links(state, width, config_y, config_height, row_height, layout.narrow);
+        const auto origin = ImGui::GetWindowPos();
         auto& draw = *ImGui::GetWindowDrawList();
-        const ImVec2 origin = ImGui::GetWindowPos();
-        const ImU32 divider = packed(Color::divider);
-        auto item = navigation.begin();
-        for (std::size_t row = 0; row < rows; ++row) {
-            const auto columns = layout.narrow ? narrow_navigation_columns[row] : 1;
-            const float y = nav_inset.y + row * row_height + (row == 0 ? 0 : nav_status_gap) +
-                            (row >= first_footer_item ? footer_offset : 0);
-            for (std::size_t column = 0; column < columns; ++column, ++item) {
-                const float column_left = std::floor(column * width / columns);
-                const float column_right = std::floor((column + 1) * width / columns);
-                const float item_left = column_left + (column == 0 ? 0 : theme::border_width);
-                const float item_width = column_right - item_left - 2 * nav_inset.x;
-                ImGui::SetCursorPos({item_left + nav_inset.x, y});
-                const bool selected = state.page == item->page;
-                const bool smaller_label = layout.narrow && ImGui::CalcTextSize(item->label).x > item_width;
-                if (smaller_label) {
-                    ImGui::PushFont(nullptr, theme::annotation_font_size);
+        for (std::size_t row = 0; row < footer_item_count; ++row) {
+            const auto& item = navigation[row + 1];
+            if (layout.narrow) {
+                const float left = std::floor(row * width / footer_item_count);
+                const float right = std::floor((row + 1) * width / footer_item_count);
+                navigation_link(state, static_cast<int>(item.page), item.label, left, footer_y, right - left,
+                                item_height, true);
+                if (row != 0) {
+                    draw.AddLineV(origin.x + left, origin.y + footer_y, origin.y + footer_y + item_height,
+                                  packed(Color::divider), theme::border_width);
                 }
-                const bool activate = ImGui::Selectable(
-                    item->label, selected, ImGuiSelectableFlags_NoAutoClosePopups, {item_width, item_height});
-                if (smaller_label) {
-                    ImGui::PopFont();
+            } else {
+                const float y = footer_y + row * row_height;
+                navigation_link(state, static_cast<int>(item.page), item.label, 0, y, width, item_height,
+                                false);
+                if (row + 1 < footer_item_count) {
+                    navigation_divider(width, y + item_height + 1);
                 }
-                if (activate) {
-                    state.page = item->page;
-                }
-                if (selected) {
-                    const auto min = ImGui::GetItemRectMin();
-                    const auto max = ImGui::GetItemRectMax();
-                    const float right = std::min(max.x, draw.GetClipRectMax().x);
-                    draw.AddRectFilled({right - theme::selection_width, min.y}, {right, max.y},
-                                       packed(Color::accent));
-                }
-                if (column != 0) {
-                    draw.AddLineV(origin.x + column_left, origin.y + y, origin.y + y + item_height, divider,
-                                  theme::border_width);
-                }
-            }
-            if (row + 1 < rows) {
-                const bool below_status = row == 0;
-                const float line_y = origin.y + y + (below_status ? row_height : item_height + 1);
-                draw.AddLineH(origin.x, origin.x + width, line_y, divider,
-                              below_status ? 2 * theme::border_width : theme::border_width);
             }
         }
-        ImGui::PopStyleVar(2);
+        ImGui::PopStyleVar();
         ImGui::PopItemFlag();
     }
     ImGui::EndChild();
@@ -514,33 +617,21 @@ void render_dialogs(PanelState& state, PreviewSession& session)
 
 void render_view(PanelState& state, PreviewSession& session, bool narrow, bool stacked_status)
 {
-    const bool has_server = state.page == PanelPage::server && session.data().contains("server");
-    if (!session.ready() && !has_server && state.page != PanelPage::about &&
-        state.page != PanelPage::settings && state.page != PanelPage::console) {
-        ImGui::TextUnformatted(panel_page_name(state.page));
-        ImGui::Separator();
-        if (session.status() == PreviewStatus::loading) {
-            ImGui::TextColored(theme::rgba(Color::secondary_text), "Loading sample data…");
-        } else {
-            ImGui::TextColored(theme::rgba(Color::warning), "Sample data unavailable.");
-            if (theme::button("Reconnect")) {
-                session.start();
-            }
-        }
-        if (state.page == PanelPage::users && state.users.dialog) {
-            render_users_dialog(state.users, session);
-        } else if (state.page == PanelPage::topology) {
-            render_topology_dialogs(state.topology, session);
-        }
-        return;
-    }
     switch (state.page) {
-    case PanelPage::users:
-        render_users(state.users, session);
-        break;
     case PanelPage::server: {
-        const float height =
-            render_server_status(session.data()["server"], state.panel_controls, session, stacked_status);
+        const auto& server = view::field(session.data(), "server");
+        if (server.is_null()) {
+            if (session.status() == PreviewStatus::loading) {
+                view::wrapped("Loading panel data…", Color::secondary_text);
+            } else {
+                view::wrapped("Panel connection unavailable.", Color::warning);
+                if (theme::button("Reconnect")) {
+                    session.start();
+                }
+            }
+            break;
+        }
+        const float height = render_server_status(server, state.panel_controls, session, stacked_status);
         if (stacked_status) {
             state.stacked_server_status_height = height + 2 * theme::window_padding.y;
         }
@@ -552,9 +643,22 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
     case PanelPage::console:
         state.console = render_console();
         break;
-    case PanelPage::topology:
-        render_topology(state.topology, session, narrow);
+    case PanelPage::config: {
+        const auto& configs = config_registry(session);
+        const auto config = std::ranges::find_if(
+            configs, [&](const view::Json& item) { return view::field(item, "id") == state.config_id; });
+        if (config != configs.end()) {
+            render_config_workspace(state.workspaces[state.config_id], state.panel_controls, session, *config,
+                                    state.config_id, narrow);
+        } else {
+            view::wrapped("Config unavailable.", Color::warning);
+            if (!session.ready() && session.status() != PreviewStatus::loading &&
+                theme::button("Reconnect")) {
+                session.start(true);
+            }
+        }
         break;
+    }
     case PanelPage::about:
         render_about(displayed_panel_version(session));
         break;
@@ -565,7 +669,8 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
 
 const char* panel_page_name(PanelPage page)
 {
-    return std::ranges::find(navigation, page, &PanelNavigationItem::page)->label;
+    const auto item = std::ranges::find(navigation, page, &PanelNavigationItem::page);
+    return item == navigation.end() ? "Config" : item->label;
 }
 
 std::span<const PanelNavigationItem> panel_navigation()
@@ -573,13 +678,25 @@ std::span<const PanelNavigationItem> panel_navigation()
     return navigation;
 }
 
-bool panel_demo_at(const PanelState& state, float x, float y)
+int PanelState::page_control() const
+{
+    return page == PanelPage::config ? -config_id : static_cast<int>(page);
+}
+
+ConfigWorkspaceState* PanelState::config_workspace()
+{
+    const auto config = workspaces.find(config_id);
+    return page == PanelPage::config && config != workspaces.end() ? &config->second : nullptr;
+}
+
+bool panel_tool_window_at(const PanelState& state, float x, float y)
 {
     const auto contains = [x, y](const char* title) {
         const auto* window = ImGui::FindWindowByName(title);
         return window && window->Active && window->Rect().Contains({x, y});
     };
-    return (state.imgui_demo_open && contains(imgui_demo_title)) ||
+    return (state.metrics_open && contains("Dear ImGui Metrics/Debugger")) ||
+           (state.imgui_demo_open && contains(imgui_demo_title)) ||
            (state.implot_demo_open && (contains(implot_demo_title) || contains(imgui_demo_title)));
 }
 
@@ -604,19 +721,16 @@ float panel_height(float viewport_width, float canvas_width, const PanelState& s
 void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_viewport, int browser_focus)
 {
     state.console = {};
-    state.topology.visible_bounds = {};
+    state.config_nav_scroll_bounds = {};
     state.settings.core.scroll_bounds = {};
     const bool in_workspace = state.entry.page == EntryPage::workspace;
     if (in_workspace) {
+        sync_configs(state, session);
         update_panel_controls(state.panel_controls, session);
     }
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     if (state.browser_control && state.navigation_open && in_workspace) {
-        const auto selected = std::ranges::find(navigation, static_cast<PanelPage>(state.browser_control),
-                                                &PanelNavigationItem::page);
-        if (selected != navigation.end()) {
-            state.page = selected->page;
-        }
+        select_page(state, state.browser_control);
     }
 
     ImGui::SetNextWindowPos({0, 0});
@@ -629,7 +743,7 @@ void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_vie
     ImGui::PopStyleVar(2);
 
     PanelLayout layout(browser_viewport.x, state);
-    const float menu_x = draw_header(layout, viewport, in_workspace);
+    const float menu_x = draw_header(layout, viewport, in_workspace, session);
     if (in_workspace) {
         render_menus(state, menu_x, browser_focus, session);
     }
@@ -649,7 +763,7 @@ void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_vie
             stacked_status  ? std::max(narrow_work_height, state.stacked_server_status_height)
             : layout.narrow ? narrow_work_height
                             : std::max(1.0f, viewport.y - layout.workspace.y - logs_height - 2 * margin);
-        ImGui::PushID(static_cast<int>(state.page));
+        ImGui::PushID(state.page_control());
         ImGui::SetCursorScreenPos(layout.workspace);
         const auto view_flags =
             stacked_status ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0;
@@ -669,7 +783,9 @@ void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_vie
     }
     if (ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
         state.console = {};
-        state.topology.visible_bounds = {};
+        if (auto* workspace = state.config_workspace()) {
+            workspace->nodes.viewport = {};
+        }
     }
     if (state.metrics_open || state.imgui_demo_open || state.implot_demo_open) {
         state.console = {};
@@ -685,34 +801,38 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
     if (state.page == PanelPage::console) {
         return "Wave Console. WaterWall terminal.";
     }
-    auto description = std::format("Wave {}. Preview. WaterWall disconnected.", panel_page_name(state.page));
+    auto description = std::format("Wave {}.", panel_page_name(state.page));
     if (state.page == PanelPage::settings) {
         description += ' ' + describe_settings(state.settings, state.auth);
+    } else if (state.page == PanelPage::config) {
+        const auto item = std::ranges::find(state.config_items, state.config_id, &PanelConfigItem::id);
+        const auto workspace = state.workspaces.find(state.config_id);
+        if (item != state.config_items.end() && workspace != state.workspaces.end()) {
+            description =
+                std::format("Wave Config {}. {}", item->name, describe_config_workspace(workspace->second));
+            const auto message = config_action_message(state.panel_controls, state.config_id);
+            if (!message.empty()) {
+                description += ' ';
+                description += message;
+            }
+        }
     }
     const bool controls_dialog = state.panel_controls.dialog != PanelControlsState::Dialog::none;
     const bool has_server = state.page == PanelPage::server && session.data().contains("server");
     if (!session.ready() && !has_server) {
         auto result =
-            description + (session.status() == PreviewStatus::loading ? " Loading sample data."
-                                                                      : " Sample data unavailable.");
+            description + (session.status() == PreviewStatus::loading ? " Loading panel data."
+                                                                      : " Panel connection unavailable.");
         if (controls_dialog) {
             result += ' ' + describe_panel_controls(state.panel_controls, session, false);
         }
         return result;
     }
 
-    const auto& logs = session.data()["logs"];
-    std::string result = std::format("{} Sample data. {} users. {} log entries.", description,
-                                     session.data()["users"].size(), logs.size());
-    if (!logs.empty() && logs.back().is_object()) {
-        const auto message = logs.back().find("message");
-        if (message != logs.back().end() && message->is_string()) {
-            result += " Latest log: " + message->get_ref<const std::string&>();
-        }
-    }
+    std::string result = description + ' ' + describe_logs(state.logs, session.data()["logs"]);
     const auto action = session.feedback_action();
     const bool core_settings_feedback = state.page == PanelPage::settings && action == "apply_core_settings";
-    if (!session.feedback().empty() && !core_settings_feedback &&
+    if (!session.feedback().empty() && !core_settings_feedback && state.page != PanelPage::config &&
         ((!has_server && !controls_dialog) ||
          (action != "update_panel" && action != "restore_preview_backup" &&
           action.find("_core") == std::string_view::npos))) {
@@ -721,8 +841,6 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
     }
     if (state.page == PanelPage::server) {
         result += ' ' + describe_server_status(session.data()["server"]);
-    } else if (state.page == PanelPage::topology) {
-        result += ' ' + describe_topology(state.topology, session.data()["topology"]);
     }
     if (has_server || controls_dialog) {
         result += ' ' + describe_panel_controls(state.panel_controls, session, has_server);

@@ -1,15 +1,17 @@
 const assert = require('node:assert/strict');
 const { execFile, spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, unlink, writeFile } = require('node:fs/promises');
+const { appendFile, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, unlink, writeFile } =
+    require('node:fs/promises');
 const { request: httpRequest } = require('node:http');
+const { createServer } = require('node:net');
 const { hostname, tmpdir } = require('node:os');
 const { basename, delimiter, dirname, join } = require('node:path');
 const { createInterface } = require('node:readline');
 const { after, before, test } = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
 const { isDeepStrictEqual, promisify } = require('node:util');
-const { authFixture, seedCore } = require('./auth_fixture.cjs');
+const { authFixture, rotatingLogPath, seedCore } = require('./auth_fixture.cjs');
 
 const sourceBackend = process.env.WAVE_BACKEND;
 const run = promisify(execFile);
@@ -374,7 +376,7 @@ function configPath(name) {
     return join(coreFixture.configDir, name, 'config.json');
 }
 
-test('starts and reaps WaterWall with the selected configs supplied through stdin',
+test('starts, restarts, and reaps WaterWall with the selected configs supplied through stdin',
     { skip: process.platform !== 'linux' }, async t => {
         const { socket, initial } = await connectPreview(t);
         const observer = await connectPreview(t);
@@ -383,6 +385,10 @@ test('starts and reaps WaterWall with the selected configs supplied through stdi
         const empty = await requestPreview(socket, 'start_core');
         assert.equal(empty.ok, false);
         assert.match(empty.feedback, /enable.*config/i);
+        const stoppedRestart = await requestPreview(socket, 'restart_core');
+        assert.equal(stoppedRestart.ok, false);
+        assert.match(stoppedRestart.feedback, /must be running/i);
+        assert.equal(stoppedRestart.feedback_in_logs_only, undefined);
 
         const active = await createCoreConfig(socket, 'Main config', true);
         const inactive = await createCoreConfig(socket, 'Skip disabled');
@@ -400,13 +406,35 @@ test('starts and reaps WaterWall with the selected configs supplied through stdi
         }
 
         const settings = {
-            log: { path: 'test-logs/', core: { loglevel: 'WARN', console: false } },
+            log: { path: 'test-logs/', core: { file: 'core-fixture.log', loglevel: 'WARN', console: false } },
             misc: { workers: 2, 'ram-profile': 'server', 'tcp-stack-receive-budget': 0 },
             dns: { rotate: false, flags: [], 'server-failover': {} },
         };
         const saved = await requestPreview(socket, 'apply_core_settings', { settings });
         assert.equal(saved.ok, true, saved.feedback);
         assert.deepEqual(saved.data.core_settings, settings);
+        assert.equal(saved.feedback_in_logs_only, true);
+        assert.equal(saved.data.logs.filter(row => row.source === 'panel' && row.message === saved.feedback).length, 1);
+
+        const taggedLog = (level, message) =>
+            `2026-01-02 12:34:56.789 ${level.padEnd(5)} ${message}\n`;
+        const coreLog = join(dirname(backend), rotatingLogPath(settings, 'core'));
+        await mkdir(dirname(coreLog), { recursive: true });
+        await writeFile(coreLog, taggedLog('WARN', 'Earlier file content'));
+        const expectedLogs = [
+            { source: 'core', ts: '12:34:56', level: 'warning', message: 'Fixture core log' },
+            { source: 'dns', ts: '12:34:56', level: 'error', message: 'Fixture DNS log' },
+            { source: 'internal', ts: '12:34:56', level: 'debug', message: 'Fixture internal log' },
+            { source: 'network', ts: '12:34:56', level: 'info', message: 'Fixture network log' },
+        ];
+        await seedCore(backend, { executable: true, observeShutdown: true,
+            logs: expectedLogs.map(({ source, message }, i) => ({
+                source, text: taggedLog(['WARN', 'ERROR', 'DEBUG', 'INFO'][i], message),
+            })),
+        });
+        t.after(() => seedCore(backend, { executable: true }));
+        const captured = nextPreviewSnapshot(observer.socket, frame => expectedLogs.every(expected =>
+            frame.data.logs.some(row => row.message === expected.message)));
         const running = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'running');
         assert.equal((await requestPreview(socket, 'start_core')).ok, true);
         assert.deepEqual((await running).data.server.core.configs, [{ ...active, active: true }, inactive]);
@@ -422,14 +450,64 @@ test('starts and reaps WaterWall with the selected configs supplied through stdi
         })).ok, false);
         assert.equal((await requestPreview(socket, 'remove_core_config', { id: active.id })).ok, false);
 
+        const logs = (await captured).data.logs.filter(row => row.source !== 'panel');
+        assert.deepEqual(logs.sort((a, b) => a.source.localeCompare(b.source)), expectedLogs);
+        const contents = await readFile(coreLog, 'utf8');
+        const cleared = await requestPreview(socket, 'clear_logs');
+        assert.equal(cleared.ok, true, cleared.feedback);
+        assert.equal(cleared.feedback_in_logs_only, undefined);
+        assert.deepEqual(cleared.data.logs, []);
+        assert.equal(await readFile(coreLog, 'utf8'), contents);
+        const message = 'Fixture log after clearing';
+        const appended = nextPreviewSnapshot(observer.socket, frame => frame.data.logs.some(row => row.message === message));
+        await appendFile(coreLog, taggedLog('WARN', message));
+        assert.deepEqual((await appended).data.logs, [{ ...expectedLogs[0], message }]);
+
+        const mode = (await stat(coreFixture.program)).mode & 0o777;
+        try {
+            await chmod(coreFixture.program, mode & ~0o111);
+            const unavailable = await requestPreview(socket, 'restart_core');
+            assert.equal(unavailable.ok, false);
+            assert.match(unavailable.feedback, /must be installed/i);
+            assert.equal(unavailable.data.server.core.state, 'running');
+            await assert.rejects(stat(coreFixture.terminatedFile), { code: 'ENOENT' });
+        } finally {
+            await chmod(coreFixture.program, mode);
+        }
+        const nextSettings = { ...settings, misc: { ...settings.misc, workers: 3 } };
+        assert.equal((await requestPreview(socket, 'apply_core_settings', { settings: nextSettings })).ok, true);
+        assert.equal((await requestPreview(socket, 'set_core_config_enabled', { id: inactive.id, enabled: true })).ok, true);
+        const enabled = { ...inactive, enabled: true };
+        await unlink(coreFixture.processFile);
+        const starting = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'starting');
+        const resumed = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'running' &&
+            frame.data.server.core.configs.some(config => config.id === enabled.id && config.active));
+        const restart = await requestPreview(socket, 'restart_core');
+        assert.equal(restart.ok, true, restart.feedback);
+        assert.equal(restart.data.server.core.state, 'stopping');
+        assert.deepEqual(restart.data.server.core.configs, [{ ...active, active: true }, enabled]);
+        const duplicate = await requestPreview(socket, 'restart_core');
+        assert.equal(duplicate.ok, false);
+        assert.match(duplicate.feedback, /must be running/i);
+        assert.equal(await waitForFile(coreFixture.terminatedFile), String(child.pid));
+        await starting;
+        assert.deepEqual((await resumed).data.server.core.configs,
+            [{ ...active, active: true }, { ...enabled, active: true }]);
+        const replacement = JSON.parse(await waitForFile(coreFixture.processFile));
+        assert.notEqual(replacement.pid, child.pid);
+        assert.throws(() => process.kill(child.pid, 0), { code: 'ESRCH' });
+        assert.deepEqual(replacement.settings,
+            { ...nextSettings, configs: ['configs/Main config/config.json', 'configs/Skip disabled/config.json'] });
+
         const stopped = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'stopped');
         assert.equal((await requestPreview(socket, 'stop_core')).ok, true);
-        assert.deepEqual((await stopped).data.server.core.configs, [active, inactive]);
-        assert.throws(() => process.kill(child.pid, 0), { code: 'ESRCH' });
-        for (const { id } of [active, inactive]) {
+        assert.deepEqual((await stopped).data.server.core.configs, [active, enabled]);
+        assert.throws(() => process.kill(replacement.pid, 0), { code: 'ESRCH' });
+        for (const { id } of [active, enabled]) {
             assert.equal((await requestPreview(socket, 'remove_core_config', { id })).ok, true);
         }
         await unlink(coreFixture.processFile);
+        await unlink(coreFixture.terminatedFile);
     });
 
 const supportedInstaller = process.platform === 'linux' && ['x64', 'arm64'].includes(process.arch);
@@ -613,6 +691,357 @@ test('preserves config files and keeps outdated core settings until the administ
     assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), skeleton);
     assert.equal(await readFile(notes, 'utf8'), 'Fixture notes survive removal.');
 });
+
+test('validates configured WaterWall links and preserves supported aliases and peer references', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    await fixture.start();
+    const session = await fixtureSession(fixture);
+    const { socket } = await connectPreview(t, fixture.origin, session);
+    const profile = await createCoreConfig(socket, 'Graph links');
+    const { config, revision } = (await requestPreview(socket, 'get_core_config', { id: profile.id })).result;
+    const save = (nodes, expectedRevision) =>
+        requestPreview(socket, 'save_core_config', { id: profile.id, config: { ...config, nodes }, revision: expectedRevision });
+    const sink = { name: 'sink', type: 'BlackHole' };
+    const nodes = [
+        sink,
+        { name: 'router', type: 'SniffRouter', settings: { routes: [{ domain: 'example.test', next: false, target: 'sink' }] } },
+        { name: 'primary', type: 'Bridge', settings: { pair: 'peer' } },
+        { name: 'peer', type: 'Bridge', settings: { pair: 'primary' } },
+        { name: 'duplex', type: 'HalfDuplexClient', settings: { upload: 'sink', download: 'sink' } },
+        { name: 'tls', type: 'TlsServer', settings: { 'fallback-node': 'sink', fallback: 'ignored-alias' } },
+        { name: 'ip', type: 'IpManipulator', settings: { 'smuggle-fin': false, 'real-fin-upstream-node': 'unused' } },
+    ];
+    const saved = await save(nodes, revision);
+    assert.equal(saved.ok, true, saved.feedback);
+    assert.deepEqual(saved.result.config.nodes, nodes);
+    for (const bad of [
+        { name: 'duplex', type: 'HalfDuplexClient', next: 'sink', settings: { upload: 'sink', download: 'sink' } },
+        { name: 'splitter', type: 'PacketSplitStream', settings: { up: 'sink', down: 'sink' } },
+        { name: 'router', type: 'SniffRouter', settings: { routes: [{ domain: 'example.test', next: 'missing', target: 'sink' }] } },
+        { name: 'primary', type: 'Bridge', settings: { pair: 'primary' } },
+        { name: 'tls', type: 'TlsServer', settings: { fallback: 'missing' } },
+        { name: 'socks', type: 'Socks5Server', settings: { 'auth-client-node-name': 'sink' } },
+        { name: 'ip', type: 'IpManipulator', next: 'sink',
+            settings: { 'smuggle-fin': true, 'real-fin-upstream-node': 'missing' } },
+    ]) {
+        const rejected = await save([...nodes.filter(node => node.name !== bad.name), bad], saved.result.revision);
+        assert.equal(rejected.ok, false, JSON.stringify(bad));
+    }
+    const reopened = await requestPreview(socket, 'get_core_config', { id: profile.id });
+    assert.equal(reopened.result.revision, saved.result.revision);
+    assert.deepEqual(reopened.result.config.nodes, nodes);
+});
+
+test('persists config graphs and isolates AuthenticationServer users by node', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    const core = await seedCore(fixture.backend, { executable: true });
+    await fixture.start();
+    const session = await fixtureSession(fixture);
+    const { socket } = await connectPreview(t, fixture.origin, session);
+    const profile = await createCoreConfig(socket, 'Office network');
+    const dir = join(core.configDir, profile.name);
+    const file = join(dir, 'config.json');
+    const open = sock => requestPreview(sock, 'get_core_config', { id: profile.id });
+    const save = (config, revision) => requestPreview(socket, 'save_core_config', { id: profile.id, config, revision });
+    const users = (sock, node, action = 'get_config_users', fields = {}) =>
+        requestPreview(sock, action, { config_id: profile.id, node, ...fields });
+
+    const { config: skeleton, revision } = (await open(socket)).result;
+    const gateway = { name: 'listener', type: 'TcpListener', next: 'staff', 'panel-settings': { x: 28, y: 57 } };
+    for (const nodes of [
+        [gateway],
+        [{ ...gateway, type: 'NotAWaterWallNode', next: 'listener' }],
+        [{ ...gateway, next: 'staff' }, { name: 'staff', type: 'Router', next: 'listener' }],
+        [{ name: 'bad path', type: 'AuthenticationServer', settings: { 'db-path': '../../wave-db.json' } }],
+    ]) {
+        assert.equal((await save({ ...skeleton, nodes }, revision)).ok, false);
+        assert.deepEqual(await readdir(dir), ['config.json']);
+    }
+
+    const graph = { ...skeleton, author: 'Fixture', nodes: [gateway,
+        { name: 'staff', type: 'AuthenticationServer' }, { name: 'guests', type: 'AuthenticationServer' }] };
+    const saved = await save(graph, revision);
+    assert.equal(saved.ok, true, saved.feedback);
+    assert.deepEqual(saved.data.server.core.configs[0].auth_nodes, ['staff', 'guests']);
+    const savedGraph = saved.result.config;
+    assert.deepEqual(savedGraph.nodes[0], gateway);
+    assert.equal(savedGraph.author, 'Fixture');
+    assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), savedGraph);
+    const databases = savedGraph.nodes.slice(1).map(node => {
+        const name = node['panel-settings']['auth-db'];
+        assert.match(name, /^auth-[0-9a-f]{32}\.json$/);
+        assert.equal(node.settings['db-path'], `configs/${profile.name}/${name}`);
+        return join(dir, name);
+    });
+    assert.notEqual(...databases);
+    for (const database of databases) {
+        assert.deepEqual(JSON.parse(await readFile(database, 'utf8')), { users: [] });
+        assert.equal((await stat(database)).mode & 0o777, 0o600);
+    }
+    assert.match((await save(skeleton, revision)).feedback, /reload/i);
+
+    const password = 'fixture-tunnel-credential';
+    const user = {
+        id: '9007199254740993', name: 'Alex', email: 'alex@example.test', notes: 'Fixture notes', password,
+        enabled: true,
+        gid: '18446744073709551615', 'record-stat-interval-ms': '250', 'wireguard-allowed-ips': '192.0.2.17/24',
+        limit: {
+            traffic: { up: '9007199254740993', down: '2048', total: '0' },
+            bandwidth: { up: '1024', down: '512' }, ips: '3', devices: '4',
+            'connections-in': '5', 'connections-out': '6',
+        },
+        time: { 'expire-at-ms': '1924992000000', 'expire-after-first-usage-ms': '3600000' },
+    };
+    const created = await users(socket, 'staff', 'create_config_user', { user });
+    assert.equal(created.ok, true, created.feedback);
+    assert.equal(created.result.total, 1);
+    const [record] = created.result.users;
+    const { password: _, ...expected } = user;
+    const createdAt = record.time['created-at-ms'];
+    assert.match(createdAt, /^[1-9][0-9]+$/);
+    assert.deepEqual(record, {
+        ...expected, 'wireguard-allowed-ips': '192.0.2.0/24',
+        time: { ...expected.time, 'created-at-ms': createdAt },
+    });
+    assert.doesNotMatch(JSON.stringify(created), new RegExp(password));
+    const stored = JSON.parse(await readFile(databases[0], 'utf8'));
+    assert.deepEqual(stored.users, [{ ...record, password }]);
+    assert.deepEqual((await users(socket, 'guests')).result.users, []);
+
+    const renamed = structuredClone(savedGraph);
+    renamed.nodes[0].next = 'directory';
+    renamed.nodes[1].name = 'directory';
+    const rename = await save(renamed, saved.result.revision);
+    assert.equal(rename.ok, true, rename.feedback);
+    assert.equal(rename.result.config.nodes[1].settings['db-path'], savedGraph.nodes[1].settings['db-path']);
+    assert.equal((await users(socket, 'staff')).ok, false);
+    // Model WaterWall-managed history and a legacy expiration before applying a partial user edit.
+    const onDisk = stored.users[0];
+    onDisk.limit.traffic.u = onDisk.limit.traffic.up;
+    onDisk.time['first-usage-at-ms'] = '1920000000000';
+    onDisk['expires-at-ms'] = '1924992001000';
+    onDisk.stats = { traffic: { u: '18446744073709551615', d: '956' }, devices: '2' };
+    onDisk.extension = { preserved: true };
+    const existing = JSON.stringify(stored);
+    await writeFile(databases[0], existing);
+    const create = user => users(socket, 'directory', 'create_config_user', { user });
+    const edit = user => users(socket, 'directory', 'edit_config_user', { user_id: record.id, user });
+    for (const [fields, feedback] of [
+        [{ gid: '18446744073709551616' }, /gid/i],
+        [{ 'record-stat-interval-ms': '2147483648' }, /record-stat-interval-ms/i],
+        [{ id: '2' }, /read-only/i],
+        [{ time: { 'first-usage-at-ms': '0' } }, /read-only/i],
+        [{ stats: { traffic: { up: '0' } } }, /read-only/i],
+    ]) {
+        const rejected = await edit(fields);
+        assert.equal(rejected.ok, false);
+        assert.match(rejected.feedback, feedback);
+    }
+    const otherPassword = 'fixture-distinct-credential';
+    for (const id of ['0', '0007', '18446744073709551616', user.id]) {
+        const rejected = await create({ id, password: otherPassword });
+        assert.equal(rejected.ok, false, id);
+        assert.match(rejected.feedback, /id/i);
+    }
+    const overlap = await create({ password: otherPassword, 'wireguard-allowed-ips': '192.0.2.1/32' });
+    assert.equal(overlap.ok, false);
+    assert.match(overlap.feedback, /overlap/i);
+    assert.equal(await readFile(databases[0], 'utf8'), existing);
+
+    const notes = 'x'.repeat(9 * 1024);
+    const edited = await edit({
+        name: 'Jordan', notes, enabled: false, 'wireguard-allowed-ips': '',
+        limit: { traffic: { up: null, down: '0' } }, time: { 'expire-at-ms': null },
+    });
+    assert.equal(edited.ok, true, edited.feedback);
+    const updated = {
+        ...record, name: 'Jordan', notes, enabled: false, 'wireguard-allowed-ips': '',
+        limit: { ...record.limit, traffic: { total: record.limit.traffic.total, down: '0' } },
+        time: {
+            'created-at-ms': createdAt, 'first-usage-at-ms': onDisk.time['first-usage-at-ms'],
+            'expire-after-first-usage-ms': record.time['expire-after-first-usage-ms'],
+        },
+        stats: { traffic: { up: onDisk.stats.traffic.u, down: onDisk.stats.traffic.d }, devices: '2' },
+    };
+    assert.deepEqual(edited.result.users, [updated]);
+    const [merged] = JSON.parse(await readFile(databases[0], 'utf8')).users;
+    assert.equal(merged.password, password);
+    assert.equal(merged['expires-at-ms'], undefined);
+    assert.deepEqual(merged.limit.traffic, updated.limit.traffic);
+    assert.deepEqual(merged.extension, onDisk.extension);
+    assert.deepEqual(merged.stats, onDisk.stats);
+
+    assert.equal((await requestPreview(socket, 'set_core_config_enabled', { id: profile.id, enabled: true })).ok, true);
+    const running = nextPreviewSnapshot(socket, frame => frame.data.server.core.state === 'running');
+    assert.equal((await requestPreview(socket, 'start_core')).ok, true);
+    assert.equal((await open(socket)).result.editable, false);
+    assert.equal((await save(renamed, rename.result.revision)).ok, false);
+    assert.equal((await users(socket, 'directory')).ok, false);
+    assert.equal((await users(socket, 'directory', 'delete_config_user', { user_id: record.id })).ok, false);
+    await running;
+    const stopped = nextPreviewSnapshot(socket, frame => frame.data.server.core.state === 'stopped');
+    assert.equal((await requestPreview(socket, 'stop_core')).ok, true);
+    await stopped;
+
+    await fixture.stop();
+    await fixture.start();
+    const restarted = await connectPreview(t, fixture.origin, session);
+    assert.deepEqual(restarted.initial.server.core.configs[0].auth_nodes, ['directory', 'guests']);
+    assert.deepEqual((await open(restarted.socket)).result.config, rename.result.config);
+    assert.deepEqual((await users(restarted.socket, 'directory')).result.users, [updated]);
+    const rotated = await users(restarted.socket, 'directory', 'edit_config_user', {
+        user_id: record.id, user: { password: otherPassword },
+    });
+    assert.equal(rotated.ok, true, rotated.feedback);
+    assert.deepEqual(rotated.result.users, [updated]);
+    assert.equal(JSON.parse(await readFile(databases[0], 'utf8')).users[0].password, otherPassword);
+    const deleted = await users(restarted.socket, 'directory', 'delete_config_user', { user_id: record.id });
+    assert.equal(deleted.ok, true, deleted.feedback);
+    assert.deepEqual(deleted.result.users, []);
+    assert.deepEqual(JSON.parse(await readFile(databases[0], 'utf8')), { users: [] });
+});
+
+function liveWaterWallFixture({ configName, cursor, user }) {
+    const { appendFileSync, readFileSync, writeFileSync } = require('node:fs');
+    const { createServer } = require('node:net');
+    const parent = process.ppid;
+    const settings = JSON.parse(readFileSync(0, 'utf8'));
+    const config = settings.configs.map(path => JSON.parse(readFileSync(path, 'utf8')))
+        .find(config => config.name === configName);
+    const listener = config.nodes.find(node => node.name === 'api listener');
+    let requests = 0;
+    const upstream = createServer(connection => {
+        let input = Buffer.alloc(0);
+        let complete = false;
+        connection.on('error', () => {});
+        connection.on('data', chunk => {
+            if (complete) return;
+            input = Buffer.concat([input, chunk]);
+            if (input.length < 4 || input.length < 4 + input.readUInt32BE(0)) return;
+            complete = true;
+            const request = JSON.parse(input.subarray(4).toString('utf8'));
+            const body = JSON.parse(request.body);
+            appendFileSync('live-fixture-requests.jsonl', JSON.stringify({ ...request, body }) + '\n');
+            ++requests;
+            const stale = body.cursor === cursor;
+            const result = stale ? { error: { code: 'stale_cursor' } } : {
+                total_users: '2', users: [user], next_cursor: cursor, edit_token: 'fixture-private-edit-token',
+            };
+            const payload = Buffer.from(JSON.stringify({
+                id: request.id, error: null, result: {
+                    code: stale ? 1 : 0, content_type: 'application/json', body_encoding: 'utf8',
+                    body: JSON.stringify(result),
+                },
+            }));
+            const frame = Buffer.alloc(4 + payload.length);
+            frame.writeUInt32BE(payload.length);
+            payload.copy(frame, 4);
+            connection.write(frame.subarray(0, 2));
+            setImmediate(() => {
+                connection.end(frame.subarray(2));
+                if (requests === 2) upstream.close(() => writeFileSync('live-fixture-closed', 'closed'));
+            });
+        });
+    });
+    upstream.listen(listener.settings.port, '127.0.0.1', () => writeFileSync('live-fixture-ready', 'ready'));
+    setInterval(() => {
+        try {
+            process.kill(parent, 0);
+        } catch {
+            process.exit(0);
+        }
+    }, 100);
+}
+
+test('lists active AuthenticationServer users through the scoped WaterWall loopback API',
+    { skip: process.platform !== 'linux' }, async t => {
+        const fixture = await authFixture(t, undefined, { encrypted: false });
+        const core = await seedCore(fixture.backend);
+        const cursor = '12'.repeat(32);
+        const token = '34'.repeat(32);
+        const configName = 'Live logical profile';
+        const user = {
+            id: '9007199254740993', gid: '7', enabled: true, name_preview: 'Live fixture account',
+            name_preview_state: 'complete', usage: { u: '18446744073709551615', d: '2048' },
+        };
+        const options = JSON.stringify({ configName, cursor, user });
+        await writeFile(core.program, `#!/usr/bin/env node\n(${liveWaterWallFixture})(${options});\n`, { mode: 0o700 });
+        const reserved = createServer();
+        reserved.listen(0, '127.0.0.1');
+        await once(reserved, 'listening');
+        const { port } = reserved.address();
+        await new Promise(resolve => reserved.close(resolve));
+        const fixtureDir = dirname(fixture.backend);
+        const requestsFile = join(fixtureDir, 'live-fixture-requests.jsonl');
+        const requests = async () => (await readFile(requestsFile, 'utf8')).trim().split('\n').map(JSON.parse);
+        await fixture.start();
+        const session = await fixtureSession(fixture);
+        const { socket } = await connectPreview(t, fixture.origin, session);
+        const profile = await createCoreConfig(socket, 'Live profile files', true);
+        const inactive = await createCoreConfig(socket, 'Inactive profile');
+        const node = 'staff';
+        const saveGraph = async (id, config) => {
+            const { revision } = (await requestPreview(socket, 'get_core_config', { id })).result;
+            const saved = await requestPreview(socket, 'save_core_config', { id, config, revision });
+            assert.equal(saved.ok, true, saved.feedback);
+            return saved;
+        };
+        const configured = await saveGraph(profile.id, { name: configName, nodes: [
+            { name: node, type: 'AuthenticationServer' },
+            { name: 'api listener', type: 'TcpListener', next: 'api', settings: {
+                address: '127.0.0.1', port,
+            } },
+            { name: 'api', type: 'APIServer', settings: { clients: [
+                { name: 'wrong operation', token: '56'.repeat(32), allow: [{ config: configName, node, operations: ['get-user'] }] },
+                { name: 'fixture reader', token, allow: [{ config: configName, node, operations: ['list-users'] }] },
+            ] } },
+        ] });
+        await saveGraph(inactive.id, { name: inactive.name, nodes: [{ name: node, type: 'AuthenticationServer' }] });
+        assert.equal(configured.data.server.core.configs.find(entry => entry.id === profile.id).live_users, true);
+        const live = fields => requestPreview(socket, 'get_live_config_users', { config_id: profile.id, node, ...fields });
+        assert.equal((await live()).result.available, false);
+        await assert.rejects(stat(requestsFile), { code: 'ENOENT' });
+
+        const running = nextPreviewSnapshot(socket, frame => frame.data.server.core.state === 'running');
+        assert.equal((await requestPreview(socket, 'start_core')).ok, true);
+        await running;
+        await waitForFile(join(fixtureDir, 'live-fixture-ready'));
+        assert.equal((await requestPreview(socket, 'get_config_users', { config_id: inactive.id, node })).ok, false);
+        const first = await live();
+        assert.equal(first.ok, true, first.feedback);
+        assert.deepEqual(first.result, {
+            available: true, total: 2, next_cursor: cursor,
+            users: [{ id: user.id, group: user.gid, enabled: user.enabled, name: user.name_preview, usage: user.usage }],
+        });
+        const [{ id, ...request }] = await requests();
+        assert.ok(id.length);
+        assert.deepEqual(request, {
+            auth: { client: 'fixture reader', token }, selector: { config: configName, node },
+            operation: 'list-users', content_type: 'application/json', body_encoding: 'utf8', body: { limit: 50 },
+        });
+
+        const stale = await live({ cursor });
+        assert.equal(stale.ok, false);
+        assert.deepEqual(stale.result, { reset_cursor: true });
+        assert.deepEqual((await requests())[1].body, { limit: 50, cursor });
+        await waitForFile(join(fixtureDir, 'live-fixture-closed'));
+
+        let foreignBytes = 0;
+        const foreign = createServer(connection => {
+            connection.on('error', () => {});
+            connection.on('data', chunk => {
+                foreignBytes += chunk.length;
+                connection.end();
+            });
+        });
+        foreign.listen(port, '127.0.0.1');
+        await once(foreign, 'listening');
+        t.after(() => new Promise(resolve => foreign.close(resolve)));
+        const unavailable = await live();
+        assert.equal(unavailable.ok, false);
+        assert.doesNotMatch(unavailable.feedback, new RegExp(token));
+        assert.equal(foreignBytes, 0, 'Wave sends no API bytes to the process that reused the port.');
+    });
 
 test('restores backup metadata atomically and preserves running and edited config files',
     { skip: process.platform !== 'linux' }, async t => {

@@ -1,8 +1,10 @@
 # Authentication and HTTPS
 
 Wave requires an administrator session for the workspace over HTTP and HTTPS.
-Server Status shows Linux host metrics. User records and other preview data
-live in memory.
+Server Status shows Linux host metrics. WaterWall tunnel users are managed
+separately from Wave administrators in each config's AuthenticationServer tab.
+Configs with a direct TcpListener to APIServer connection can also show live
+account summaries while WaterWall is running. [Nodes and AuthenticationServer users](building.md#nodes-and-authenticationserver-users)
 
 ## Build
 

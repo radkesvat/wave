@@ -70,6 +70,14 @@ EM_JS(void, register_panel_page, (int page, const char* label), {
     Module['registerPanelPage'](page, UTF8ToString(label));
 });
 
+EM_JS(void, update_config_links, (const char* encoded, int footer), {
+    Module['updateConfigLinks'](JSON.parse(UTF8ToString(encoded)), footer);
+});
+
+EM_JS(void, update_config_tabs, (const char* encoded, int tab), {
+    Module['updateConfigTabs'](UTF8ToString(encoded), tab);
+});
+
 EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools, bool modal, bool server_status), {
     Module['updateNavigation'](page, open, menu, tools, modal, server_status);
 });
@@ -130,6 +138,9 @@ struct Application {
     wave::PreviewSession session;
     wave::PanelState panel;
     std::string displayed_description;
+    std::vector<wave::PanelConfigItem> displayed_config_links;
+    std::vector<wave::ConfigWorkspaceTab> displayed_config_tabs;
+    int displayed_config_tab = -1;
 
     bool initialize()
     {
@@ -274,6 +285,13 @@ struct Application {
                 session.start();
             } else if (!authenticated && in_workspace) {
                 panel.entry.page = wave::EntryPage::checking;
+                panel.page = wave::PanelPage::server;
+                panel.config_id = 0;
+                panel.config_items.clear();
+                for (auto& [_, workspace] : panel.workspaces) {
+                    wave::abandon_config_workspace(workspace, session);
+                }
+                panel.workspaces.clear();
                 panel.settings = {};
                 session.stop();
             }
@@ -281,9 +299,40 @@ struct Application {
         session.update();
     }
 
+    void update_config_controls()
+    {
+        if (displayed_config_links != panel.config_items) {
+            auto links = nlohmann::json::array();
+            for (const auto& item : panel.config_items) {
+                links.push_back({{"id", -item.id}, {"name", item.name}});
+            }
+            update_config_links(links.dump().c_str(), static_cast<int>(wave::PanelPage::console));
+            displayed_config_links = panel.config_items;
+        }
+        if (const auto* config = panel.config_workspace()) {
+            const auto selected = std::ranges::find(config->tabs, config->selected);
+            const int tab =
+                selected == config->tabs.end() ? 0 : static_cast<int>(selected - config->tabs.begin());
+            if (displayed_config_tab != tab || displayed_config_tabs != config->tabs) {
+                auto labels = nlohmann::json::array();
+                for (const auto& item : config->tabs) {
+                    labels.push_back(item.label());
+                }
+                update_config_tabs(labels.dump().c_str(), tab);
+                displayed_config_tabs = config->tabs;
+                displayed_config_tab = tab;
+            }
+        } else if (displayed_config_tab >= 0) {
+            update_config_tabs("[]", -1);
+            displayed_config_tabs.clear();
+            displayed_config_tab = -1;
+        }
+    }
+
     void frame()
     {
         const auto previous_entry = panel.entry.page;
+        const auto previous_page = panel.page_control();
         update_session();
         // Use the browser viewport even when the canvas extends beyond it.
         ImVec2 browser_viewport;
@@ -306,14 +355,13 @@ struct Application {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
-        const auto previous_page = panel.page;
         wave::render_panel(panel, session, browser_viewport, browser_panel_focus());
         // ImGui may spread the paste shortcut across frames to preserve input order.
         if (paste_target &&
             (paste_target != ImGui::GetActiveID() || ImGui::GetCurrentContext()->InputEventsQueue.empty())) {
             clear_pending_paste();
         }
-        if (panel.page != previous_page || panel.entry.page != previous_entry) {
+        if (panel.page_control() != previous_page || panel.entry.page != previous_entry) {
             scroll_to_top();
         }
         ImGui::Render();
@@ -334,9 +382,10 @@ struct Application {
             displayed_description = std::move(description);
         }
         const bool in_workspace = panel.entry.page == wave::EntryPage::workspace;
-        update_navigation(in_workspace ? static_cast<int>(panel.page) : 0,
-                          panel.navigation_open && in_workspace, in_workspace && panel.menu_open,
-                          in_workspace && panel.tools_open, !in_workspace || wave::dialog_open(),
+        update_config_controls();
+        update_navigation(in_workspace ? panel.page_control() : 0, panel.navigation_open && in_workspace,
+                          in_workspace && panel.menu_open, in_workspace && panel.tools_open,
+                          !in_workspace || wave::dialog_open(),
                           panel.page == wave::PanelPage::server && in_workspace);
         const auto& console = panel.console;
         update_console(in_workspace && panel.page == wave::PanelPage::console, console.left, console.top,
@@ -364,6 +413,17 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wave_activate_panel_control(int control)
     }
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE void wave_activate_config_tab(int index)
+{
+    if (application.panel.entry.page != wave::EntryPage::workspace || wave::dialog_open() || index < 0) {
+        return;
+    }
+    if (auto* config = application.panel.config_workspace();
+        config && static_cast<std::size_t>(index) < config->tabs.size()) {
+        config->requested = config->tabs[index];
+    }
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE void wave_tap_panel(float x, float y)
 {
     auto& io = ImGui::GetIO();
@@ -380,22 +440,43 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wave_scroll_panel(float x, float y, float d
     io.AddMouseWheelEvent(dx, dy);
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE bool wave_zoom_node_graph(float x, float y, float steps)
+{
+    auto* config = application.panel.config_workspace();
+    return config && config->selected.kind == wave::ConfigWorkspaceTab::Kind::nodes &&
+           !wave::panel_tool_window_at(application.panel, x, y) && config->nodes.zoom_at(x, y, steps);
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE bool wave_scroll_window_at(float x, float y)
 {
-    const auto bounds = application.panel.settings.core.scroll_bounds;
-    return wave::dialog_at(x, y) || wave::panel_demo_at(application.panel, x, y) ||
-           (x >= bounds.left && x < bounds.left + bounds.width && y >= bounds.top &&
-            y < bounds.top + bounds.height);
+    const auto within = [x, y](const wave::CanvasViewport& bounds) {
+        return x >= bounds.left && x < bounds.left + bounds.width && y >= bounds.top &&
+               y < bounds.top + bounds.height;
+    };
+    if (wave::dialog_at(x, y) || wave::panel_tool_window_at(application.panel, x, y) ||
+        within(application.panel.settings.core.scroll_bounds) ||
+        within(application.panel.config_nav_scroll_bounds)) {
+        return true;
+    }
+    if (auto* config = application.panel.config_workspace()) {
+        return within(wave::config_workspace_scroll_bounds(*config));
+    }
+    return false;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE bool wave_topology_at(float x, float y)
 {
-    return !wave::panel_demo_at(application.panel, x, y) && application.panel.topology.canvas_at(x, y);
+    auto* config = application.panel.config_workspace();
+    return config && config->selected.kind == wave::ConfigWorkspaceTab::Kind::nodes &&
+           !wave::panel_tool_window_at(application.panel, x, y) && config->nodes.begin_touch(x, y);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void wave_pan_topology(float dx, float dy)
 {
-    application.panel.topology.pan(dx, dy);
+    if (auto* config = application.panel.config_workspace();
+        config && config->selected.kind == wave::ConfigWorkspaceTab::Kind::nodes) {
+        config->nodes.drag_touch(dx, dy);
+    }
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void wave_input_text(const char* text, bool paste)

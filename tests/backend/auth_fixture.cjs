@@ -19,8 +19,18 @@ async function loopbackPort() {
     return port;
 }
 
-function fixtureWaterWall() {
-    const { readFileSync, writeFileSync } = require('node:fs');
+function rotatingLogPath(settings, source) {
+    const log = settings.log ?? {};
+    const now = new Date();
+    const day = [now.getFullYear(), now.getMonth() + 1, now.getDate()]
+        .map(value => String(value).padStart(2, '0')).join('');
+    const file = (log[source]?.file ?? `${source}.log`).replace(/\.log$/, '');
+    return `${log.path ?? 'log/'}${file}.${day}.log`;
+}
+
+function fixtureWaterWall(logs, observeShutdown) {
+    const { appendFileSync, mkdirSync, readFileSync, writeFileSync } = require('node:fs');
+    const { dirname } = require('node:path');
     const args = process.argv.slice(2);
     if (args.length !== 1 || args[0] !== '--config:stdin') {
         process.exit(2);
@@ -29,7 +39,18 @@ function fixtureWaterWall() {
     if (!Array.isArray(settings.configs) || !settings.configs.length) {
         process.exit(2);
     }
+    if (observeShutdown) {
+        process.on('SIGTERM', () => {
+            writeFileSync('fixture-terminated', String(process.pid));
+            setTimeout(() => process.exit(0), 350);
+        });
+    }
     for (const file of settings.configs) JSON.parse(readFileSync(file, 'utf8'));
+    for (const { source, text } of logs) {
+        const file = rotatingLogPath(settings, source);
+        mkdirSync(dirname(file), { recursive: true });
+        appendFileSync(file, text);
+    }
     writeFileSync('fixture-process.json', JSON.stringify({ pid: process.pid, args, cwd: process.cwd(), settings }));
     const parent = process.ppid;
     setInterval(() => {
@@ -41,7 +62,7 @@ function fixtureWaterWall() {
     }, 100);
 }
 
-async function seedCore(backend, { executable = false } = {}) {
+async function seedCore(backend, { executable = false, logs = [], observeShutdown = false } = {}) {
     const directory = dirname(backend);
     const bin = join(directory, 'waterwall_bin');
     const configDir = join(directory, 'configs');
@@ -49,9 +70,12 @@ async function seedCore(backend, { executable = false } = {}) {
     await mkdir(configDir, { recursive: true });
     const program = join(bin, 'Waterwall');
     if (executable) {
-        await writeFile(program, '#!/usr/bin/env node\n(' + fixtureWaterWall + ')();\n', { mode: 0o700 });
+        const args = `${JSON.stringify(logs)}, ${observeShutdown}`;
+        await writeFile(program, `#!/usr/bin/env node\n${rotatingLogPath}\n(${fixtureWaterWall})(${args});\n`,
+            { mode: 0o700 });
     }
-    return { bin, configDir, program, processFile: join(directory, 'fixture-process.json') };
+    return { bin, configDir, program, processFile: join(directory, 'fixture-process.json'),
+        terminatedFile: join(directory, 'fixture-terminated') };
 }
 
 async function authFixture(t, webSite, { encrypted = true, prepareCore = true } = {}) {
@@ -139,4 +163,4 @@ async function authFixture(t, webSite, { encrypted = true, prepareCore = true } 
         index, database, start, stop };
 }
 
-module.exports = { authFixture, seedCore, timeout };
+module.exports = { authFixture, rotatingLogPath, seedCore, timeout };

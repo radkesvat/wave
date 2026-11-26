@@ -11,13 +11,75 @@ namespace {
 
 using theme::Color;
 
-std::string_view log_field(const nlohmann::json& record, const char* name)
+struct LogSource {
+    std::string_view key;
+    const char* label;
+};
+
+constexpr std::array sources{
+    LogSource{"panel", "Panel"},     LogSource{"core", "Core"},         LogSource{"dns", "DNS"},
+    LogSource{"network", "Network"}, LogSource{"internal", "Internal"},
+};
+
+std::size_t source_index(const view::Json& record)
 {
-    const auto field = record.find(name);
-    if (field == record.end() || !field->is_string()) {
-        return {};
+    const auto source = std::ranges::find(sources, view::string_field(record, "source"), &LogSource::key);
+    return source == sources.end() ? 0 : static_cast<std::size_t>(source - sources.begin());
+}
+
+bool show_record(const LogsViewState& state, const view::Json& record, std::size_t source)
+{
+    const auto message = view::string_field(record, "message");
+    if (!state.visible_sources[source] || message.empty()) {
+        return false;
     }
-    return field->get_ref<const std::string&>();
+    if (!state.search.IsActive()) {
+        return true;
+    }
+    const auto text =
+        std::format("{} {} {}", view::string_field(record, "ts"), sources[source].label, message);
+    return state.search.PassFilter(text.c_str());
+}
+
+bool source_checkbox(const char* label, float label_width, bool& selected)
+{
+    ImGui::PushID(label);
+    const auto position = ImGui::GetCursorScreenPos();
+    const bool clicked_label = ImGui::InvisibleButton("##label", {label_width, ImGui::GetFrameHeight()});
+    if (ImGui::IsItemVisible()) {
+        ImGui::GetWindowDrawList()->AddText({position.x, position.y + ImGui::GetStyle().FramePadding.y},
+                                            ImGui::GetColorU32(ImGuiCol_Text), label);
+    }
+    if (clicked_label) {
+        selected = !selected;
+    }
+    ImGui::SameLine(0, 0);
+    const bool changed = ImGui::Checkbox("##checked", &selected) || clicked_label;
+    ImGui::PopID();
+    return changed;
+}
+
+bool render_source_filters(LogsViewState& state)
+{
+    const auto& style = ImGui::GetStyle();
+    const float available = ImGui::GetContentRegionAvail().x;
+    float used = ImGui::GetItemRectSize().x;
+    bool changed = false;
+    for (std::size_t source = 0; source < sources.size(); ++source) {
+        const auto label = sources[source].label;
+        const float label_width = ImGui::CalcTextSize(label).x + style.ItemInnerSpacing.x;
+        const float width = label_width + ImGui::GetFrameHeight();
+        const float spacing = style.ItemSpacing.x + (source == 0 ? style.FramePadding.x : 0.0f);
+        if (used + spacing + width <= available) {
+            ImGui::SameLine(0, spacing);
+            used += spacing;
+        } else {
+            used = 0;
+        }
+        changed |= source_checkbox(label, label_width, state.visible_sources[source]);
+        used += width;
+    }
+    return changed;
 }
 
 Color level_color(std::string_view level)
@@ -38,12 +100,27 @@ Color level_color(std::string_view level)
 
 void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
 {
+    constexpr char search_hint[] = "Message, source, or time";
+    const auto& style = ImGui::GetStyle();
+    const float row_end = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    const float search_width = ImGui::CalcTextSize(search_hint).x + 3 * style.FramePadding.x;
+    const float search_label_space = ImGui::CalcTextSize("Search").x + style.ItemInnerSpacing.x;
+    const float controls_width = view::button_width("Options") + view::button_width("Clear") +
+                                 view::button_width("Copy") + 3 * style.ItemSpacing.x + search_width +
+                                 search_label_space;
+    const float controls_gap = style.ItemSpacing.x + style.FramePadding.x;
+
     ImGui::PushID("logs");
+    ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Logs");
+    const bool source_changed = render_source_filters(state);
     const auto logs = session.data().find("logs");
     const bool ready = session.status() == PreviewStatus::ready && logs != session.data().end();
     bool turned_on = false;
 
+    if (ImGui::GetItemRectMax().x + controls_gap + controls_width <= row_end) {
+        ImGui::SameLine(0, controls_gap);
+    }
     if (theme::button("Options")) {
         ImGui::OpenPopup("Log options");
     }
@@ -58,7 +135,7 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
     if (theme::button("Clear")) {
         state.local_feedback.clear();
         if (!session.send({{"action", "clear_logs"}})) {
-            state.local_feedback = "Could not clear preview logs.";
+            state.local_feedback = "Could not clear logs.";
             state.local_feedback_color = Color::error;
         }
     }
@@ -66,21 +143,21 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
     const bool copy = theme::button("Copy");
     ImGui::EndDisabled();
 
-    if (!narrow) {
+    if (ImGui::GetItemRectMax().x + style.ItemSpacing.x + search_width + search_label_space <= row_end) {
         ImGui::SameLine();
     }
-    const float search_label_space = ImGui::CalcTextSize("Search").x + ImGui::GetStyle().ItemInnerSpacing.x;
-    ImGui::SetNextItemWidth(-search_label_space);
-    const bool search_changed = state.search.DrawWithHint("Search##logs", "Message, level, or time");
-    if (search_changed) {
+    const float available = ImGui::GetContentRegionAvail().x - search_label_space;
+    ImGui::SetNextItemWidth(std::clamp(available, 1.0f, search_width));
+    const bool search_changed = state.search.DrawWithHint("Search##logs", search_hint);
+    if (source_changed || search_changed) {
         state.local_feedback.clear();
     }
     if (!state.local_feedback.empty()) {
         view::wrapped(state.local_feedback, state.local_feedback_color);
     }
     if (!ready) {
-        ImGui::TextDisabled("%s", session.status() == PreviewStatus::loading ? "Loading preview logs…"
-                                                                             : "Preview logs unavailable.");
+        ImGui::TextDisabled("%s", session.status() == PreviewStatus::loading ? "Loading logs…"
+                                                                             : "Logs unavailable.");
         ImGui::PopID();
         return;
     }
@@ -94,37 +171,36 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
         ImGui::PushFont(nullptr, theme::secondary_font_size);
         const bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
         for (const auto& log : *logs) {
-            const auto timestamp = log_field(log, "ts");
-            const auto level = log_field(log, "level");
-            const auto message = log_field(log, "message");
-            if (message.empty()) {
+            const auto source = source_index(log);
+            if (!show_record(state, log, source)) {
                 continue;
             }
-            if (copy || state.search.IsActive()) {
-                const auto row = std::format("{} [{}] {}", timestamp, level, message);
-                if (!state.search.PassFilter(row.c_str())) {
-                    continue;
-                }
-                if (copy) {
-                    copied += row;
-                    copied += '\n';
-                }
+            const auto timestamp = view::string_field(log, "ts");
+            const auto level = view::string_field(log, "level");
+            const auto message = view::string_field(log, "message");
+            const auto label = sources[source].label;
+            if (copy) {
+                copied += std::format("{} [{}] [{}] {}\n", timestamp, label, level, message);
             }
             ++visible;
             ImGui::TextColored(theme::rgba(Color::secondary_text), "%.*s", static_cast<int>(timestamp.size()),
                                timestamp.empty() ? "" : timestamp.data());
             ImGui::SameLine();
-            ImGui::TextColored(theme::rgba(level_color(level)), "%.*s", static_cast<int>(level.size()),
-                               level.empty() ? "" : level.data());
+            ImGui::TextColored(theme::rgba(Color::secondary_text), "%s", label);
+            if (!level.empty()) {
+                ImGui::SameLine();
+                ImGui::TextColored(theme::rgba(level_color(level)), "%.*s", static_cast<int>(level.size()),
+                                   level.data());
+            }
             if (!narrow) {
                 ImGui::SameLine();
             }
             ImGui::TextWrapped("%.*s", static_cast<int>(message.size()), message.data());
         }
         if (visible == 0) {
-            ImGui::TextDisabled("%s", logs->empty() ? "No preview log entries" : "No matching entries");
+            ImGui::TextDisabled("%s", logs->empty() ? "No log entries" : "No matching entries");
         }
-        if (search_changed) {
+        if (source_changed || search_changed) {
             ImGui::SetScrollY(0);
         } else if (state.auto_scroll && (at_bottom || turned_on)) {
             ImGui::SetScrollHereY(1.0f);
@@ -143,6 +219,24 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
         state.local_feedback_color = visible == 0 ? Color::info : Color::success;
     }
     ImGui::PopID();
+}
+
+std::string describe_logs(const LogsViewState& state, const nlohmann::json& logs)
+{
+    std::size_t visible = 0;
+    std::string_view latest;
+    for (const auto& log : logs) {
+        if (show_record(state, log, source_index(log))) {
+            ++visible;
+            latest = view::string_field(log, "message");
+        }
+    }
+    auto description = std::format("{} log entries.", visible);
+    if (!latest.empty()) {
+        description += " Latest log: ";
+        description += latest;
+    }
+    return description;
 }
 
 } // namespace wave

@@ -152,6 +152,11 @@ const std::string& WaterWall::error() const
     return error_;
 }
 
+pid_t WaterWall::running_pid() const
+{
+    return stop_deadline_ ? -1 : pid_;
+}
+
 bool WaterWall::installed() const
 {
     struct stat info{};

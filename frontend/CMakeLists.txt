@@ -45,6 +45,11 @@ add_executable(wave
     preview_session.cpp
     theme.cpp
     views/about_view.cpp
+    views/config_json_import.cpp
+    views/config_live_users_view.cpp
+    views/config_nodes_view.cpp
+    views/config_users_view.cpp
+    views/config_workspace_view.cpp
     views/console_view.cpp
     views/core_settings_view.cpp
     views/panel_controls_view.cpp
@@ -53,8 +58,6 @@ add_executable(wave
     views/server_status_plot.cpp
     views/server_status_view.cpp
     views/settings_view.cpp
-    views/topology_view.cpp
-    views/users_view.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -85,7 +88,6 @@ target_include_directories(wave PRIVATE
     "${implot_SOURCE_DIR}"
 )
 target_link_libraries(wave PRIVATE nlohmann_json::nlohmann_json)
-include(qr_code.cmake)
 # The WebGL renderer needs 32-bit indices for large meshes in the ImPlot demo.
 target_compile_definitions(wave PRIVATE IMGUI_IMPL_OPENGL_ES3 IMGUI_USE_WCHAR32 "ImDrawIdx=unsigned int")
 target_compile_options(wave PRIVATE

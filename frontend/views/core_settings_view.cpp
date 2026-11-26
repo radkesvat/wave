@@ -23,7 +23,7 @@ using theme::Color;
 using view::Json;
 
 constexpr char saving[] = "Saving core settings…";
-constexpr char help[] = "Changes apply on the next core start. The config list comes from Manage configs.";
+constexpr char help[] = "Changes apply on the next core start. Enable configs from their workspace headers.";
 constexpr char save_label[] = "Save core settings";
 constexpr char revert_label[] = "Revert edits";
 

@@ -95,7 +95,7 @@ test('authenticates an administrator and closes the terminal on sign-out', async
 
     await waitForStatus(page, 'Sign in to Wave.');
     await submitCredentials(page, credentials);
-    const workspace = /Wave Users.*Sample data\./;
+    const workspace = /Wave Server Status.*CPU/;
     await waitForStatus(page, workspace);
     await page.reload();
     await waitForStatus(page, workspace);

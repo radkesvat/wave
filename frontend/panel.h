@@ -1,16 +1,16 @@
 #pragma once
 
 #include "auth_session.h"
+#include "views/config_workspace_view.h"
 #include "views/console_view.h"
 #include "views/entry_view.h"
 #include "views/logs_view.h"
 #include "views/panel_controls_view.h"
 #include "views/settings_view.h"
-#include "views/topology_view.h"
-#include "views/users_view.h"
-
+#include <map>
 #include <span>
 #include <string>
+#include <vector>
 
 struct ImVec2;
 
@@ -19,12 +19,11 @@ namespace wave {
 class PreviewSession;
 
 enum class PanelPage {
-    users = 100,
     server = 101,
     settings = 102,
     console = 103,
-    topology = 104,
     about = 106,
+    config = 107,
 };
 enum class PanelDialog {
     none,
@@ -42,15 +41,24 @@ struct PanelNavigationItem {
     PanelPage page;
 };
 
+struct PanelConfigItem {
+    int id;
+    std::string name;
+
+    bool operator==(const PanelConfigItem&) const = default;
+};
+
 struct PanelState {
-    PanelPage page = PanelPage::users;
+    PanelPage page = PanelPage::server;
+    int config_id = 0;
+    std::vector<PanelConfigItem> config_items;
+    std::map<int, ConfigWorkspaceState> workspaces;
     AuthSession auth;
     EntryViewState entry;
-    UsersViewState users;
     LogsViewState logs;
-    TopologyViewState topology;
     SettingsViewState settings;
     CanvasViewport console{};
+    CanvasViewport config_nav_scroll_bounds{};
     PanelControlsState panel_controls;
     float stacked_server_status_height = 0;
     bool navigation_open = true;
@@ -63,13 +71,16 @@ struct PanelState {
     int browser_control = 0;
     PanelDialog requested_dialog = PanelDialog::none;
     char input_sample[257]{};
+
+    int page_control() const;
+    ConfigWorkspaceState* config_workspace();
 };
 
 const char* panel_page_name(PanelPage page);
 std::span<const PanelNavigationItem> panel_navigation();
 float panel_height(float viewport_width, float canvas_width, const PanelState& state);
 void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_viewport, int browser_focus);
-bool panel_demo_at(const PanelState& state, float x, float y);
+bool panel_tool_window_at(const PanelState& state, float x, float y);
 std::string describe_panel(const PanelState& state, const PreviewSession& session);
 
 } // namespace wave

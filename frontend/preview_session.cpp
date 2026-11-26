@@ -3,7 +3,6 @@
 #include <emscripten.h>
 
 #include <cstdlib>
-#include <limits>
 #include <memory>
 #include <utility>
 
@@ -12,7 +11,8 @@ namespace {
 
 using Json = nlohmann::json;
 constexpr double connect_timeout_ms = 5000;
-constexpr std::size_t max_snapshot_bytes = 1024 * 1024;
+// Match the backend WebSocket frame limit for large config registries.
+constexpr std::size_t max_snapshot_bytes = 16 * 1024 * 1024;
 
 // clang-format off
 EM_JS_DEPS(preview_url, "$stringToNewUTF8");
@@ -24,89 +24,8 @@ EM_JS(char*, preview_url, (), {
 
 bool valid_snapshot(const Json& data)
 {
-    if (!data.is_object()) {
-        return false;
-    }
-    for (const char* key : {"users", "logs"}) {
-        const auto item = data.find(key);
-        if (item == data.end() || !item->is_array()) {
-            return false;
-        }
-    }
-    for (const char* key : {"server", "settings", "topology", "bot"}) {
-        const auto item = data.find(key);
-        if (item == data.end() || !item->is_object()) {
-            return false;
-        }
-    }
-    const auto live = data.find("users_live");
-    return live != data.end() && live->is_boolean();
-}
-
-const Json& field(const Json& object, std::string_view key)
-{
-    static const Json empty;
-    const auto match = object.find(key);
-    return match == object.end() ? empty : *match;
-}
-
-std::string_view text_field(const Json& object, std::string_view key)
-{
-    const auto& value = field(object, key);
-    return value.is_string() ? std::string_view(value.get_ref<const std::string&>()) : std::string_view{};
-}
-
-double number_field(const Json& object, std::string_view key, double fallback = 0)
-{
-    const auto& value = field(object, key);
-    return value.is_number() ? value.get<double>() : fallback;
-}
-
-int integer_field(const Json& object, std::string_view key, int fallback = 0)
-{
-    const auto number = number_field(object, key, fallback);
-    if (number < std::numeric_limits<int>::min() || number > std::numeric_limits<int>::max()) {
-        return fallback;
-    }
-    return static_cast<int>(number);
-}
-
-bool bool_field(const Json& object, std::string_view key)
-{
-    const auto& value = field(object, key);
-    return value.is_boolean() && value.get<bool>();
-}
-
-UsersData read_users(const Json& data)
-{
-    UsersData users;
-    users.live = data["users_live"].get<bool>();
-    for (const auto& user : data["users"]) {
-        const auto name = text_field(user, "name");
-        if (name.empty()) {
-            continue;
-        }
-        const auto& options = field(user, "options");
-        users.rows.push_back({
-            .id = integer_field(user, "id"),
-            .name = std::string(name),
-            .enabled = bool_field(user, "enabled"),
-            .upload_rate = number_field(user, "upload_rate"),
-            .download_rate = number_field(user, "download_rate"),
-            .upload_total = number_field(user, "upload_total"),
-            .download_total = number_field(user, "download_total"),
-            .remaining_minutes = integer_field(user, "remaining_minutes", -1),
-            .notes = std::string(text_field(user, "notes")),
-            .configuration = std::string(text_field(user, "configuration")),
-            .protocol = text_field(options, "protocol") == "tcp_websocket" ? UserProtocol::tcp_websocket
-                                                                           : UserProtocol::tcp,
-            .upload_limit = integer_field(options, "upload_limit"),
-            .download_limit = integer_field(options, "download_limit"),
-            .traffic_limit = integer_field(options, "traffic_limit"),
-            .ip_limit = integer_field(options, "ip_limit"),
-        });
-    }
-    return users;
+    return data.is_object() && data.contains("logs") && data["logs"].is_array() && data.contains("server") &&
+           data["server"].is_object() && data.contains("settings") && data["settings"].is_object();
 }
 
 } // namespace
@@ -120,7 +39,6 @@ void PreviewSession::start(bool keep_snapshot)
     action_feedback_.clear();
     if (!keep_snapshot) {
         data_.clear();
-        users_ = {};
     }
 
     const std::unique_ptr<char, decltype(&std::free)> url(preview_url(), std::free);
@@ -268,8 +186,11 @@ bool PreviewSession::receive(std::string_view payload)
     if (action != frame.end() && action->is_string() && feedback != frame.end() && feedback->is_string() &&
         ok != frame.end() && ok->is_boolean()) {
         feedback_action_ = action->get<std::string>();
-        feedback_ = feedback->get<std::string>();
         feedback_ok_ = ok->get<bool>();
+        const auto logs_only = frame.find("feedback_in_logs_only");
+        feedback_ = feedback_ok_ && logs_only != frame.end() && *logs_only == true
+                        ? std::string{}
+                        : feedback->get<std::string>();
         ++feedback_revision_;
         const auto known_action = action_feedback_.find(feedback_action_);
         if (known_action != action_feedback_.end()) {
@@ -283,13 +204,14 @@ bool PreviewSession::receive(std::string_view payload)
                 if (!request->second.reply) {
                     const auto status =
                         feedback_ok_ ? PreviewReply::Status::accepted : PreviewReply::Status::rejected;
-                    request->second.reply = PreviewReply{status, feedback_};
+                    auto result = frame.find("result");
+                    request->second.reply =
+                        PreviewReply{status, feedback_, result == frame.end() ? Json{} : std::move(*result)};
                 }
             }
         }
     }
     data_ = std::move(frame["data"]);
-    users_ = read_users(data_);
     status_ = PreviewStatus::ready;
     return true;
 }

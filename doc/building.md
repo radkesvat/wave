@@ -11,9 +11,9 @@ records. See **Panel Controls** on Server Status for the WaterWall process state
 - Git and Python 3 for the Emscripten SDK setup
 - Emscripten SDK 7.0.1
 - Network access on the first build to fetch Dear ImGui v1.93.0, ImPlot v1.1,
-  nlohmann/json v3.12.0, Project Nayuki QR Code generator v1.8.0,
+  nlohmann/json v3.12.0,
   xterm.js 6.0.0, its Fit Addon 0.11.0, and the SDK's SDL2 port.
-  [ImPlot release](https://github.com/epezent/implot/releases/tag/v1.1) [QR release](https://github.com/nayuki/QR-Code-generator/releases/tag/v1.8.0) [xterm.js](https://www.npmjs.com/package/@xterm/xterm/v/6.0.0) [Fit Addon](https://www.npmjs.com/package/@xterm/addon-fit/v/0.11.0)
+  [ImPlot release](https://github.com/epezent/implot/releases/tag/v1.1) [xterm.js](https://www.npmjs.com/package/@xterm/xterm/v/6.0.0) [Fit Addon](https://www.npmjs.com/package/@xterm/addon-fit/v/0.11.0)
 
 The SDK supplies the Clang-based `em++` driver and the Emscripten CMake toolchain.
 Install the SDK outside the Wave checkout and activate it in the shell you will
@@ -161,10 +161,14 @@ to `127.0.0.1`. Wave uses HTTP when TLS is disabled in the database.
 ./build/backend-release/wave-backend
 ```
 
-Use Users to search, sort, and create sample records or pause live data.
-Open a row's **Options** to edit the user, read notes, share a configuration
-by QR code, reset traffic totals, or delete the user. The Logs pane records
-demo changes and provides search, auto-scroll, copy, and clear controls.
+The Logs pane shows panel activity alongside WaterWall's Core, DNS, Network,
+and Internal messages. The five source checkboxes control what appears in the
+list and what **Copy** includes. The pane also provides search and auto-scroll.
+**Clear** clears the panel's view.
+
+Completed changes such as saving settings or enabling a config appear in
+**Logs**. Errors and warnings stay visible where the action was taken.
+
 Menu opens version information and signs you out. Tools opens diagnostics
 and input helpers. **ImGui Demo** and **ImPlot Demo** toggle the libraries'
 interactive example windows.
@@ -191,27 +195,11 @@ Configure deployment TLS in `wave-db.json`. [Administrator setup](authentication
 
 ### Preview controls and server options
 
-The sidebar starts with **Server Status**, **Users**, and **Nodes & Routers**.
-Dividers separate the items, with a thicker line below **Server Status**.
+The sidebar starts with **Server Status**, followed by the WaterWall configs.
 **Console**, **Settings**, and **About** are pinned to the bottom of the desktop
 sidebar and share the last row on narrow screens.
 Tab goes from **Menu** and **Tools** into the workspace. Press Enter on a
 focused pane, then use Tab to move between its controls.
-
-The Users table switches to a paginated layout when the work pane lacks room
-for the desktop columns and names. Drag a desktop column divider to resize
-it for the current session. The enabled switch follows the latest preview
-state. Successful user changes appear in Logs while the Users table stays
-in place. Swipe the panel to reach Logs. Swiping along a pane's right edge
-scrolls its contents.
-
-**Nodes & Routers** shows the sample topology on one canvas. Drag to pan,
-use the zoom buttons and **Fit map** to adjust the view, and select a node or
-connection to see its details. **Inspect items** also lists the routes. Use
-**Add node** to place a named sample node. Select a node and use **Delete node**
-to confirm removal of the node and its connections and routes. On narrow
-screens, swipe outside the canvas to reach Logs. Changes are shared in the
-preview and reset when the preview process restarts.
 
 Wave's scrollable panes use inset, rounded scrollbar thumbs and share the
 same track, hover, and drag colors in each contrast mode. Classic page
@@ -239,9 +227,11 @@ bound port at startup. The `/ws` endpoint echoes text messages over the same
 port after authentication. Panel assets are served with `Cache-Control: no-store`.
 
 The signed-in workspace opens `/ws/preview` on the same host and port. A JSON
-frame with `type` set to `snapshot` carries Users, Logs, server metrics, settings,
-topology, and bot status in `data`. Requests specify an `action`
-and its fields. The server replies with a snapshot and action feedback.
+frame with `type` set to `snapshot` carries logs, server metrics, config names,
+and settings in `data`. Requests specify an `action` and its fields. The
+server replies with a snapshot and action feedback. Config contents and
+AuthenticationServer user lists are sent in the `result` of the requesting
+browser's reply.
 Forms that wait for confirmation send a unique numeric `request_id`. The
 server echoes it to the requesting browser, and the form completes only
 from the reply carrying its ID. Browsers still apply valid snapshot data
@@ -251,24 +241,6 @@ already received. A form still waiting for its reply reports the disconnect.
 
 Send one or more of `domain`, `certificate_path`, and `private_key_path`
 in the `settings` object of an `apply_settings` request.
-
-User edits send the user ID and changed fields. Connection and limit options
-are updated individually so changes from other browsers to untouched fields
-are preserved.
-
-Topology edits use `add_node` with a `name` or `delete_node` with a node `id`.
-The preview accepts up to 64 nodes. Names are limited to 64 UTF-8 bytes and
-must be nonblank, unique after trimming surrounding spaces, and free of
-ASCII control characters. The server assigns the new node's ID and position.
-Deleting a node removes links with that endpoint and routes containing it.
-
-The backend preview API merges the fields submitted with `apply_bot_settings`
-into `bot`. Requests can update `notifications`, `allow_status`,
-`allow_config`, `notification_rules`, and `permissions` independently of
-`overrides`.
-
-Other connected browsers receive the shared preview updates. Simulated user
-traffic updates about every five seconds. Bot actions run in memory.
 
 Wave samples Linux CPU, RAM, and network counters twice per second,
 including when browsers are disconnected. CPU shows aggregate busy time
@@ -353,8 +325,8 @@ Wave creates two directories beside `wave-backend`:
   older CPUs and checks its pinned SHA-256 before extracting the executable.
 - `configs/` starts empty. The **Create config** menu item creates
   `configs/<name>/config.json` with a WaterWall configuration skeleton.
-  Fill in its nodes before enabling it in **Manage configs**. Wave stores
-  names and enabled flags in `wave-db.json` under `core_configs`.
+  Select its name in the sidebar to add nodes. Wave stores config names
+  and enabled flags in `wave-db.json` under `core_configs`.
 
 After a failed install or removal of the executable, **Install core** replaces
 the lifecycle buttons and can retry the download. Wave records the first
@@ -363,12 +335,14 @@ administrator. The panel remains available during installation and reports
 any error. Precreate `waterwall_bin/` and place the matching executable there
 with execute permission to provision Wave offline.
 
-Each button and the target panel version picker fill their own row in Panel
-Controls. The desktop grid uses shorter rows, and the stacked layout gives
-touch controls more height. After installation, **Start core** is available
-while WaterWall is stopped. **Stop core** asks for confirmation before stopping
-the running process. If the executable is removed while WaterWall is running,
-stop it to reinstall. Wave starts WaterWall only when requested.
+In Panel Controls, **Start core** shares a row with **Stop core**, and **Backup**
+shares a row with **Restore**. The left button in each pair gets twice the width.
+The desktop grid uses shorter rows, and the stacked layout gives touch controls
+more height. **Start core** is available after installation while WaterWall is
+stopped. **Stop core** and **Restart core** ask for confirmation while WaterWall
+is running. Restart waits for the old process to exit, then uses the saved
+settings and enabled configs. If the executable is removed while WaterWall is
+running, stop it to reinstall. Wave starts WaterWall only when requested.
 
 Use **Settings → Core** to configure the WaterWall release that matches this
 version of Wave. **Runtime** covers workers, memory profiles, MTU, TCP tuning,
@@ -378,10 +352,15 @@ servers, search domains, lookup order, and advanced resolver and failover
 options. Settings left at the core default are omitted so WaterWall can use
 its built-in or system defaults. [WaterWall 1.6.0 core settings](https://github.com/radkesvat/WaterWall/blob/v1.6.0/core/readme.md)
 
+Wave reads new lines from WaterWall's dated log files during each run. The
+four logger file destinations must be enabled and distinct for Wave to identify
+their sources. **Clear** leaves WaterWall's files intact. Wave retains up to 100
+entries per source in memory.
+
 Wave validates the form and saves the overrides in `wave-db.json` under
 `core_settings`, grouped as `misc`, `log`, and `dns`. On **Start core**, Wave
-builds `core.json` from those groups and adds the paths of enabled profiles from
-**Manage configs**. The generated file is passed through an anonymous in-memory
+builds `core.json` from those groups and adds the paths of enabled configs.
+The generated file is passed through an anonymous in-memory
 file. Relative paths resolve from the directory containing `wave-backend`.
 Enable at least one config before starting. Saved settings and enabled flags
 take effect on the next start.
@@ -397,12 +376,89 @@ core settings in the form, create an entry for each config, and copy each node
 JSON into its new `configs/<name>/config.json`. Wave leaves the old directory
 in place.
 
-The top-bar **Menu** provides **Create config** and **Manage configs** on
-every workspace page. New configs start disabled. Names are case-sensitive,
+The top-bar **Menu** provides **Create config** on every workspace page.
+New configs start disabled. Names are case-sensitive,
 can contain up to 64 UTF-8 bytes, and must be unique after trimming surrounding
 spaces. Blank names, `.` and `..`, path separators, and ASCII control
-characters are invalid. Configs in use by the running core are protected.
-Removing a config deletes its `config.json` and an empty folder after confirmation.
+characters are invalid. Open a config in the sidebar and use the switch in its
+header to enable or disable it. The header's **Delete** button asks for
+confirmation before removing its `config.json` and any empty config folder.
+Configs in use by the running core are protected.
+
+#### Nodes and AuthenticationServer users
+
+Select a config in the sidebar and open the **Nodes** tab. Use the graph's
+**Nodes** menu to add, edit, or delete WaterWall 1.6.0 nodes. Drag nodes to
+move them and use the connection ports or the next node selector to link
+them. Double-click a node card to open its editor. The graph labels links
+defined in WaterWall settings, including split paths, pairs, fallbacks,
+authentication dependencies, and route targets.
+Set named targets in the node editor. Edit Router rules and SniffRouter routes
+in **Settings JSON**. Renaming a node updates references in the config.
+TunDevice and RawSocket show the connected port when placed at either end of
+a chain. Unconnected adapters show both ports so you can attach either side.
+Roll the mouse wheel up to zoom in around the pointer and down to zoom out.
+Use **View** to zoom or fit the graph. In **Config**, choose **Save changes**
+to write `config.json` or **View saved JSON** to see the saved file. Wave writes
+coordinates into each node's `panel-settings` object. WaterWall ignores that
+object.
+
+Use **Config → Edit JSON** to edit the current draft or paste an existing `config.json`
+or a JSON array of nodes. **Apply nodes** replaces the draft's nodes and keeps
+the destination config's top-level settings. Review the graph, then use **Save
+changes**. For imported AuthenticationServer nodes, Wave keeps any existing
+local user database and assigns a local database path to each new node.
+
+Pasted configs with WaterWall variables, `//` comments, or top-level `commits`
+metadata require confirmation. **Resolve and save** replaces unquoted `$name$`
+references with their JSON values, discards the variable definitions, comments,
+and commits metadata, and saves the imported nodes as plain JSON. The graph
+updates after the save succeeds. Paste and expansion are limited to 1 MiB each.
+
+Wave edits JSON config files up to 256 KiB. If another browser or a local
+editor changes the file first, reload it before saving again. Add and configure
+the nodes needed for each chain before enabling the config. WaterWall checks
+each node's settings and chain compatibility when it starts.
+
+Saving an **AuthenticationServer** adds a tab with the node's name. Its user
+database is a separate JSON file under `configs/<name>/`. Wave sets the node's
+`db-path` and keeps the same file when the node is renamed. The offline editor
+can read and change the database while WaterWall is stopped. WaterWall writes
+its in-memory users back to the database and can keep recovery backups in the
+same folder.
+
+Use **Add user** or **Edit** to change the account, access, expiry, and limit
+settings. You can enter a unique nonzero user ID when adding an account or
+leave it blank to generate one. Existing IDs, creation and first-use times,
+and recorded statistics are shown for reference.
+
+Traffic quotas use charged bytes. Bandwidth limits use bytes per second. Zero
+or blank limits mean unlimited. Absolute expiry uses Unix epoch milliseconds,
+and first-use expiry uses a duration in milliseconds. Clearing a numeric
+override restores WaterWall's default, including the 120,000 ms statistics
+record interval. A WireGuard account can have one IPv4 or IPv6 CIDR.
+
+End-user passwords are stored in WaterWall's required format in the private
+node database. The panel accepts new passwords and never returns existing
+passwords in user lists. Wave reads databases up to 16 MiB and loads 50 users
+per page. Deleting a node or removing a config preserves user
+database files. To manage a pre-existing AuthenticationServer in Wave, place
+its database in the config folder and set its `db-path` to that file before
+editing the node. Each server also needs its own `auth-clients` settings before
+it can run. [WaterWall 1.6.0 AuthenticationServer](https://github.com/radkesvat/WaterWall/blob/v1.6.0/tunnels/AuthenticationServer/description.md)
+
+A saved config with a direct **TcpListener → APIServer** connection also has a
+**Live** tab for each AuthenticationServer. The tab is empty until WaterWall
+runs that config and answers a `list-users` request. The live list refreshes
+while open and shows account state and accepted upload and download totals.
+
+Use a dedicated API listener on `127.0.0.1` or `::1` with an explicit port. Wave
+also reaches wildcard listeners through loopback. In the APIServer's
+`settings.clients`, set a client name, a 64-character hexadecimal token, and
+an `allow` entry with the config's top-level `name`, the exact
+AuthenticationServer node name, and `"operations": ["list-users"]`. Wave
+verifies the local TCP peer belongs to its WaterWall process before sending
+the request. [WaterWall 1.6.0 APIServer](https://github.com/radkesvat/WaterWall/blob/v1.6.0/tunnels/APIServer/description.md)
 
 **Backup** in Panel Controls downloads `wave-preview-backup.json` with the
 sample TLS domain, PEM paths, and the inactive config list. The backup contains
@@ -415,18 +471,28 @@ The workspace snapshot reports the build version in `server.version` and
 `server.available_panel_versions`. The `server.core` object reports `state`,
 any `error` from the installer or process, `configs`, and the `lifecycle`
 and `configs` capability flags. Requests use the existing `request_id` and
-snapshot reply. The install, start, and stop replies confirm receipt and
+snapshot reply. The install, start, stop, and restart replies confirm receipt and
 later snapshots report completion.
+
+When a reply includes `feedback_in_logs_only: true`, Wave shows its success
+message in Logs. The reply still carries `feedback` and any `result` data.
 While a reply is pending, the controls block duplicate submissions. If the
 connection closes, Server Status shows the last snapshot and offers to reconnect.
 
 | Action | Additional request fields |
 | --- | --- |
-| `install_core`, `start_core`, `stop_core` | None |
+| `install_core`, `start_core`, `stop_core`, `restart_core` | None |
 | `apply_core_settings` | WaterWall 1.6.0 `misc`, `log`, and `dns` overrides as `settings`, up to 16 KiB |
 | `create_core_config` | `name` |
+| `get_core_config` | Config `id`. The result has `config`, `revision`, and `editable`. |
+| `save_core_config` | Config `id`, edited `config` object, and last loaded `revision` |
 | `set_core_config_enabled` | Config `id` and boolean `enabled` |
 | `remove_core_config` | Config `id` |
+| `get_config_users` | `config_id`, AuthServer `node` name, and optional zero-based `page` |
+| `get_live_config_users` | `config_id`, AuthServer `node` name, and optional opaque `cursor` from the previous live page |
+| `create_config_user` | `config_id`, `node`, `user` object with `password` and optional decimal string `id`, and optional `page` |
+| `edit_config_user` | `config_id`, `node`, string `user_id`, changed fields in `user`, and optional `page`. Set a numeric override to `null` to restore its default. |
+| `delete_config_user` | `config_id`, `node`, string `user_id`, and optional `page` |
 | `restore_preview_backup` | Downloaded JSON object as `backup` |
 
 ### Backend tests

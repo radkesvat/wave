@@ -18,7 +18,9 @@ class WaterWall {
     WaterWall(const std::filesystem::path& directory, bool first_install);
     ~WaterWall();
 
+    bool installed() const;
     std::string_view state() const;
+    pid_t running_pid() const;
     const std::string& error() const;
     std::string install();
     std::string start(std::string core_json);
@@ -26,8 +28,6 @@ class WaterWall {
     void update();
 
   private:
-    bool installed() const;
-
     std::filesystem::path working_dir_;
     std::filesystem::path bin_dir_;
     std::filesystem::path executable_;

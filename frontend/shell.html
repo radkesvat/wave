@@ -152,6 +152,7 @@
       <button id="menu" type="button" aria-expanded="false">Menu</button>
       <button id="tools" type="button" aria-expanded="false">Tools</button>
       <nav id="navigation" aria-label="Wave"></nav>
+      <div id="config-tabs" role="tablist" aria-label="Config tabs" hidden></div>
     </div>
     <main>
       <div id="startup" class="startup-message" role="status" hidden>Loading Wave…</div>
@@ -178,11 +179,13 @@
         const menu = document.getElementById("menu");
         const tools = document.getElementById("tools");
         const navigation = document.getElementById("navigation");
+        const configTabs = document.getElementById("config-tabs");
         const textInput = document.getElementById("wave-text-input");
         const terminalPanel = document.getElementById("wave-console");
         const pageLinks = new Map();
         const headerControlIds = new Map();
         let activePage;
+        let configTabNames;
         let touch = null;
         let writingClipboard = false;
         let consoleActive = false;
@@ -216,15 +219,70 @@
           registerControl(tools, toolsId, true);
         }
 
-        function registerPanelPage(id, label) {
+        function registerPanelPage(id, label, before = null) {
           const link = document.createElement("a");
           link.href = "#canvas";
           link.tabIndex = -1;
           link.textContent = label;
           registerControl(link, id, false);
           pageLinks.set(id, link);
-          navigation.append(link);
+          navigation.insertBefore(link, before);
+          return link;
         }
+
+        function updateConfigLinks(configs, footer) {
+          const ids = new Set(configs.map(config => config.id));
+          for (const [id, link] of pageLinks) {
+            if (id < 0 && !ids.has(id)) {
+              link.remove();
+              pageLinks.delete(id);
+            }
+          }
+          const before = pageLinks.get(footer);
+          for (const { id, name } of configs) {
+            const link = pageLinks.get(id) || registerPanelPage(id, name, before);
+            if (link.textContent !== name) {
+              link.textContent = name;
+              if (id === activePage) document.title = name + " · Wave";
+            }
+          }
+        }
+
+        function updateConfigTabs(encoded, selected) {
+          configTabs.hidden = selected < 0;
+          if (selected < 0) return;
+          if (encoded !== configTabNames) {
+            configTabNames = encoded;
+            configTabs.replaceChildren(...JSON.parse(encoded).map((name, index) => {
+              const tab = document.createElement("button");
+              tab.type = "button";
+              tab.setAttribute("role", "tab");
+              tab.textContent = name;
+              tab.addEventListener("click", () => Module['_wave_activate_config_tab'](index));
+              return tab;
+            }));
+          }
+          for (let index = 0; index < configTabs.children.length; ++index) {
+            const tab = configTabs.children[index];
+            tab.tabIndex = index === selected ? 0 : -1;
+            tab.setAttribute("aria-selected", String(index === selected));
+          }
+        }
+
+        configTabs.addEventListener("keydown", event => {
+          const tabs = Array.from(configTabs.children);
+          const index = tabs.indexOf(event.target);
+          if (index < 0) return;
+          let next;
+          if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length;
+          else if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+          else if (event.key === "Home") next = 0;
+          else if (event.key === "End") next = tabs.length - 1;
+          else return;
+          event.preventDefault();
+          tabs[next].focus({ preventScroll: true });
+          tabs[next].click();
+        });
 
         function scrollPanel(event, dx, dy) {
           const bounds = canvas.getBoundingClientRect();
@@ -237,9 +295,17 @@
         }
 
         canvas.addEventListener("wheel", event => {
-          if (event.ctrlKey || (!event.shiftKey && usesDocumentScroll(event) &&
-              Math.abs(event.deltaY) >= Math.abs(event.deltaX))) return;
+          if (event.ctrlKey) return;
           const step = event.deltaMode === 1 ? 3 : event.deltaMode === 2 ? 1 : 75;
+          if (!event.shiftKey && Math.abs(event.deltaY) >= Math.abs(event.deltaX)) {
+            const bounds = canvas.getBoundingClientRect();
+            if (event.deltaY && Module['_wave_zoom_node_graph'](event.clientX - bounds.left,
+                event.clientY - bounds.top, -event.deltaY / step)) {
+              event.preventDefault();
+              return;
+            }
+            if (usesDocumentScroll(event, bounds)) return;
+          }
           const horizontal = event.shiftKey && event.deltaX === 0;
           scrollPanel(event, -(horizontal ? event.deltaY : event.deltaX) / step,
                       horizontal ? 0 : -event.deltaY / step);
@@ -416,6 +482,7 @@
         window.addEventListener("unhandledrejection", showStartupError);
         return {
           canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
+          updateConfigLinks, updateConfigTabs,
           panelFocus, setTextInput, installTextInput, copyText, updateConsole, onAbort: showStartupError
         };
       })();

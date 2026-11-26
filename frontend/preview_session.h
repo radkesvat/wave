@@ -1,7 +1,5 @@
 #pragma once
 
-#include "users_data.h"
-
 #include <emscripten/websocket.h>
 #include <nlohmann/json.hpp>
 
@@ -35,6 +33,7 @@ struct PreviewReply {
 
     Status status;
     std::string message;
+    nlohmann::json result;
 
     bool ok() const
     {
@@ -63,10 +62,6 @@ class PreviewSession {
     const nlohmann::json& data() const
     {
         return data_;
-    }
-    const UsersData& users() const
-    {
-        return users_;
     }
     std::string_view feedback() const
     {
@@ -98,7 +93,6 @@ class PreviewSession {
     double deadline_ = 0;
     PreviewStatus status_ = PreviewStatus::loading;
     nlohmann::json data_ = nlohmann::json::object();
-    UsersData users_;
     std::string feedback_;
     std::string feedback_action_;
     std::map<std::string, PreviewFeedback, std::less<>> action_feedback_;

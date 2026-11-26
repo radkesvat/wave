@@ -22,7 +22,7 @@ constexpr ImVec2 card_padding{10, 8};
 constexpr float minimum_plot_height = 134;
 constexpr char unavailable[] = "Unavailable";
 
-using InfoRows = std::array<std::pair<const char*, std::string>, 9>;
+using InfoRows = std::array<std::pair<const char*, std::string>, 8>;
 
 struct StatusSamples {
     const Json& cpu;
@@ -106,10 +106,6 @@ InfoRows server_information(const Json& server, const StatusSamples& samples)
                                   ? std::to_string(integer_field(server, "cpu_cores"))
                                   : unavailable},
              {"Memory", samples.memory_value()},
-             {"Sample users",
-              std::format("{} total, {} enabled, {} online", integer_field(server, "users_total"),
-                          integer_field(server, "users_enabled"),
-                          integer_field(server, "users_online", integer_field(server, "users_active")))},
              {"Host sent", sent ? std::format("{:.1f} GiB", *sent) : unavailable},
              {"Host received", received ? std::format("{:.1f} GiB", *received) : unavailable}}};
 }
