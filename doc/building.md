@@ -175,6 +175,9 @@ private key in **Panel Settings**.
 
 ### Preview controls and server options
 
+Tab goes from **Menu** and **Tools** into the workspace. Press Enter on a
+focused pane, then use Tab to move between its controls.
+
 The Users table switches to a paginated layout when the work pane lacks room
 for the desktop columns and names. Drag a desktop column divider to resize
 it for the current session. The enabled switch follows the latest preview

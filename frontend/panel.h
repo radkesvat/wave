@@ -36,7 +36,6 @@ enum class PanelDialog {
 
 inline constexpr int panel_menu_control = 1;
 inline constexpr int panel_tools_control = 2;
-inline constexpr int panel_canvas_control = 3;
 
 struct PanelNavigationItem {
     const char* label;

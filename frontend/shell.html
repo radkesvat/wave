@@ -109,9 +109,8 @@
         const navigation = document.getElementById("navigation");
         const textInput = document.getElementById("wave-text-input");
         const pageLinks = new Map();
-        const controlIds = new Map();
+        const headerControlIds = new Map();
         let activePage;
-        let keyboardNavigation = true;
         let touch = null;
         let writingClipboard = false;
         startup.hidden = false;
@@ -127,7 +126,6 @@
         }
 
         function registerControl(element, id, focusCanvas) {
-          controlIds.set(element, id);
           element.addEventListener("click", event => {
             event.preventDefault();
             if (focusCanvas) canvas.focus({ preventScroll: true });
@@ -135,18 +133,17 @@
           });
         }
 
-        window.addEventListener("pointerdown", () => { keyboardNavigation = false; }, true);
-        window.addEventListener("keydown", () => { keyboardNavigation = true; }, true);
-
-        function registerHeaderControls(menuId, toolsId, canvasId) {
+        function registerHeaderControls(menuId, toolsId) {
+          headerControlIds.set(menu, menuId);
+          headerControlIds.set(tools, toolsId);
           registerControl(menu, menuId, true);
           registerControl(tools, toolsId, true);
-          controlIds.set(canvas, canvasId);
         }
 
         function registerPanelPage(id, label) {
           const link = document.createElement("a");
           link.href = "#canvas";
+          link.tabIndex = -1;
           link.textContent = label;
           registerControl(link, id, false);
           pageLinks.set(id, link);
@@ -313,8 +310,7 @@
         }
 
         function panelFocus() {
-          if (document.activeElement === canvas && !keyboardNavigation) return 0;
-          return controlIds.get(document.activeElement) ?? 0;
+          return headerControlIds.get(document.activeElement) ?? 0;
         }
 
         window.addEventListener("error", showStartupError, true);

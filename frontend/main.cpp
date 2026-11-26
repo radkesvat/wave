@@ -50,8 +50,8 @@ EM_JS(void, set_scrollbar_colors, (ImU32 track, ImU32 thumb, ImU32 hover, ImU32 
     }
 });
 
-EM_JS(void, register_header_controls, (int menu, int tools, int canvas), {
-    Module['registerHeaderControls'](menu, tools, canvas);
+EM_JS(void, register_header_controls, (int menu, int tools), {
+    Module['registerHeaderControls'](menu, tools);
 });
 
 EM_JS(void, register_panel_page, (int page, const char* label), {
@@ -175,8 +175,7 @@ struct Application {
         };
         apply_theme(high_contrast);
         install_text_input();
-        register_header_controls(wave::panel_menu_control, wave::panel_tools_control,
-                                 wave::panel_canvas_control);
+        register_header_controls(wave::panel_menu_control, wave::panel_tools_control);
         for (const auto& item : wave::panel_navigation()) {
             register_panel_page(static_cast<int>(item.page), item.label);
         }

@@ -13,7 +13,6 @@
 #include <array>
 #include <cstring>
 #include <format>
-#include <optional>
 
 namespace wave {
 namespace {
@@ -85,24 +84,19 @@ struct PanelLayout {
     }
 };
 
-void focus_outline(ImVec2 min, ImVec2 max, float rounding = theme::square_radius)
-{
-    ImGui::GetWindowDrawList()->AddRect({min.x - 1, min.y - 1}, {max.x + 1, max.y + 1}, packed(Color::focus),
-                                        rounding, theme::focus_width);
-}
-
-bool begin_pane(const char* name, ImVec2 size, Color surface, ImGuiWindowFlags flags = 0)
+bool begin_pane(const char* name, ImVec2 size, Color surface, ImGuiWindowFlags flags = 0,
+                ImGuiChildFlags child_flags = 0)
 {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::rgba(surface));
     ImGui::PushStyleColor(ImGuiCol_Border, theme::rgba(Color::divider));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, theme::pane_radius);
-    const bool visible = ImGui::BeginChild(name, size, ImGuiChildFlags_Borders, flags);
+    const bool visible = ImGui::BeginChild(name, size, ImGuiChildFlags_Borders | child_flags, flags);
     ImGui::PopStyleVar();
     ImGui::PopStyleColor(2);
     return visible;
 }
 
-float draw_header(const PanelLayout& layout, ImVec2 viewport, int focus)
+float draw_header(const PanelLayout& layout, ImVec2 viewport)
 {
     auto& draw = *ImGui::GetWindowDrawList();
     draw.AddRectFilled({0, 0}, {viewport.x, layout.header_height}, packed(Color::header));
@@ -110,9 +104,6 @@ float draw_header(const PanelLayout& layout, ImVec2 viewport, int focus)
     draw.AddRectFilled({0, layout.header_height - theme::border_width}, {viewport.x, layout.header_height},
                        packed(Color::divider));
     draw.AddRectFilled({12, 10}, {40, 38}, packed(Color::raised), theme::control_radius);
-    if (focus == panel_canvas_control) {
-        focus_outline({12, 10}, {40, 38}, theme::control_radius);
-    }
     constexpr ImVec2 wave[] = {{17, 26}, {22, 21}, {25, 21}, {29, 27}, {31, 27}, {35, 22}};
     draw.AddPolyline(wave, IM_ARRAYSIZE(wave), packed(Color::accent), 2);
     const float title_size = layout.wide ? theme::title_font_size : theme::workspace_font_size;
@@ -191,7 +182,8 @@ HeaderTrigger draw_header_trigger(const HeaderPopup& popup, const PanelState& st
                                              theme::selection_width);
     }
     if (focus == popup.control) {
-        focus_outline(min, max, theme::control_radius);
+        ImGui::GetWindowDrawList()->AddRect({min.x - 1, min.y - 1}, {max.x + 1, max.y + 1},
+                                            packed(Color::focus), theme::control_radius, theme::focus_width);
     }
 
     // When a header popup owns hover, pressing either trigger should still toggle or switch it.
@@ -285,7 +277,7 @@ void render_menus(PanelState& state, float x, int focus, PreviewSession& session
     ImGui::PopFont();
 }
 
-void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 viewport, int focus)
+void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 viewport)
 {
     if (!layout.sidebar) {
         return;
@@ -297,9 +289,11 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
     ImGui::SetCursorScreenPos({margin, layout.header_height + margin});
     const float height =
         layout.narrow ? narrow_navigation_height - margin : viewport.y - layout.header_height - 2 * margin;
+    // Share the workspace focus scope so Tab can reach its controls after a sidebar click.
     if (begin_pane("Navigation", {width, height}, Color::pane,
-                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
-        std::optional<std::array<ImVec2, 2>> focused_item;
+                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse,
+                   ImGuiChildFlags_NavFlattened)) {
+        ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
         ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, {0.0f, 0.5f});
         for (std::size_t i = 0; i < navigation.size(); ++i) {
             const int row = static_cast<int>(i) / columns;
@@ -328,15 +322,9 @@ void render_navigation(PanelState& state, const PanelLayout& layout, ImVec2 view
                     {right - theme::selection_width, std::ceil(min.y) + 2}, {right, std::floor(max.y) - 2},
                     packed(Color::accent));
             }
-            if (focus == static_cast<int>(item.page)) {
-                focused_item = std::array{ImGui::GetItemRectMin(), ImGui::GetItemRectMax()};
-            }
-        }
-        // Selectable backgrounds include the spacing between rows. Draw focus above neighboring rows.
-        if (focused_item) {
-            focus_outline((*focused_item)[0], (*focused_item)[1]);
         }
         ImGui::PopStyleVar();
+        ImGui::PopItemFlag();
     }
     ImGui::EndChild();
 }
@@ -582,7 +570,7 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
     ImGui::PopStyleVar(2);
 
     PanelLayout layout(viewport_width, state);
-    const float menu_x = draw_header(layout, viewport, browser_focus);
+    const float menu_x = draw_header(layout, viewport);
     render_menus(state, menu_x, browser_focus, session);
     state.browser_control = 0;
     layout = PanelLayout(viewport_width, state);
@@ -594,7 +582,7 @@ void render_panel(PanelState& state, PreviewSession& session, const OverviewData
         }
         render_entry(state.entry, session, top);
     } else {
-        render_navigation(state, layout, viewport, browser_focus);
+        render_navigation(state, layout, viewport);
         const float width = layout.work_width(viewport.x);
         const bool stacked_status = layout.stack_server_status(state, viewport.x);
         const float logs_height =

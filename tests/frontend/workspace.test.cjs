@@ -409,6 +409,42 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
 
         const menu = page.getByRole('button', { name: 'Menu' });
         const tools = page.getByRole('button', { name: 'Tools' });
+        const sidebar = { x: 8, y: 54, width: 174, height: 744 };
+        const unfocusedSidebar = await page.screenshot({ clip: sidebar });
+        const activeControl = () => page.evaluate(() => document.activeElement.id);
+        await menu.focus();
+        await page.keyboard.press('Tab');
+        assert.equal(await activeControl(), 'tools');
+        await page.keyboard.press('Tab');
+        assert.equal(await activeControl(), 'canvas', 'Tab enters the workspace after Tools.');
+        await settleCanvas(page);
+        assert.ok((await page.screenshot({ clip: headerEdge })).equals(unfocusedEdge));
+        assert.ok((await page.screenshot({ clip: brandTile })).equals(unfocusedBrand),
+            'The logo keeps its appearance when the canvas receives focus.');
+
+        for (let step = 0; step < 3; step++) {
+            await page.keyboard.press('Tab');
+            await settleCanvas(page);
+        }
+        assert.ok((await page.screenshot({ clip: sidebar })).equals(unfocusedSidebar),
+            'Tab passes the sidebar inside the canvas.');
+        await page.keyboard.press('Enter');
+        await settleCanvas(page);
+        for (let step = 0; step < 3; step++) {
+            await page.keyboard.press('Tab');
+            await settleCanvas(page);
+        }
+        await page.locator('#wave-text-input').waitFor({ state: 'visible', timeout: 5000 });
+        await page.keyboard.press('Escape');
+        await settleCanvas(page);
+
+        await canvasClick(page, 65, 110);
+        await page.mouse.move(400, 30);
+        await page.keyboard.press('Tab');
+        await settleCanvas(page);
+        assert.ok((await page.screenshot({ clip: sidebar })).equals(unfocusedSidebar),
+            'Tab passes the sidebar after a click on the selected page.');
+
         for (const [button, other] of [[menu, tools], [tools, menu]]) {
             await button.focus();
             await page.keyboard.press('Enter');
@@ -419,33 +455,11 @@ test('opens Users, supports keyboard navigation, and resizes at 2× DPI', async 
             await page.locator(`#${await button.getAttribute('id')}[aria-expanded="false"]`).waitFor();
         }
 
-        const firstNavRow = { x: 11, y: 61, width: 162, height: 34 };
-        await tools.focus();
-        await settleCanvas(page);
-        const unfocused = await page.screenshot({ clip: firstNavRow });
-        for (const [index, name] of pages.entries()) {
-            await page.keyboard.press('Tab');
-            assert.equal(await page.evaluate(() => document.activeElement.textContent), name);
-            if (index === 0) {
-                await settleCanvas(page);
-                assert.notDeepEqual(await page.screenshot({ clip: firstNavRow }), unfocused);
-            }
-            await page.keyboard.press('Enter');
-            await assertPage(name);
-        }
-        await page.getByRole('img', { name: /CPU utilization 63 percent.*Memory 4\.5 of 16\.0 GiB.*Latest 9\.6 MiB/ }).waitFor();
-        await page.keyboard.press('Tab');
-        assert.equal(await page.evaluate(() => document.activeElement.id), 'canvas');
-        await settleCanvas(page);
-        assert.ok((await page.screenshot({ clip: headerEdge })).equals(unfocusedEdge),
-            'Keyboard focus leaves the canvas edge unchanged.');
-        assert.ok(!(await page.screenshot({ clip: brandTile })).equals(unfocusedBrand),
-            'Keyboard focus is visible on the brand tile.');
-
         for (const [index, name] of pages.entries()) {
             await canvasClick(page, 65, 76 + 34 * index);
             await assertPage(name);
         }
+        await page.getByRole('img', { name: /CPU utilization 63 percent.*Memory 4\.5 of 16\.0 GiB.*Latest 9\.6 MiB/ }).waitFor();
 
         await page.setViewportSize(portrait);
         await waitForCanvas(page, portrait, true);
