@@ -14,6 +14,7 @@ const timeout = 10000;
 let url;
 let previewUrl;
 let sessionUrl;
+let consoleUrl;
 let server;
 let browser;
 
@@ -25,6 +26,10 @@ before(async () => {
         ['/panel', 'index.html', 'text/html; charset=utf-8'],
         ['/index.js', 'index.js', 'text/javascript; charset=utf-8'],
         ['/index.wasm', 'index.wasm', 'application/wasm'],
+        ['/console.js', 'console.js', 'text/javascript; charset=utf-8'],
+        ['/terminal/xterm.js', 'terminal/xterm.js', 'text/javascript; charset=utf-8'],
+        ['/terminal/addon-fit.js', 'terminal/addon-fit.js', 'text/javascript; charset=utf-8'],
+        ['/terminal/xterm.css', 'terminal/xterm.css', 'text/css; charset=utf-8'],
     ]) {
         assets.set(path, { contentType, contents: await readFile(join(siteDir, filename)) });
     }
@@ -42,6 +47,7 @@ before(async () => {
     url = `http://${host}/panel`;
     sessionUrl = `ws://${host}/ws/panel`;
     previewUrl = `ws://${host}/ws/preview`;
+    consoleUrl = `ws://${host}/ws/console`;
     browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader'] });
 });
 
@@ -85,7 +91,6 @@ function fixture(coreState = 'running') {
         core_settings: { misc: { workers: 2 } },
         topology: { nodes: [], links: [], routes: [] },
         bot: {},
-        console: { running: true, output: [], history: ['status'] },
     };
 }
 
@@ -334,31 +339,65 @@ test('saves Panel TLS and Core JSON settings without mixing their drafts', async
     }
 });
 
-test('fills the Console pane above the command input and sends a command', async () => {
+test('renders a full-screen terminal, forwards keystrokes and resize, and closes on navigation', async () => {
     const viewport = { width: 1920, height: 978 };
     const page = await browser.newPage({ viewport });
-    const data = fixture();
-    const preview = await mockPreview(page, data);
+    const preview = await mockPreview(page, fixture());
+    const connected = Promise.withResolvers();
+    const messages = new EventEmitter();
+    const frames = [];
+    let connections = 0;
+    let closed = false;
+    await page.routeWebSocket(consoleUrl, socket => {
+        connections++;
+        socket.onMessage(frame => {
+            frames.push(frame);
+            messages.emit('frame');
+        });
+        socket.onClose(() => {
+            closed = true;
+            messages.emit('close');
+        });
+        connected.resolve(socket);
+    });
+    const waitForFrame = async predicate => {
+        const signal = AbortSignal.timeout(timeout);
+        while (!frames.some(predicate)) await once(messages, 'frame', { signal });
+        return frames.find(predicate);
+    };
+    const resize = frame => {
+        if (typeof frame !== 'string') return false;
+        const message = JSON.parse(frame);
+        return message.type === 'resize' && message;
+    };
     try {
         await page.goto(url);
         await waitForUsers(page);
         await openView(page, 'Console');
-        await settleCanvas(page);
-        const x = viewport.width / 2;
-        const paneBottom = viewport.height - 244 - 20;
-        const [output] = await verticalRuns(page, x, 0, paneBottom, [5, 5, 6], 150);
-        const command = (await verticalRuns(page, x, 0, paneBottom, [13, 11, 14], 14))
-            .find(([start]) => start > output?.[1]);
-        assert.ok(output && command, 'Expected Console output above the command input.');
-        assert.ok(command[0] - output[1] <= 10, 'The output fills the available Console height.');
-        assert.ok(paneBottom - command[1] <= 18, 'The command input sits at the bottom of the pane.');
-        await replaceText(page, x, Math.floor((command[0] + command[1]) / 2), 'status');
-        await page.keyboard.press('Enter');
-        const submitted = await preview.action(0);
-        assert.deepEqual(submitted.request, { action: 'console_command', input: 'status' });
-        data.console.output.push('$ status', 'Fixture Console is running.');
-        submitted.reply({ feedback: 'Processed fixture Console command.' });
-        await status(page, /Processed fixture Console command/);
+        assert.equal(connections, 0, 'Opening Console does not start a shell on its own.');
+        await page.getByRole('button', { name: 'Open terminal', exact: true }).click({ timeout });
+        const initial = resize(await waitForFrame(resize));
+        assert.ok(initial.cols >= 80 && initial.rows >= 24);
+        const socket = await connected.promise;
+        socket.send(JSON.stringify({ type: 'ready' }));
+        socket.send(Buffer.from('\x1b[?1049h\x1b[2J\x1b[H\x1b[32mFixture screen 雪\x1b[0m'));
+
+        const terminal = page.locator('#wave-console-terminal');
+        const bounds = await terminal.boundingBox();
+        assert.ok(bounds && bounds.height >= 400 && bounds.width >= 800, 'The terminal fills the work pane.');
+        await terminal.getByText('Fixture screen 雪', { exact: true }).waitFor({ timeout });
+        await terminal.locator('textarea').focus();
+        await page.keyboard.press('ArrowUp');
+        await page.keyboard.press('Control+c');
+        await waitForFrame(frame => Buffer.isBuffer(frame) && frame.equals(Buffer.from('\x1b[A')));
+        await waitForFrame(frame => Buffer.isBuffer(frame) && frame.equals(Buffer.from('\x03')));
+
+        await page.setViewportSize({ width: 1280, height: 840 });
+        await waitForFrame(frame => resize(frame)?.cols < initial.cols);
+        await openView(page, 'Users');
+        await page.locator('#wave-console').waitFor({ state: 'hidden', timeout });
+        if (!closed) await once(messages, 'close', { signal: AbortSignal.timeout(timeout) });
+        assert.equal(preview.actions.length, 0, 'Terminal input bypasses the preview socket.');
     } finally {
         await page.close();
     }

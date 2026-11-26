@@ -181,6 +181,10 @@ current one. The session monitor at `/ws/panel` and the workspace sockets
 check origin and session before upgrading. Active connections close when
 their session expires or is revoked.
 
+The Console starts a host shell under the Wave backend's operating system
+account after the administrator opens it. Sign-out and credential changes
+revoke access to open terminals as well. [Console](building.md#console)
+
 ## Tests
 
 The native suites use Node.js 22 or later and the OpenSSL command-line tool.

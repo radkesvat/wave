@@ -46,8 +46,6 @@ constexpr std::size_t max_topology_nodes = 64;
 constexpr std::size_t max_node_name_bytes = 64;
 constexpr std::size_t max_core_configs = 64;
 constexpr std::size_t max_logs = 100;
-constexpr std::size_t max_console_lines = 80;
-constexpr std::size_t max_console_history = 32;
 
 Json user_options()
 {
@@ -182,14 +180,6 @@ Json make_bot()
             {"last_message", ""}};
 }
 
-Json make_console()
-{
-    return {{"history", Json::array({"status"})}, {"running", true}, {"output", Json::array({
-        "Wave Bash preview. Type help for available demo commands.",
-        "$ status", "Preview process ready. WaterWall is disconnected.",
-    })}};
-}
-
 Json make_data()
 {
     return {{"users", make_users()}, {"users_live", true}, {"logs", Json::array({
@@ -199,8 +189,7 @@ Json make_data()
                 {{"ts", "09:41:06"}, {"level", "info"}, {"message", "Loaded the sample topology and bot settings."}},
                 {{"ts", "09:41:10"}, {"level", "success"}, {"message", "Preview workspace is ready."}},
             })},
-            {"server", make_server()}, {"settings", make_settings()}, {"topology", make_topology()},
-            {"bot", make_bot()}, {"console", make_console()}};
+            {"server", make_server()}, {"settings", make_settings()}, {"topology", make_topology()}, {"bot", make_bot()}};
 }
 
 bool text_value(const Json& value, std::size_t limit, bool required = false)
@@ -927,40 +916,6 @@ private:
                         (audience == input.end() ? "preview users" : audience->get<std::string>()) + '.');
     }
 
-    Reply console_command(const Json& input)
-    {
-        auto& console = data_["console"];
-        if (console["running"] != true) {
-            return {false, "Start the demo terminal before entering a command."};
-        }
-        const auto value = input.find("input");
-        if (value == input.end() || !text_value(*value, 512, true)) {
-            return {false, "Enter a demo command."};
-        }
-        const auto& command = value->get_ref<const std::string&>();
-        std::string output = "Recorded as preview input. Type help for available demo commands.";
-        if (command == "help") {
-            output = "Demo commands: help, status, uptime, users, whoami, pwd.";
-        } else if (command == "status") {
-            output = "Preview process ready. WaterWall is disconnected.";
-        } else if (command == "uptime") {
-            const auto& uptime = data_["server"]["uptime_minutes"];
-            output = uptime.is_number() ? "Host uptime: " + std::to_string(uptime.get<std::uint64_t>()) + " minutes."
-                                        : "Host uptime is unavailable.";
-        } else if (command == "users") {
-            output = std::to_string(data_["users"].size()) + " sample users.";
-        } else if (command == "whoami") {
-            output = "wave-preview";
-        } else if (command == "pwd") {
-            output = "/preview/workspace";
-        }
-
-        append_bounded(console["history"], command, max_console_history);
-        append_bounded(console["output"], "$ " + command, max_console_lines);
-        append_bounded(console["output"], std::move(output), max_console_lines);
-        return complete("Processed demo console input.", "info");
-    }
-
     Reply change_core_state(std::string_view action)
     {
         if (action == "install_core") {
@@ -1139,18 +1094,6 @@ private:
         }
         if (action == "restore_preview_backup") {
             return restore_backup(input);
-        }
-        if (action == "console_command") {
-            return console_command(input);
-        }
-        if (action == "clear_console") {
-            data_["console"]["output"].clear();
-            return complete("Cleared demo console output.", "info");
-        }
-        if (action == "start_console" || action == "stop_console") {
-            const bool running = action == "start_console";
-            data_["console"]["running"] = running;
-            return complete(running ? "Started demo terminal." : "Stopped demo terminal.", "info");
         }
         if (action == "bot_connect") {
             const auto token = input.find("token");

@@ -1,20 +1,16 @@
 #include "waterwall.h"
 
+#include "child_process.h"
 #include "waterwall_install.h"
 
-#include <algorithm>
 #include <cerrno>
-#include <limits>
 #include <utility>
 
 #include <fcntl.h>
-#include <linux/close_range.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
-#include <sys/resource.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -74,20 +70,6 @@ int core_input(std::string_view json)
     return fd;
 }
 
-void close_inherited_files(int error_pipe, rlim_t descriptor_limit)
-{
-#ifdef SYS_close_range
-    if (::syscall(SYS_close_range, 3u, std::numeric_limits<unsigned int>::max(), CLOSE_RANGE_CLOEXEC) == 0) {
-        return;
-    }
-#endif
-    for (int fd = 3; static_cast<rlim_t>(fd) < descriptor_limit; ++fd) {
-        if (fd != error_pipe) {
-            ::close(fd);
-        }
-    }
-}
-
 // Takes ownership of the configuration descriptor.
 pid_t launch(const fs::path& executable, const fs::path& directory, int input)
 {
@@ -106,11 +88,7 @@ pid_t launch(const fs::path& executable, const fs::path& directory, int input)
         }
         result_pipe[1] = writer;
     }
-    struct rlimit descriptors{};
-    const auto descriptor_limit =
-        ::getrlimit(RLIMIT_NOFILE, &descriptors) == 0
-            ? std::min<rlim_t>(descriptors.rlim_cur, std::numeric_limits<int>::max())
-            : 1024;
+    const auto descriptor_limit = open_file_limit();
     const auto parent = ::getpid();
     const char* program = executable.c_str();
     const char* working_dir = directory.c_str();

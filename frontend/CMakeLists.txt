@@ -13,6 +13,23 @@ FetchContent_Declare(implot
 )
 FetchContent_MakeAvailable(implot)
 
+# xterm.js 6.0.0 and its Fit addon 0.11.0, distributed as browser modules.
+FetchContent_Declare(xterm
+    URL https://registry.npmjs.org/@xterm/xterm/-/xterm-6.0.0.tgz
+    URL_HASH SHA256=908e66e04af6c8dc6b00dd3b54de088e2e81e5ed866284fd6c2fb3c2d1c7a3f6
+)
+FetchContent_Declare(xterm_fit
+    URL https://registry.npmjs.org/@xterm/addon-fit/-/addon-fit-0.11.0.tgz
+    URL_HASH SHA256=26003b4517a132b64e4ff228fd88a5fda3fff5e606c76093f6dcff772e9ecec0
+)
+FetchContent_MakeAvailable(xterm xterm_fit)
+configure_file(console.js "${CMAKE_BINARY_DIR}/site/console.js" COPYONLY)
+configure_file("${xterm_SOURCE_DIR}/lib/xterm.mjs" "${CMAKE_BINARY_DIR}/site/terminal/xterm.js" COPYONLY)
+configure_file("${xterm_SOURCE_DIR}/css/xterm.css" "${CMAKE_BINARY_DIR}/site/terminal/xterm.css" COPYONLY)
+configure_file("${xterm_fit_SOURCE_DIR}/lib/addon-fit.mjs" "${CMAKE_BINARY_DIR}/site/terminal/addon-fit.js" COPYONLY)
+configure_file("${xterm_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/site/licenses/xterm.txt" COPYONLY)
+configure_file("${xterm_fit_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/site/licenses/xterm-addon-fit.txt" COPYONLY)
+
 set(WAVE_STARTUP_CANVAS 080C10)
 set(WAVE_STARTUP_TEXT EAEBFF)
 set(wave_shell "${CMAKE_CURRENT_BINARY_DIR}/shell.html")

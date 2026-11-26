@@ -29,7 +29,6 @@ constexpr auto standard = [] {
     colors[index(Color::pane)] = rgb(0x1F1B22);
     colors[index(Color::toolbar)] = rgb(0x1A171C);
     colors[index(Color::raised)] = rgb(0x2B2730);
-    colors[index(Color::console)] = rgb(0x050506);
     colors[index(Color::divider)] = rgb(0x3D3A43);
     colors[index(Color::plot_grid)] = colors[index(Color::divider)];
     colors[index(Color::control_border)] = rgb(0x8A8495);

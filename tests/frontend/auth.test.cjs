@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
+const { setTimeout: delay } = require('node:timers/promises');
 const { chromium } = require('playwright-core');
 const { authFixture, timeout } = require('../backend/auth_fixture.cjs');
 
@@ -60,7 +61,21 @@ async function submitCredentials(page, { username, password }, pastePassword = f
     await page.keyboard.press('Enter');
 }
 
-test('sets up an administrator, signs in, and signs out through the browser', async t => {
+async function waitForShellExit(pid) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        try {
+            process.kill(pid, 0);
+        } catch (error) {
+            assert.equal(error.code, 'ESRCH');
+            return;
+        }
+        await delay(20);
+    }
+    assert.fail(`Console shell ${pid} is still running after sign-out.`);
+}
+
+test('authenticates an administrator and closes the terminal on sign-out', async t => {
     assert.ok(process.env.WAVE_SITE_DIR, 'Set WAVE_SITE_DIR to a built Wave frontend.');
     const fixture = await authFixture(t, process.env.WAVE_SITE_DIR, { encrypted: false });
     await fixture.start();
@@ -73,6 +88,7 @@ test('sets up an administrator, signs in, and signs out through the browser', as
 
     await page.goto(fixture.origin + '/panel');
     await waitForStatus(page, 'Set up administrator.');
+    assert.equal((await context.request.get(fixture.origin + '/terminal/xterm.js')).status(), 401);
     const setup = page.waitForRequest('**/api/auth/setup', { timeout });
     await submitCredentials(page, credentials, true);
     assert.deepEqual((await setup).postDataJSON(), credentials);
@@ -84,12 +100,35 @@ test('sets up an administrator, signs in, and signs out through the browser', as
     await page.reload();
     await waitForStatus(page, workspace);
 
+    let shellPid;
+    if (process.platform === 'linux') {
+        await page.getByRole('link', { name: 'Console', exact: true }).focus();
+        await page.keyboard.press('Enter');
+        await page.getByRole('button', { name: 'Open terminal', exact: true }).click({ timeout });
+        const terminal = page.locator('#wave-console-terminal');
+        await page.locator('#wave-console-status').getByText('Connected', { exact: true }).waitFor({ timeout });
+        await terminal.locator('textarea').focus();
+        await page.evaluate(() => navigator.clipboard.writeText(
+            'if [ -t 0 ] && [ -t 1 ]; then printf "PTY_%s:%s\\n" OK "$$"; fi'
+        ));
+        await page.keyboard.press('Control+Shift+v');
+        await settleCanvas(page);
+        await page.keyboard.press('Enter');
+        const pidLine = terminal.getByText(/^PTY_OK:\d+$/);
+        await pidLine.waitFor({ timeout });
+        shellPid = Number((await pidLine.textContent()).split(':')[1]);
+        assert.ok(Number.isSafeInteger(shellPid) && shellPid > 0);
+    }
+
     await page.mouse.click(134, 23, { delay: 40 });
     await settleCanvas(page);
     await page.mouse.click(172, 135, { delay: 40 });
     await page.waitForFunction(() => document.getElementById('panel-controls').inert, null, { timeout });
+    const signOut = page.waitForResponse('**/api/auth/sign-out', { timeout });
     await page.mouse.click(757, 426, { delay: 40 });
+    assert.equal((await signOut).status(), 204);
     await waitForStatus(page, 'Sign in to Wave.');
+    if (shellPid) await waitForShellExit(shellPid);
     await page.goto(fixture.origin + '/panel');
     await waitForStatus(page, 'Sign in to Wave.');
 });

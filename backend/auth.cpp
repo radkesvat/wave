@@ -179,8 +179,18 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
     server.Get("/index.wasm", [file = (site_dir / "index.wasm").string()](const Request&, Response& res) {
         res.set_file_content(file, "application/wasm");
     });
+    for (const auto* name : {"console.js", "terminal/xterm.js", "terminal/addon-fit.js"}) {
+        server.Get(std::string("/") + name, [file = (site_dir / name).string()](const Request&, Response& res) {
+            res.set_file_content(file, "text/javascript; charset=utf-8");
+        });
+    }
+    server.Get("/terminal/xterm.css",
+               [file = (site_dir / "terminal/xterm.css").string()](const Request&, Response& res) {
+                   res.set_file_content(file, "text/css; charset=utf-8");
+               });
     for (const auto* name : {"wave.txt", "dear-imgui.txt", "poppins.txt", "nlohmann-json.txt",
-                             "nlohmann-json-third-party.txt", "nayuki-qr.txt", "implot.txt"}) {
+                             "nlohmann-json-third-party.txt", "nayuki-qr.txt", "implot.txt",
+                             "xterm.txt", "xterm-addon-fit.txt"}) {
         server.Get(std::string("/licenses/") + name,
                    [file = (site_dir / "licenses" / name).string()](const Request&, Response& res) {
                        res.set_file_content(file, "text/plain; charset=utf-8");

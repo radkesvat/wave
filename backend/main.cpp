@@ -1,5 +1,6 @@
 #include "auth.h"
 #include "auth_store.h"
+#include "console.h"
 #include "panel_settings.h"
 #include "preview.h"
 
@@ -94,6 +95,7 @@ void configure_workspace_routes(httplib::Server& server, const std::shared_ptr<w
             }
         }
     });
+    wave::configure_console_route(server, store, database->directory());
     wave::configure_preview_routes(server, store, database, first_install);
 }
 

@@ -89,6 +89,14 @@ function frameReader(socket, initial) {
     };
 }
 
+function clientFrame(opcode, data) {
+    const payload = Buffer.from(data);
+    assert.ok(payload.length < 126);
+    const mask = randomBytes(4);
+    const maskedPayload = payload.map((byte, index) => byte ^ mask[index % mask.length]);
+    return Buffer.concat([Buffer.from([0x80 | opcode, 0x80 | payload.length]), mask, maskedPayload]);
+}
+
 function assertCookie(response, maxAge) {
     assert.equal(response.status, 204);
     assert.equal(response.headers['set-cookie']?.length, 1);
@@ -112,7 +120,7 @@ async function assertPolicyClose(ws) {
     let frame;
     do {
         frame = await ws.frame();
-    } while (frame.opcode === 1);
+    } while (frame.opcode === 1 || frame.opcode === 2);
     assert.equal(frame.opcode, 8);
     assert.equal(frame.payload.readUInt16BE(), 1008);
 }
@@ -160,12 +168,31 @@ test('HTTPS verifies trust and enforces durable JWT sessions on HTTP and WebSock
 
     const ws = await upgrade(authenticated);
     assert.equal(ws.status, 101);
+    const terminal = process.platform === 'linux' ? await upgrade(authenticated, '/ws/console') : null;
     try {
         assert.equal((await ws.frame()).opcode, 1);
+        if (terminal) {
+            assert.equal(terminal.status, 101);
+            terminal.socket.write(Buffer.concat([
+                clientFrame(1, JSON.stringify({ type: 'resize', cols: 80, rows: 24 })),
+                clientFrame(2, "unset HISTFILE; printf 'WAVE-WSS-%s\\n' READY\r"),
+            ]));
+            const ready = await terminal.frame();
+            assert.equal(ready.opcode, 1);
+            assert.equal(JSON.parse(ready.payload).type, 'ready');
+            let output = '';
+            while (!output.includes('WAVE-WSS-READY\r\n')) {
+                const frame = await terminal.frame();
+                assert.equal(frame.opcode, 2);
+                output += frame.payload.toString('utf8');
+            }
+        }
         assertCookie(await post('sign-out', {}, authenticated), 0);
         await assertPolicyClose(ws);
+        if (terminal) await assertPolicyClose(terminal);
     } finally {
         ws.socket.destroy();
+        terminal?.socket?.destroy();
     }
 
     const shortSession = assertCookie(await post('sign-in', credentials), expirySeconds);

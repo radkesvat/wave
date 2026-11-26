@@ -33,7 +33,7 @@ bool valid_snapshot(const Json& data)
             return false;
         }
     }
-    for (const char* key : {"server", "settings", "topology", "bot", "console"}) {
+    for (const char* key : {"server", "settings", "topology", "bot"}) {
         const auto item = data.find(key);
         if (item == data.end() || !item->is_object()) {
             return false;

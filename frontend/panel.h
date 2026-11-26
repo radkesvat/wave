@@ -48,7 +48,7 @@ struct PanelState {
     LogsViewState logs;
     TopologyViewState topology;
     SettingsViewState settings;
-    ConsoleViewState console;
+    CanvasViewport console{};
     PanelControlsState panel_controls;
     float stacked_server_status_height = 0;
     bool navigation_open = true;

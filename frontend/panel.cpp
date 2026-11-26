@@ -489,7 +489,7 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
 {
     const bool has_server = state.page == PanelPage::server && session.data().contains("server");
     if (!session.ready() && !has_server && state.page != PanelPage::about &&
-        state.page != PanelPage::settings) {
+        state.page != PanelPage::settings && state.page != PanelPage::console) {
         ImGui::TextUnformatted(panel_page_name(state.page));
         ImGui::Separator();
         if (session.status() == PreviewStatus::loading) {
@@ -523,7 +523,7 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
         render_settings(state.settings, state.auth, session, narrow);
         break;
     case PanelPage::console:
-        render_console(state.console, session, narrow);
+        state.console = render_console();
         break;
     case PanelPage::topology:
         render_topology(state.topology, session, narrow);
@@ -576,6 +576,7 @@ float panel_height(float viewport_width, float canvas_width, const PanelState& s
 
 void render_panel(PanelState& state, PreviewSession& session, float viewport_width, int browser_focus)
 {
+    state.console = {};
     state.topology.visible_bounds = {};
     const bool in_workspace = state.entry.page == EntryPage::workspace;
     if (in_workspace) {
@@ -639,7 +640,11 @@ void render_panel(PanelState& state, PreviewSession& session, float viewport_wid
         render_dialogs(state, session);
     }
     if (ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
+        state.console = {};
         state.topology.visible_bounds = {};
+    }
+    if (state.metrics_open || state.imgui_demo_open || state.implot_demo_open) {
+        state.console = {};
     }
     ImGui::End();
 }
@@ -648,6 +653,9 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
 {
     if (state.entry.page != EntryPage::workspace) {
         return describe_entry(state.entry);
+    }
+    if (state.page == PanelPage::console) {
+        return "Wave Console. WaterWall terminal.";
     }
     auto description = std::format("Wave {}. Preview. WaterWall disconnected.", panel_page_name(state.page));
     if (state.page == PanelPage::settings) {

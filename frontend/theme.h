@@ -19,7 +19,6 @@ enum class Color {
     pane,
     toolbar,
     raised,
-    console,
     divider,
     plot_grid,
     control_border,

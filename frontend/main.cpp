@@ -74,6 +74,10 @@ EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools, bool
     Module['updateNavigation'](page, open, menu, tools, modal, server_status);
 });
 
+EM_JS(void, update_console, (bool active, float x, float y, float width, float height, bool high_contrast), {
+    Module['updateConsole'](active, x, y, width, height, high_contrast);
+});
+
 EM_JS(int, browser_panel_focus, (), { return Module['panelFocus'](); });
 
 EM_JS(int, browser_viewport_width, (), { return window.innerWidth; });
@@ -329,6 +333,9 @@ struct Application {
                           panel.navigation_open && in_workspace, in_workspace && panel.menu_open,
                           in_workspace && panel.tools_open, !in_workspace || wave::dialog_open(),
                           panel.page == wave::PanelPage::server && in_workspace);
+        const auto& console = panel.console;
+        update_console(in_workspace && panel.page == wave::PanelPage::console, console.left, console.top,
+                       console.width, console.height, panel.high_contrast);
         if (!visible) {
             show_panel();
             visible = true;

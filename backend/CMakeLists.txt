@@ -39,7 +39,7 @@ target_link_libraries(wave-argon2 PRIVATE Threads::Threads)
 
 add_executable(wave-backend
     main.cpp panel_settings.cpp preview.cpp linux_metrics.cpp auth.cpp auth_store.cpp
-    waterwall.cpp waterwall_install.cpp core_config_files.cpp
+    waterwall.cpp waterwall_install.cpp core_config_files.cpp console.cpp
 )
 set_target_properties(wave-backend PROPERTIES
     CXX_STANDARD 20

@@ -11,8 +11,9 @@ records. See **Panel Controls** on Server Status for the WaterWall process state
 - Git and Python 3 for the Emscripten SDK setup
 - Emscripten SDK 7.0.1
 - Network access on the first build to fetch Dear ImGui v1.93.0, ImPlot v1.1,
-  nlohmann/json v3.12.0, Project Nayuki QR Code generator v1.8.0, and the SDK's
-  SDL2 port. [ImPlot release](https://github.com/epezent/implot/releases/tag/v1.1) [QR release](https://github.com/nayuki/QR-Code-generator/releases/tag/v1.8.0)
+  nlohmann/json v3.12.0, Project Nayuki QR Code generator v1.8.0,
+  xterm.js 6.0.0, its Fit Addon 0.11.0, and the SDK's SDL2 port.
+  [ImPlot release](https://github.com/epezent/implot/releases/tag/v1.1) [QR release](https://github.com/nayuki/QR-Code-generator/releases/tag/v1.8.0) [xterm.js](https://www.npmjs.com/package/@xterm/xterm/v/6.0.0) [Fit Addon](https://www.npmjs.com/package/@xterm/addon-fit/v/0.11.0)
 
 The SDK supplies the Clang-based `em++` driver and the Emscripten CMake toolchain.
 Install the SDK outside the Wave checkout and activate it in the shell you will
@@ -51,8 +52,9 @@ JavaScript loader. [Emscripten optimization guide](https://emscripten.org/docs/o
 Run the native backend to serve either frontend build. Pass
 `--site-dir build/web-debug/site` to use the debug build. [Native backend](#native-backend)
 
-Each preset writes `index.html`, `index.js`, `index.wasm`, and third-party
-license notices to its own `site/` directory. Add `--verbose` to a build command
+Each preset writes `index.html`, `index.js`, `index.wasm`, the console's
+JavaScript and stylesheet, and third-party license notices to its own
+`site/` directory. Add `--verbose` to a build command
 to show the compile and link commands. When switching SDK versions, add
 `--fresh` to the configure command to reset CMake's cached compiler and toolchain.
 
@@ -234,7 +236,7 @@ port after authentication. Panel assets are served with `Cache-Control: no-store
 
 The signed-in workspace opens `/ws/preview` on the same host and port. A JSON
 frame with `type` set to `snapshot` carries Users, Logs, server metrics, settings,
-topology, bot status, and console data in `data`. Requests specify an `action`
+topology, and bot status in `data`. Requests specify an `action`
 and its fields. The server replies with a snapshot and action feedback.
 Forms that wait for confirmation send a unique numeric `request_id`. The
 server echoes it to the requesting browser, and the form completes only
@@ -287,6 +289,33 @@ oldest first.
 
 With the default HTTP listener, open `http://<server-ip>:2045/` from another
 machine to reach the sign-in page. [HTTPS configuration](authentication.md#configure-tls)
+
+### Console
+
+Sign in and select **Console → Open terminal** to start a Linux shell. The
+shell starts beside `wave-backend`, the same working directory Wave uses for
+WaterWall. Wave uses Bash when installed and falls back to `/bin/sh`.
+The shell has the permissions of the operating system account running Wave.
+If Wave runs as root, the console has root access.
+Use HTTPS when accessing the console remotely.
+[HTTPS configuration](authentication.md#configure-tls)
+
+Run programs installed on the server, including `nano`, `btop`, and `htop`.
+The browser sends keystrokes and paste to a Linux pseudoterminal with
+`TERM=xterm-256color` and updates its dimensions as the pane resizes.
+Full-screen programs use the host's `xterm-256color` terminfo entry.
+Use **Ctrl+Shift+V** or the browser's Paste command to paste on Linux.
+Select **Ctrl**, then press a letter to send its control character.
+Select **Esc** to send Escape.
+Use `exit` or **Close terminal** to end the session. Leaving Console,
+disconnecting, and session revocation also close its terminal. A Wave backend
+can host up to four console sessions at a time.
+
+The terminal uses the authenticated, same-origin `/ws/console` WebSocket.
+Binary frames carry terminal bytes in both directions. A text frame such
+as `{"type":"resize","cols":100,"rows":30}` starts the shell on first receipt
+and resizes it thereafter. The server reports terminal status in text
+frames with `type` set to `ready`, `exit`, or `error`.
 
 ### Panel Controls and versioning
 

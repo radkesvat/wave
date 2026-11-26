@@ -30,6 +30,8 @@
 
       body { margin: 0; }
 
+      main { position: relative; }
+
       #scrollbar-probe {
         position: fixed;
         top: 0;
@@ -73,6 +75,65 @@
         pointer-events: none;
       }
 
+      #wave-console {
+        --terminal-border: #3d3a43;
+        --terminal-text: #b5b4c5;
+        --terminal-focus: #f3814a;
+        position: absolute;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid var(--terminal-border);
+        border-radius: 8px;
+        background: #050506;
+      }
+
+      #wave-console[data-high-contrast] {
+        --terminal-border: #b5b0c4;
+        --terminal-text: #eaebff;
+        --terminal-focus: #ffb48f;
+      }
+
+      #wave-console-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 8px;
+        border-bottom: 1px solid var(--terminal-border);
+        background: #1a171c;
+        font-size: .875rem;
+      }
+
+      #wave-console-toolbar button {
+        min-height: 32px;
+        padding: 3px 10px;
+        border: 1px solid #8a8495;
+        border-radius: 5px;
+        background: #45404f;
+        color: #eaebff;
+        font: inherit;
+      }
+
+      #wave-console-toolbar button:hover:not(:disabled) { background: #595067; }
+      #wave-console-toolbar button[aria-pressed="true"] { background: #754430; }
+      #wave-console-toolbar button:focus-visible { outline: 2px solid var(--terminal-focus); }
+
+      #wave-console-status {
+        min-width: 0;
+        margin-inline: 4px;
+        color: var(--terminal-text);
+        overflow-wrap: anywhere;
+      }
+
+      #wave-console-terminal {
+        flex: 1;
+        min-height: 0;
+        margin: 7px 8px;
+        overflow: hidden;
+      }
+
       .startup-message {
         position: absolute;
         inset: 0;
@@ -98,6 +159,15 @@
       <canvas id="canvas" role="img" aria-label="Wave" tabindex="0"></canvas>
       <textarea id="wave-text-input" aria-label="Wave text input" tabindex="-1" autocomplete="off"
                 autocapitalize="off" spellcheck="false" rows="1" hidden></textarea>
+      <section id="wave-console" aria-label="WaterWall terminal" hidden>
+        <div id="wave-console-toolbar">
+          <button id="wave-console-toggle" type="button" disabled>Open terminal</button>
+          <button id="wave-console-ctrl" type="button" aria-pressed="false" title="Press Ctrl, then a key" hidden>Ctrl</button>
+          <button id="wave-console-esc" type="button" hidden>Esc</button>
+          <span id="wave-console-status" role="status">Shell runs as the Wave service account.</span>
+        </div>
+        <div id="wave-console-terminal"></div>
+      </section>
     </main>
     <script>
       var Module = (() => {
@@ -108,11 +178,16 @@
         const tools = document.getElementById("tools");
         const navigation = document.getElementById("navigation");
         const textInput = document.getElementById("wave-text-input");
+        const terminalPanel = document.getElementById("wave-console");
         const pageLinks = new Map();
         const headerControlIds = new Map();
         let activePage;
         let touch = null;
         let writingClipboard = false;
+        let consoleActive = false;
+        let consolePosition = "";
+        let consoleLoading;
+        let consoleView;
         startup.hidden = false;
 
         if (CSS.supports("selector(::-webkit-scrollbar-thumb)")) {
@@ -313,11 +388,34 @@
           return headerControlIds.get(document.activeElement) ?? 0;
         }
 
+        function updateConsole(active, x, y, width, height, highContrast) {
+          const visible = Boolean(active && width > 0 && height > 0);
+          if (terminalPanel.hidden === visible) terminalPanel.hidden = !visible;
+          if (!active && consoleActive) consoleView?.disconnect();
+          consoleActive = Boolean(active);
+          if (!visible) return;
+
+          const position = `${x},${y},${width},${height}`;
+          if (position !== consolePosition) {
+            Object.assign(terminalPanel.style, {
+              left: `${x}px`, top: `${y}px`, width: `${width}px`, height: `${height}px`
+            });
+            consolePosition = position;
+          }
+          terminalPanel.toggleAttribute("data-high-contrast", highContrast);
+          consoleView?.setHighContrast(highContrast);
+          consoleLoading ??= import("./console.js").then(({ createConsole }) => {
+            consoleView = createConsole(terminalPanel, copyText);
+          }).catch(() => {
+            document.getElementById("wave-console-status").textContent = "Console could not load. Reload Wave to retry.";
+          });
+        }
+
         window.addEventListener("error", showStartupError, true);
         window.addEventListener("unhandledrejection", showStartupError);
         return {
           canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
-          panelFocus, setTextInput, installTextInput, copyText, onAbort: showStartupError
+          panelFocus, setTextInput, installTextInput, copyText, updateConsole, onAbort: showStartupError
         };
       })();
     </script>
