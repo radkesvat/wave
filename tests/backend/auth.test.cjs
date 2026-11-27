@@ -9,7 +9,8 @@ const { test } = require('node:test');
 const { authFixture, timeout } = require('./auth_fixture.cjs');
 
 const cookiePrefix = '__Host-wave_session=';
-const expirySeconds = 86400;
+const secondsPerDay = 86400;
+const expirySeconds = 3 * secondsPerDay;
 
 function client(fixture) {
     async function request(path, { method = 'GET', headers = {}, data, ca = fixture.ca,
@@ -135,7 +136,7 @@ async function assertPolicyClose(ws) {
 test('HTTPS verifies trust and enforces durable JWT sessions on HTTP and WebSocket routes', async t => {
     const fixture = await authFixture(t);
     const { request, post, upgrade } = client(fixture);
-    const credentials = { username: 'fixture-admin', password: 'fake fixture passphrase' };
+    const credentials = { username: 'fixture-admin', password: 'fake fixture passphrase Z7v9Q6' };
 
     await fixture.start();
     await assert.rejects(request('/setup', { ca: [] }), { code: 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY' });
@@ -221,11 +222,81 @@ test('HTTPS verifies trust and enforces durable JWT sessions on HTTP and WebSock
     assert.equal((await post('sign-in', credentials)).status, 429);
 });
 
+test('saves the session expiry in days for new sign-ins and retains it after restart', async t => {
+    const fixture = await authFixture(t);
+    const { request, post, upgrade } = client(fixture);
+    const credentials = { username: 'fixture-admin', password: 'fixture session expiry passphrase 4Hq8v' };
+
+    async function signIn(days) {
+        const now = () => Math.floor(Date.now() / 1000);
+        const earliest = now();
+        const lifetime = days * secondsPerDay;
+        const cookie = assertCookie(await post('sign-in', credentials), lifetime);
+        const claims = JSON.parse(Buffer.from(cookie.split('.')[1], 'base64url'));
+        assert.ok(claims.exp >= earliest + lifetime && claims.exp <= now() + lifetime);
+        const database = JSON.parse(await readFile(fixture.database, 'utf8'));
+        assert.equal(database.auth.sessions.find(session => session.id === claims.jti).expires_at, claims.exp);
+        return { headers: { Cookie: cookie, Origin: fixture.origin }, expiry: claims.exp };
+    }
+
+    async function assertCurrentExpiry({ headers, expiry }) {
+        const session = await request('/api/session', { headers });
+        assert.equal(session.status, 200);
+        assert.equal(JSON.parse(session.body).expires_at, expiry);
+    }
+
+    await fixture.start();
+    assert.equal((await post('setup', credentials)).status, 201);
+    const existing = await signIn(3);
+    const ws = await upgrade(existing.headers, '/ws/preview');
+    assert.equal(ws.status, 101);
+    try {
+        const first = await ws.frame();
+        assert.equal(first.opcode, 1);
+        assert.equal(JSON.parse(first.payload).data.settings.session_expiry_days, 3);
+
+        let id = 0;
+        async function saveExpiry(days) {
+            const request_id = ++id;
+            ws.socket.write(clientFrame(1, JSON.stringify({
+                action: 'apply_session_settings', session_expiry_days: days, request_id,
+            })));
+            for (;;) {
+                const frame = await ws.frame();
+                assert.equal(frame.opcode, 1);
+                const reply = JSON.parse(frame.payload);
+                if (reply.request_id === request_id) return reply;
+            }
+        }
+
+        for (const invalid of [undefined, null, -1, 0, 1.5, 366, '7']) {
+            const reply = await saveExpiry(invalid);
+            assert.equal(reply.ok, false);
+            assert.equal(reply.data.settings.session_expiry_days, 3);
+        }
+        const saved = await saveExpiry(1);
+        assert.equal(saved.ok, true);
+        assert.equal(saved.data.settings.session_expiry_days, 1);
+    } finally {
+        ws.socket.destroy();
+    }
+
+    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8')).session_expiry_days, 1);
+    const updated = await signIn(1);
+    await assertCurrentExpiry(existing);
+    await assertCurrentExpiry(updated);
+    await fixture.stop();
+    await fixture.start();
+    await assertCurrentExpiry(existing);
+    await assertCurrentExpiry(updated);
+    await signIn(1);
+});
+
 test('closes the TLS terminal when the shell exits during a final keystroke',
     { skip: process.platform !== 'linux' }, async t => {
         const fixture = await authFixture(t);
         const { post, upgrade } = client(fixture);
-        const credentials = { username: 'fixture-admin', password: 'fixture terminal passphrase' };
+        const credentials = { username: 'fixture-admin', password: 'fixture terminal passphrase 8Vy6z' };
         await fixture.start();
         assert.equal((await post('setup', credentials)).status, 201);
         const cookie = assertCookie(await post('sign-in', credentials), expirySeconds);
@@ -264,9 +335,9 @@ test('closes the TLS terminal when the shell exits during a final keystroke',
 test('administrator changes require the current password and revoke all sessions', async t => {
     const fixture = await authFixture(t);
     const { request, post, upgrade } = client(fixture);
-    const original = { username: 'fixture-admin', password: 'fixture operator passphrase' };
+    const original = { username: 'fixture-admin', password: 'fixture operator passphrase 7Pz3u' };
     const change = { username: 'fixture-renamed', current_password: original.password,
-        password: 'fixture replacement passphrase' };
+        password: 'fixture replacement passphrase 8fQ6w' };
     await fixture.start();
     assert.equal((await post('setup', original)).status, 201);
     const oldHash = JSON.parse(await readFile(fixture.database, 'utf8')).admin[0].password;
@@ -294,4 +365,57 @@ test('administrator changes require the current password and revoke all sessions
     assert.notEqual(config.admin[0].password, oldHash);
     assert.deepEqual(config.auth.sessions, []);
     assertCookie(await post('sign-in', { username: change.username, password: change.password }), expirySeconds);
+});
+
+test('checks administrator password format and strength on setup and replacement', async t => {
+    const fixture = await authFixture(t);
+    const { request, post } = client(fixture);
+    const credentials = { username: 'fixture-admin', password: 'Z7v9Q6' };
+    const invalid = [
+        ['Q9v7Z', 'five characters'],
+        ['ééQ7🔒', 'five Unicode characters with more than six UTF-8 bytes'],
+        ['JqvMrg９', 'no ASCII digit'],
+        ['é928473', 'no ASCII letter'],
+    ];
+
+    await fixture.start();
+    for (const [password, reason] of invalid) {
+        assert.equal((await post('setup', { ...credentials, password })).status, 400, reason);
+    }
+    assert.equal((await post('setup', { ...credentials, password: 'Password1' })).status, 422);
+    assert.equal((await request('/panel')).headers.location, '/setup');
+    assert.equal((await post('setup', credentials)).status, 201);
+    const headers = { Cookie: assertCookie(await post('sign-in', credentials), expirySeconds), Origin: fixture.origin };
+    const oldHash = JSON.parse(await readFile(fixture.database, 'utf8')).admin[0].password;
+    const change = { username: credentials.username, current_password: credentials.password };
+    for (const [password, reason] of invalid) {
+        assert.equal((await post('admin', { ...change, password }, headers)).status, 400, reason);
+    }
+    assert.equal((await post('admin', { ...change, password: 'Password1' }, headers)).status, 422);
+    assert.equal((await request('/api/session', { headers })).status, 200);
+    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8')).admin[0].password, oldHash);
+
+    const replacement = 'H8b#7x';
+    assertCookie(await post('admin', { ...change, password: replacement }, headers), 0);
+    assertCookie(await post('sign-in', { ...credentials, password: replacement }), expirySeconds);
+});
+
+test('keeps legacy administrator credentials valid for sign-in and a username-only change', async t => {
+    const fixture = await authFixture(t);
+    const { request, post } = client(fixture);
+    const legacy = { username: 'fixture-admin', password: 'legacy fixture passphrase' };
+    // Precomputed Argon2id hash of the synthetic legacy password.
+    const hash = '$argon2id$v=19$m=65536,t=3,p=4$d2F2ZS1vbGQtZml4dHVyZQ$1CWoSke1awH/9p2Fh4pTvPDCBM6dLl+rRvo0u5HHLyk';
+    const config = JSON.parse(await readFile(fixture.database, 'utf8'));
+    config.admin = [{ username: legacy.username, password: hash }];
+    await writeFile(fixture.database, JSON.stringify(config));
+
+    await fixture.start();
+    const headers = { Cookie: assertCookie(await post('sign-in', legacy), expirySeconds), Origin: fixture.origin };
+    const username = 'fixture-renamed';
+    const change = { username, current_password: legacy.password, password: '' };
+    assertCookie(await post('admin', change, headers), 0);
+    assert.equal((await request('/api/session', { headers })).status, 401);
+    assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')).admin, [{ username, password: hash }]);
+    assertCookie(await post('sign-in', { ...legacy, username }), expirySeconds);
 });

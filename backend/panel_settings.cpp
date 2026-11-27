@@ -1,5 +1,7 @@
 #include "panel_settings.h"
 
+#include "session_settings.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -382,6 +384,7 @@ fs::path database_directory(const char* executable, const fs::path& site_dir)
 struct LoadedDatabase {
     Json contents;
     PanelSettings settings;
+    int session_expiry_days;
     bool changed;
 };
 
@@ -408,8 +411,17 @@ LoadedDatabase load_database(const DatabaseFile& file, bool protect_permissions)
     if (!port->is_number_integer() || port->get<std::uint64_t>() > 65535) {
         throw std::runtime_error("listen.port in wave-db.json must be an integer from 0 to 65535.");
     }
+    auto session_expiry_days = default_session_expiry_days;
+    if (const auto expiry = settings.find("session_expiry_days"); expiry != settings.end()) {
+        if (!expiry->is_number_integer() || expiry->get<std::uint64_t>() < 1 ||
+            expiry->get<std::uint64_t>() > max_session_expiry_days) {
+            throw std::runtime_error("session_expiry_days in wave-db.json must be an integer from 1 to " +
+                                     std::to_string(max_session_expiry_days) + ".");
+        }
+        session_expiry_days = expiry->get<int>();
+    }
     PanelSettings listener{host->get<std::string>(), port->get<int>(), load_tls(settings)};
-    return {std::move(settings), std::move(listener), added_admins || added_host || added_port};
+    return {std::move(settings), std::move(listener), session_expiry_days, added_admins || added_host || added_port};
 }
 
 } // namespace
@@ -427,6 +439,7 @@ struct PanelDatabase::Impl {
         }
         contents = std::move(loaded.contents);
         settings = std::move(loaded.settings);
+        session_expiry_days = loaded.session_expiry_days;
     }
 
     Json read_existing() const
@@ -463,6 +476,7 @@ struct PanelDatabase::Impl {
     std::mutex write_mutex;
     Json contents;
     PanelSettings settings{};
+    int session_expiry_days = default_session_expiry_days;
 };
 
 PanelDatabase::PanelDatabase(const char* executable, const fs::path& site_dir, bool check_only)
@@ -485,6 +499,21 @@ const PanelSettings& PanelDatabase::settings() const
 const Json& PanelDatabase::initial_contents() const
 {
     return impl_->contents;
+}
+
+int PanelDatabase::session_expiry_days() const
+{
+    std::lock_guard lock(impl_->write_mutex);
+    return impl_->session_expiry_days;
+}
+
+void PanelDatabase::save_session_expiry_days(int days)
+{
+    std::lock_guard lock(impl_->write_mutex);
+    auto current = impl_->read_existing();
+    current["session_expiry_days"] = days;
+    impl_->save(current);
+    impl_->session_expiry_days = days;
 }
 
 bool PanelDatabase::claim_waterwall_install()

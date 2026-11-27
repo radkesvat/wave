@@ -23,7 +23,7 @@ struct CoreSettingsDraft {
     std::map<std::string, std::string> errors;
     std::string notice;
     std::optional<std::uint64_t> request;
-    std::optional<PreviewReply> reply;
+    std::string validation;
     CanvasViewport scroll_bounds{};
 
     bool dirty() const

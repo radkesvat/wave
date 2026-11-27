@@ -95,13 +95,16 @@ async function mockPreview(page, data, gate = Promise.resolve()) {
     const connected = Promise.withResolvers();
     const events = new EventEmitter();
     const actions = [];
+    let previewSocket;
+    let sendSnapshot;
     await page.routeWebSocket(previewUrl, async socket => {
         const send = fields => socket.send(JSON.stringify({ type: 'snapshot', data, ...fields }));
         socket.onMessage(raw => {
             const request = JSON.parse(raw);
-            const reply = ({ ok = true, feedback = '', result, feedback_in_logs_only } = {}) => {
-                if (feedback_in_logs_only) {
-                    data.logs.push({ source: 'panel', ts: '09:41:03', level: 'success', message: feedback });
+            const reply = ({ ok = true, feedback = '', result, feedback_in_logs_only,
+                level = ok ? 'success' : 'error' } = {}) => {
+                if (feedback_in_logs_only && feedback) {
+                    data.logs.push({ source: 'panel', ts: '09:41:03', level, message: feedback });
                 }
                 send({ action: request.action, request_id: request.request_id, ok, feedback, result, feedback_in_logs_only });
             };
@@ -109,11 +112,20 @@ async function mockPreview(page, data, gate = Promise.resolve()) {
             events.emit('action');
         });
         await gate;
+        previewSocket = socket;
+        sendSnapshot = send;
         send();
-        connected.resolve(send);
+        connected.resolve();
     });
     return {
-        broadcast: async () => (await connected.promise)(),
+        async broadcast() {
+            await connected.promise;
+            sendSnapshot();
+        },
+        async disconnect() {
+            await connected.promise;
+            await previewSocket.close({ code: 1011, reason: 'Fixture connection closed' });
+        },
         actions,
         async action(index) {
             const signal = AbortSignal.timeout(timeout);
@@ -125,6 +137,12 @@ async function mockPreview(page, data, gate = Promise.resolve()) {
 
 function status(page, name) {
     return page.getByRole('img', { name }).waitFor({ timeout });
+}
+
+async function expectLoggedOnce(page, message) {
+    await status(page, `Latest log: ${message}`);
+    const description = await page.locator('#canvas').getAttribute('aria-label');
+    assert.equal(description.split(message).length - 1, 1, 'The action result appears only in Logs.');
 }
 
 async function openView(page, name) {
@@ -184,6 +202,22 @@ async function verticalRuns(page, x, top, bottom, [r, g, b], minimum = 1) {
         }
         return runs;
     }, { encoded: screenshot.toString('base64'), r, g, b, minimum, top });
+}
+
+async function rectangleContainsColor(page, clip, [r, g, b]) {
+    const screenshot = await page.screenshot({ clip });
+    return page.evaluate(async ({ encoded, r, g, b }) => {
+        const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
+        const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const context = canvas.getContext('2d');
+        context.drawImage(bitmap, 0, 0);
+        const { data } = context.getImageData(0, 0, bitmap.width, bitmap.height);
+        for (let i = 0; i < data.length; i += 4) {
+            if (data[i] === r && data[i + 1] === g && data[i + 2] === b) return true;
+        }
+        return false;
+    }, { encoded: screenshot.toString('base64'), r, g, b });
 }
 
 async function dialogFrame(page, scanTop = 114) {
@@ -318,6 +352,84 @@ test('opens the authenticated workspace, updates host metrics, and navigates the
     }
 });
 
+test('scrolls stacked Server Status inside the desktop workspace and uses page scrolling on compact screens', async () => {
+    const classicBrowser = await chromium.launch({
+        args: ['--enable-unsafe-swiftshader'],
+        ignoreDefaultArgs: ['--hide-scrollbars'],
+    });
+    try {
+        const page = await classicBrowser.newPage({ viewport: coreDesktop });
+        await mockPreview(page, fixture());
+        await page.goto(url);
+        await waitForServerStatus(page);
+        await page.waitForFunction(() => document.documentElement.classList.contains('classic-scrollbars'),
+            undefined, { timeout });
+
+        const canvas = page.locator('#canvas');
+        const expectFullWidth = async ({ width, height }) => {
+            await page.waitForFunction(({ width, height }) => document.documentElement.scrollHeight === height &&
+                document.querySelector('#canvas').getBoundingClientRect().width === width, { width, height }, { timeout });
+            await settleCanvas(page);
+            assert.equal(await page.evaluate(() => document.documentElement.scrollHeight), height);
+            assert.equal((await canvas.boundingBox()).width, width);
+            assert.deepEqual(await verticalRuns(page, width - 1, 0, 5, [243, 129, 74]), [[0, 2]]);
+        };
+        const logsEdge = async ({ width, height }) => {
+            const runs = await verticalRuns(page, width - 11, height - 270, height, [61, 58, 67], 18);
+            assert.ok(runs.length, 'Expected the right-hand Logs border.');
+            return runs.at(-1);
+        };
+        await expectFullWidth(coreDesktop);
+        const paneStart = coreDesktop.height - 100;
+        const paneEnd = coreDesktop.height - 30;
+        assert.deepEqual(await verticalRuns(page, coreDesktop.width - 16, paneStart, paneEnd, [31, 27, 34]),
+            [[paneStart, paneEnd]]);
+
+        const columns = { width: 890, height: 800 };
+        await page.setViewportSize(columns);
+        await expectFullWidth(columns);
+        const stacked = { ...columns, width: 860 };
+        await page.setViewportSize(stacked);
+        await expectFullWidth(stacked);
+        const chartBands = () => verticalRuns(page, 215, 60, 550, [43, 39, 48], 14);
+        const initialBands = await chartBands();
+        assert.ok(initialBands.length, 'Expected the stacked card title bands.');
+        const initialLogs = await logsEdge(stacked);
+        await page.mouse.move(420, 350);
+        await page.mouse.wheel(0, 450);
+        await settleCanvas(page);
+        assert.notDeepEqual(await chartBands(), initialBands, 'Wheel scrolling moves the stacked cards.');
+        assert.equal(await page.evaluate(() => scrollY), 0, 'The desktop document stays in place.');
+        assert.deepEqual(await logsEdge(stacked), initialLogs, 'Logs stay fixed as the work pane scrolls.');
+
+        await openView(page, 'Settings');
+        await expectFullWidth(stacked);
+        assert.deepEqual(await logsEdge(stacked), initialLogs, 'Settings and Server Status share the Logs boundary.');
+        await openView(page, 'Server Status');
+
+        await page.setViewportSize({ ...columns, width: 700 });
+        await page.waitForFunction(() => document.documentElement.scrollHeight > innerHeight &&
+            document.documentElement.clientWidth < innerWidth, undefined, { timeout });
+        await settleCanvas(page);
+        const { width, scrollWidth } = await page.evaluate(() => ({
+            width: document.documentElement.clientWidth,
+            scrollWidth: document.documentElement.scrollWidth,
+        }));
+        assert.equal((await canvas.boundingBox()).width, width);
+        assert.equal(scrollWidth, width);
+        await page.mouse.move(420, 350);
+        await page.mouse.wheel(0, 450);
+        await page.waitForFunction(() => scrollY > 0, undefined, { timeout });
+
+        await page.setViewportSize(columns);
+        await page.waitForFunction(() => scrollY === 0 && document.documentElement.scrollHeight === innerHeight,
+            undefined, { timeout });
+        await expectFullWidth(columns);
+    } finally {
+        await classicBrowser.close();
+    }
+});
+
 test('filters Logs by source for display, search, and clipboard copy', async () => {
     const page = await browser.newPage({ viewport: desktop, permissions: ['clipboard-read', 'clipboard-write'] });
     const toolbarY = 613;
@@ -365,24 +477,45 @@ test('installs, retries, starts, restarts, and stops WaterWall from Server Statu
     const preview = await mockPreview(page, data);
     const press = action => lifecycleButton(page, action);
     const controlsTitle = () => verticalRuns(page, 510, 250, 650, [43, 39, 48], 14);
+    const progress = /Operation in progress\./;
+    const progressIndicator = page.getByRole('img', { name: progress });
+    const spinnerColor = [81, 165, 246];
+    const modalSpinner = frame => rectangleContainsColor(page, {
+        x: (coreDesktop.width - 380) / 2 + 10, y: frame.bottom - 42, width: 40, height: 34,
+    }, spinnerColor);
     try {
         await page.goto(url);
         await openView(page, 'Server Status');
         await status(page, /WaterWall core missing\. Panel version 1\.6\.0/);
         const titleBeforeError = await controlsTitle();
+        const coreSpinner = () => rectangleContainsColor(page, {
+            x: 470, y: titleBeforeError[0][1] + 2, width: 54, height: 30,
+        }, spinnerColor);
+        assert.equal(await coreSpinner(), false, 'The core status starts without a spinner.');
 
         await press('install');
         const install = await preview.action(0);
         const firstId = assertRequest(install.request, { action: 'install_core' });
+        await progressIndicator.waitFor({ timeout });
+        assert.equal(await coreSpinner(), true, 'The direct action shows a spinner beside core status.');
+        await press('install');
+        assert.equal(preview.actions.length, 1, 'An install waiting for acknowledgement cannot be sent twice.');
         core.state = 'installing';
-        install.reply();
-        await status(page, /WaterWall core installing/);
+        install.reply({ feedback: 'Installing WaterWall.', feedback_in_logs_only: true, level: 'info' });
+        await status(page, /WaterWall core installing.*Operation in progress\./);
+        assert.equal(await coreSpinner(), true, 'The core status remains busy while installation runs.');
+        await expectLoggedOnce(page, 'Installing WaterWall.');
         await press('install');
         assert.equal(preview.actions.length, 1, 'Installation cannot restart while in progress.');
         core.state = 'missing';
-        core.error = 'The WaterWall archive failed its SHA-256 check.' + '\nCheck the installation logs.'.repeat(24);
+        const installationError = 'The WaterWall archive failed its SHA-256 check.';
+        core.error = installationError + '\nCheck the installation logs.'.repeat(24);
+        data.logs.push({ source: 'panel', ts: '09:41:04', level: 'error', message: core.error });
         await preview.broadcast();
-        await status(page, /WaterWall core missing\. Core error\. The WaterWall archive failed/);
+        await status(page, /WaterWall core missing\. Panel version/);
+        await expectLoggedOnce(page, installationError);
+        await progressIndicator.waitFor({ state: 'hidden', timeout });
+        assert.equal(await coreSpinner(), false, 'Core status returns to idle after installation ends.');
         assert.deepEqual(await controlsTitle(), titleBeforeError, 'Core errors should leave the card in place.');
 
         await press('install');
@@ -397,12 +530,14 @@ test('installs, retries, starts, restarts, and stops WaterWall from Server Statu
         await press('start');
         const start = await preview.action(2);
         assertRequest(start.request, { action: 'start_core' });
+        await progressIndicator.waitFor({ timeout });
         core.state = 'starting';
         start.reply();
-        await status(page, /WaterWall core starting/);
+        await status(page, /WaterWall core starting.*Operation in progress\./);
         core.state = 'running';
         await preview.broadcast();
         await status(page, /WaterWall core running/);
+        await progressIndicator.waitFor({ state: 'hidden', timeout });
 
         await press('restart');
         await status(page, /Confirm restart\./);
@@ -410,34 +545,124 @@ test('installs, retries, starts, restarts, and stops WaterWall from Server Statu
         await click(page, 670, (await dialogFrame(page)).bottom - 25);
         await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
         assert.equal(preview.actions.length, 3, 'Cancelling does not restart WaterWall.');
+
         await press('restart');
         await status(page, /Confirm restart\./);
         await confirmDialog(page, (x, y) => click(page, x, y));
-        const restart = await preview.action(3);
+        const interrupted = await preview.action(3);
+        assertRequest(interrupted.request, { action: 'restart_core' });
+        await status(page, /Confirm restart\..*Operation in progress\./);
+        await preview.disconnect();
+        await status(page, /Preview disconnected\. Showing last reported values\./);
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        await progressIndicator.waitFor({ state: 'hidden', timeout });
+        const transportError = 'Request to restart core: The connection closed before Wave confirmed the request.';
+        await expectLoggedOnce(page, transportError);
+        await status(page, /4 log entries\. Latest log: Request to restart core/);
+
+        const reconnected = 'Preview fixture reconnected.';
+        data.logs.push({ source: 'panel', ts: '09:41:05', level: 'success', message: reconnected });
+        const reconnectRows = await verticalRuns(page, 510, 400, 820, [69, 64, 79], 20);
+        assert.ok(reconnectRows.length, 'Expected the Reconnect control.');
+        const [top, bottom] = reconnectRows.at(-1);
+        await click(page, 510, (top + bottom) / 2);
+        await expectLoggedOnce(page, reconnected);
+        await status(page, /5 log entries\. Latest log: Preview fixture reconnected\./);
+
+        await press('restart');
+        await status(page, /Confirm restart\./);
+        const restartFrame = await dialogFrame(page);
+        assert.equal(await modalSpinner(restartFrame), false, 'Confirmation starts without a spinner.');
+        await confirmDialog(page, (x, y) => click(page, x, y));
+        const restart = await preview.action(4);
         assertRequest(restart.request, { action: 'restart_core' });
+        await status(page, /Confirm restart\..*Operation in progress\./);
+        assert.equal(await modalSpinner(restartFrame), true, 'The spinner appears in the modal footer.');
+        assert.deepEqual(await dialogFrame(page), restartFrame, 'Progress does not add a line to the dialog.');
         core.state = 'stopping';
         restart.reply();
-        await status(page, /WaterWall core stopping/);
-        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
-        await press('restart');
-        assert.equal(await page.locator('#panel-controls').evaluate(controls => controls.inert), false);
+        await status(page, /WaterWall core stopping.*Confirm restart\..*Operation in progress\./);
+        assert.equal(await modalSpinner(restartFrame), true, 'The modal stays busy after acknowledgement.');
         core.state = 'starting';
         await preview.broadcast();
-        await status(page, /WaterWall core starting/);
+        await status(page, /WaterWall core starting.*Confirm restart\..*Operation in progress\./);
+        assert.equal(await page.locator('#panel-controls').evaluate(controls => controls.inert), true);
+        assert.equal(preview.actions.length, 5, 'Restart remains one operation across both transitional states.');
         core.state = 'running';
         await preview.broadcast();
         await status(page, /WaterWall core running/);
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        await progressIndicator.waitFor({ state: 'hidden', timeout });
 
         await press('stop');
         await status(page, /Confirm stop/);
-        assert.equal(preview.actions.length, 4, 'Opening the confirmation leaves WaterWall running.');
+        assert.equal(preview.actions.length, 5, 'Opening the confirmation leaves WaterWall running.');
         await confirmDialog(page, (x, y) => click(page, x, y));
-        const stop = await preview.action(4);
+        const stop = await preview.action(5);
         assertRequest(stop.request, { action: 'stop_core' });
+        await status(page, /Confirm stop\..*Operation in progress\./);
         core.state = 'stopped';
         stop.reply();
         await status(page, /WaterWall core stopped/);
         await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        await progressIndicator.waitFor({ state: 'hidden', timeout });
+
+        const clearLogs = () => click(page, 753, 849);
+        await clearLogs();
+        const cleared = await preview.action(6);
+        assertRequest(cleared.request, { action: 'clear_logs' });
+        await status(page, /5 log entries\. Latest log: Preview fixture reconnected\..*Operation in progress\./);
+        await clearLogs();
+        assert.equal(preview.actions.length, 7, 'Clear sends one request while waiting for acknowledgement.');
+        data.logs = [];
+        cleared.reply({ feedback: 'Logs cleared.' });
+        await status(page, /0 log entries\./);
+        await progressIndicator.waitFor({ state: 'hidden', timeout });
+    } finally {
+        await page.close();
+    }
+});
+
+test('opens settings field help by mouse, keyboard, and touch without reflowing inputs', async () => {
+    const page = await browser.newPage({ viewport: desktop, hasTouch: true });
+    const preview = await mockPreview(page, fixture());
+    const description = /Use a hostname such as panel\.example\.test\./;
+    const help = page.getByRole('img', { name: description });
+    const inputRows = () => verticalRuns(page, 790, 117, 274, [13, 11, 14], 20);
+    const marker = { x: 266, y: 108 };
+    try {
+        await page.goto(url);
+        await openView(page, 'Settings');
+        await status(page, /Panel tab\. Administrator settings/);
+        await settleCanvas(page);
+        assert.doesNotMatch(await page.locator('#canvas').getAttribute('aria-label'), description);
+        const originalRows = await inputRows();
+        assert.equal(originalRows.length, 3, 'Expected the preview TLS input rows.');
+
+        await page.mouse.move(marker.x, marker.y);
+        await help.waitFor({ timeout });
+        assert.deepEqual(await inputRows(), originalRows, 'Help leaves the TLS fields in place.');
+        await page.mouse.move(0, 0);
+        await help.waitFor({ state: 'hidden', timeout });
+
+        await click(page, 325, 138);
+        await page.locator('#wave-text-input').waitFor({ state: 'visible', timeout });
+        await page.mouse.move(0, 0);
+        await page.keyboard.press('Shift+Tab');
+        await help.waitFor({ timeout });
+        await page.keyboard.press('Tab');
+        await help.waitFor({ state: 'hidden', timeout });
+
+        await page.touchscreen.tap(marker.x, marker.y);
+        await help.waitFor({ timeout });
+        await page.mouse.move(0, 0);
+        await settleCanvas(page);
+        assert.match(await page.locator('#canvas').getAttribute('aria-label'), description,
+            'The tapped popup stays open when the pointer leaves.');
+        await page.touchscreen.tap(900, 108);
+        await help.waitFor({ state: 'hidden', timeout });
+        assert.deepEqual(await inputRows(), originalRows, 'Dismissing help leaves the fields in place.');
+        assert.equal(preview.actions.length, 0, 'Reading field help leaves the settings draft idle.');
     } finally {
         await page.close();
     }
@@ -507,6 +732,96 @@ test('validates and saves WaterWall form settings alongside a separate Panel TLS
         delete data.core_settings_notice;
         review.reply({ feedback: 'Saved core settings for the next launch.', feedback_in_logs_only: true });
         await status(page, /DNS\. Version 1\.6\.0\. 4 log entries\. Latest log: Saved core settings/);
+    } finally {
+        await page.close();
+    }
+});
+
+test('shows the footer spinner when reloading a config with unsaved changes', async () => {
+    const page = await browser.newPage({ viewport: desktop, permissions: ['clipboard-read', 'clipboard-write'] });
+    const data = fixture('stopped');
+    const config = { name: 'Reload fixture', nodes: [{ name: 'saved', type: 'BlackHole', settings: {} }] };
+    data.server.core.configs = [{ id: 7, name: config.name, enabled: false, active: false }];
+    const preview = await mockPreview(page, data);
+    const confirmReload = () => confirmDialog(page, (x, y) => click(page, x, y), 460);
+    const spinner = frame => rectangleContainsColor(page, {
+        x: (desktop.width - 460) / 2 + 10, y: frame.bottom - 42, width: 36, height: 34,
+    }, [81, 165, 246]);
+    try {
+        await page.goto(url);
+        await page.getByRole('link', { name: config.name, exact: true }).focus();
+        await page.keyboard.press('Enter');
+        const initial = await preview.action(0);
+        assertRequest(initial.request, { action: 'get_core_config', id: 7 });
+        initial.reply({ result: { config, revision: 'saved', editable: true } });
+        await status(page, /Nodes tab\. Nodes\. 1 node\./);
+
+        await openConfigJsonEditor(page);
+        await pasteConfigJson(page, JSON.stringify([...config.nodes, { name: 'draft', type: 'BlackHole' }]));
+        await status(page, /2 nodes\..*Unsaved changes\./);
+        await graphMenuItem(page, 'config', 3);
+        await status(page, /Reload configuration\./);
+        const idle = await dialogFrame(page);
+        assert.equal(await spinner(idle), false);
+        await confirmReload();
+        const reload = await preview.action(1);
+        assertRequest(reload.request, { action: 'get_core_config', id: 7 });
+        await status(page, /Reload configuration\..*Operation in progress\./);
+        assert.deepEqual(await dialogFrame(page), idle);
+        assert.equal(await spinner(idle), true);
+        await confirmReload();
+        assert.equal(preview.actions.length, 2, 'A pending reload cannot be submitted twice.');
+
+        reload.reply({ ok: false, feedback: 'The saved config could not be read.' });
+        await status(page, /2 nodes\..*Unsaved changes\..*The saved config could not be read\./);
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        await graphMenuItem(page, 'config', 3);
+        await status(page, /Reload configuration\./);
+        await confirmReload();
+        const retry = await preview.action(2);
+        assertRequest(retry.request, { action: 'get_core_config', id: 7 });
+        retry.reply({ result: { config, revision: 'saved', editable: true } });
+        await status(page, /Nodes tab\. Nodes\. 1 node\./);
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        assert.doesNotMatch(await page.locator('#canvas').getAttribute('aria-label'), /Unsaved changes|Operation in progress/);
+    } finally {
+        await page.close();
+    }
+});
+
+test('edits and saves session expiry from Panel Settings', async () => {
+    const page = await browser.newPage({ viewport: coreDesktop });
+    const data = fixture();
+    const preview = await mockPreview(page, data);
+    try {
+        await page.goto(url);
+        await openView(page, 'Settings');
+        await status(page, /Panel tab.*Session expiry 3 days\./);
+
+        const inputs = await verticalRuns(page, 800, 100, coreDesktop.height - 20, [13, 11, 14], 20);
+        const expiry = inputs.at(-1);
+        assert.ok(expiry, 'Expected the session expiry input.');
+        const editExpiry = value => replaceText(page, 530, (expiry[0] + expiry[1]) / 2, value);
+        const saveExpiry = () => click(page, 290, expiry[1] + 19);
+
+        for (const invalid of ['1.5', '1e2']) {
+            await editExpiry(invalid);
+            await status(page, /Enter a whole number from 1 to 365 for session expiry\./);
+            await saveExpiry();
+            assert.equal(preview.actions.length, 0, 'The input requires a whole number written in days.');
+        }
+
+        await editExpiry('7');
+        await saveExpiry();
+        const saved = await preview.action(0);
+        assertRequest(saved.request, { action: 'apply_session_settings', session_expiry_days: 7 });
+        await status(page, /Operation in progress\./);
+        data.settings.session_expiry_days = 7;
+        saved.reply({ feedback: 'Saved session expiry for future sign-ins.', feedback_in_logs_only: true });
+        await status(page, /Session expiry 7 days\./);
+        await expectLoggedOnce(page, 'Saved session expiry for future sign-ins.');
+        await saveExpiry();
+        assert.equal(preview.actions.length, 1, 'The saved value is no longer a pending edit.');
     } finally {
         await page.close();
     }
@@ -715,20 +1030,22 @@ test('uses the sidebar and creates, toggles, and deletes a config on touch', asy
             await toggleConfig();
             const changed = await preview.action(2 + index);
             assertRequest(changed.request, { action: 'set_core_config_enabled', id: 2, enabled });
+            await status(page, /Operation in progress\./);
+            assert.equal(await canvasTop(), initialCanvasTop, 'The graph stays in place while the toggle is pending.');
             config.enabled = enabled;
             const feedback = `${enabled ? 'Enabled' : 'Disabled'} config Lab.`;
             changed.reply({ feedback, feedback_in_logs_only: true });
-            await status(page, `Latest log: ${feedback}`);
-            const description = await page.locator('#canvas').getAttribute('aria-label');
-            assert.equal(description.split(feedback).length - 1, 1, 'The successful toggle displays only in Logs.');
+            await expectLoggedOnce(page, feedback);
             assert.equal(await canvasTop(), initialCanvasTop, 'The graph stays in place after a successful toggle.');
         }
 
         await toggleConfig();
         const rejected = await preview.action(5);
         assertRequest(rejected.request, { action: 'set_core_config_enabled', id: 2, enabled: false });
-        rejected.reply({ ok: false, feedback: 'Stop WaterWall before changing this config.' });
-        await status(page, /Stop WaterWall before changing this config\. \d+ log entries\./);
+        const rejection = 'Stop WaterWall before changing this config.';
+        rejected.reply({ ok: false, feedback: rejection, feedback_in_logs_only: true });
+        await expectLoggedOnce(page, rejection);
+        assert.equal(await canvasTop(), initialCanvasTop, 'The rejected toggle does not move the graph.');
 
         await deleteConfig();
         await status(page, /Confirm deletion of Lab and its config\.json file\./);
@@ -788,9 +1105,12 @@ test('downloads a backup and restores it through the browser file picker', async
         await chooseBackup(buffer);
         await status(page, /Wave preview backup selected/);
         assert.equal(preview.actions.length, 0, 'Selecting a file waits for confirmation.');
+        const restoreFrame = await dialogFrame(page);
         await confirmDialog(page, (x, y) => click(page, x, y));
         const restored = await preview.action(0);
         assertRequest(restored.request, { action: 'restore_preview_backup', backup });
+        await status(page, /Restore backup\..*Operation in progress\./);
+        assert.deepEqual(await dialogFrame(page), restoreFrame, 'Progress keeps the dialog at its original size.');
         restored.reply({ feedback: 'Restored backup.', feedback_in_logs_only: true });
         await status(page, /Latest log: Restored backup/);
         await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
@@ -1281,9 +1601,10 @@ test('edits WaterWall user access and limits and creates a user with an exact ID
         const updated = { ...user, gid, 'wireguard-allowed-ips': allowedIps,
             time: { 'created-at-ms': user.time['created-at-ms'] }, limit: { traffic: { up: '0' } } };
         await selectConfigTab(page, 'Nodes');
-        save.reply({ feedback: 'Saved fixture user.', result: listing(updated) });
+        save.reply({ feedback: 'Saved fixture user.', feedback_in_logs_only: true, result: listing(updated) });
         await selectConfigTab(page, 'staff');
-        await status(page, /Saved fixture user\./);
+        await status(page, /staff tab\. AuthenticationServer users\. 1 users\./);
+        await expectLoggedOnce(page, 'Saved fixture user.');
         assert.equal(preview.actions.length, 3, 'Returning to the tab preserves the pending save result.');
 
         await click(page, 235, 137);

@@ -1,6 +1,8 @@
 #include "logs_view.h"
 
+#include "dialog.h"
 #include "preview_session.h"
+#include "theme.h"
 #include "view_helpers.h"
 
 #include <format>
@@ -98,24 +100,37 @@ Color level_color(std::string_view level)
 
 } // namespace
 
+void update_logs_view(LogsViewState& state, PreviewSession& session)
+{
+    if (const auto reply = session.take_reply(state.clear_request)) {
+        if (reply->ok()) {
+            session.clear_local_logs();
+        } else if (reply->status == PreviewReply::Status::rejected && !reply->message.empty()) {
+            session.add_local_log("error", reply->message);
+        }
+    }
+}
+
 void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
 {
     constexpr char search_hint[] = "Message, source, or time";
     const auto& style = ImGui::GetStyle();
     const float row_end = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
     const float search_width = ImGui::CalcTextSize(search_hint).x + 3 * style.FramePadding.x;
-    const float search_label_space = ImGui::CalcTextSize("Search").x + style.ItemInnerSpacing.x;
+    const float search_label_space = ImGui::CalcTextSize("Search").x +
+                                     ImGui::CalcTextSize(view::help_marker_label).x +
+                                     2 * style.ItemInnerSpacing.x;
+    const float spinner_space = state.clear_request ? busy_spinner_width + style.ItemSpacing.x : 0;
     const float controls_width = view::button_width("Options") + view::button_width("Clear") +
                                  view::button_width("Copy") + 3 * style.ItemSpacing.x + search_width +
-                                 search_label_space;
+                                 search_label_space + spinner_space;
     const float controls_gap = style.ItemSpacing.x + style.FramePadding.x;
 
     ImGui::PushID("logs");
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Logs");
     const bool source_changed = render_source_filters(state);
-    const auto logs = session.data().find("logs");
-    const bool ready = session.status() == PreviewStatus::ready && logs != session.data().end();
+    const bool ready = session.ready();
     bool turned_on = false;
 
     if (ImGui::GetItemRectMax().x + controls_gap + controls_width <= row_end) {
@@ -128,18 +143,23 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
         if (ImGui::Checkbox("Auto-scroll", &state.auto_scroll)) {
             turned_on = state.auto_scroll;
         }
+        view::help_marker("Follow new entries while you are at the bottom of Logs. Scroll up to read "
+                          "earlier entries without jumping back down.");
         ImGui::EndPopup();
     }
     ImGui::SameLine();
-    ImGui::BeginDisabled(!ready);
+    ImGui::BeginDisabled(!ready || state.clear_request.has_value());
     if (theme::button("Clear")) {
-        state.local_feedback.clear();
-        if (!session.send({{"action", "clear_logs"}})) {
-            state.local_feedback = "Could not clear logs.";
-            state.local_feedback_color = Color::error;
-        }
+        state.clear_request = session.submit({{"action", "clear_logs"}}, 5000);
+    }
+    ImGui::EndDisabled();
+    if (state.clear_request) {
+        ImGui::SameLine();
+        draw_busy_spinner(ImGui::GetFrameHeight());
     }
     ImGui::SameLine();
+    const auto& logs = session.logs();
+    ImGui::BeginDisabled(logs.empty());
     const bool copy = theme::button("Copy");
     ImGui::EndDisabled();
 
@@ -149,15 +169,14 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
     const float available = ImGui::GetContentRegionAvail().x - search_label_space;
     ImGui::SetNextItemWidth(std::clamp(available, 1.0f, search_width));
     const bool search_changed = state.search.DrawWithHint("Search##logs", search_hint);
-    if (source_changed || search_changed) {
-        state.local_feedback.clear();
-    }
-    if (!state.local_feedback.empty()) {
-        view::wrapped(state.local_feedback, state.local_feedback_color);
-    }
-    if (!ready) {
-        ImGui::TextDisabled("%s", session.status() == PreviewStatus::loading ? "Loading logs…"
-                                                                             : "Logs unavailable.");
+    view::help_marker("Use spaces to require all terms, commas to match alternatives, and quotation marks "
+                      "for phrases. Add a minus sign before a term to exclude it.");
+    if (!ready && logs.empty()) {
+        if (session.status() == PreviewStatus::loading) {
+            draw_busy_spinner(ImGui::GetFrameHeight());
+        } else {
+            ImGui::TextDisabled("Logs unavailable.");
+        }
         ImGui::PopID();
         return;
     }
@@ -170,7 +189,7 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
     if (entries_visible) {
         ImGui::PushFont(nullptr, theme::secondary_font_size);
         const bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
-        for (const auto& log : *logs) {
+        for (const auto& log : logs) {
             const auto source = source_index(log);
             if (!show_record(state, log, source)) {
                 continue;
@@ -198,7 +217,7 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
             ImGui::TextWrapped("%.*s", static_cast<int>(message.size()), message.data());
         }
         if (visible == 0) {
-            ImGui::TextDisabled("%s", logs->empty() ? "No log entries" : "No matching entries");
+            ImGui::TextDisabled("%s", logs.empty() ? "No log entries" : "No matching entries");
         }
         if (source_changed || search_changed) {
             ImGui::SetScrollY(0);
@@ -209,14 +228,8 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
     }
     ImGui::EndChild();
 
-    if (copy) {
-        if (!copied.empty()) {
-            ImGui::SetClipboardText(copied.c_str());
-        }
-        state.local_feedback =
-            visible == 0 ? "No matching entries to copy."
-                         : std::format("Copied {} log {}.", visible, visible == 1 ? "entry" : "entries");
-        state.local_feedback_color = visible == 0 ? Color::info : Color::success;
+    if (!copied.empty()) {
+        ImGui::SetClipboardText(copied.c_str());
     }
     ImGui::PopID();
 }

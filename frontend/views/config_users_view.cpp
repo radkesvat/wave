@@ -1,5 +1,6 @@
 #include "config_users_view.h"
 
+#include "dialog.h"
 #include "view_helpers.h"
 
 #include <misc/cpp/imgui_stdlib.h>
@@ -23,33 +24,48 @@ struct NumberField {
     const char* path;
     const char* label;
     const char* hint;
+    std::string_view help;
     std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
     std::uint64_t minimum = 0;
 };
 
-constexpr NumberField account_id{"/id", "User ID", "Automatically assigned",
-                                 std::numeric_limits<std::uint64_t>::max(), 1};
-constexpr NumberField group_id{"/gid", "Group ID", "Default group"};
+constexpr NumberField account_id{
+    "/id",
+    "User ID",
+    "Automatically assigned",
+    "WaterWall uses this unique, nonzero ID to track the account. Leave blank to let Wave assign one.",
+    std::numeric_limits<std::uint64_t>::max(),
+    1};
+constexpr NumberField group_id{"/gid", "Group ID", "Default group",
+                               "WaterWall's numeric group identifier. Blank uses group 0."};
 constexpr NumberField access_fields[] = {
     {"/record-stat-interval-ms", "Record stats interval (ms)", "WaterWall default",
+     "Interval in milliseconds for recording stats. Blank uses WaterWall's default of two minutes.",
      std::numeric_limits<int>::max()},
-    {"/time/expire-at-ms", "Expires at (Unix ms)", "No deadline"},
-    {"/time/expire-after-first-usage-ms", "Expires after first use (ms)", "No duration limit"},
+    {"/time/expire-at-ms", "Expires at (Unix ms)", "No deadline",
+     "An absolute Unix epoch timestamp in milliseconds. Blank or 0 leaves this deadline unset."},
+    {"/time/expire-after-first-usage-ms", "Expires after first use (ms)", "No duration limit",
+     "A duration measured from the account's first use. Enter 86400000 for 24 hours. Blank or 0 leaves it "
+     "unset."},
 };
 constexpr NumberField traffic_fields[] = {
-    {"/limit/traffic/up", "Upload traffic (bytes)", "Unlimited"},
-    {"/limit/traffic/down", "Download traffic (bytes)", "Unlimited"},
-    {"/limit/traffic/total", "Total traffic (bytes)", "Unlimited"},
+    {"/limit/traffic/up", "Upload traffic (bytes)", "Unlimited",
+     "Traffic quotas use charged bytes. Enter 1073741824 for 1 GiB."},
+    {"/limit/traffic/down", "Download traffic (bytes)", "Unlimited", {}},
+    {"/limit/traffic/total", "Total traffic (bytes)", "Unlimited",
+     "Caps combined charged upload and download bytes alongside the individual direction limits."},
 };
 constexpr NumberField bandwidth_fields[] = {
-    {"/limit/bandwidth/up", "Upload bandwidth (bytes/s)", "Unlimited"},
-    {"/limit/bandwidth/down", "Download bandwidth (bytes/s)", "Unlimited"},
+    {"/limit/bandwidth/up", "Upload bandwidth (bytes/s)", "Unlimited",
+     "Bandwidth limits are rates for each direction. Enter 1048576 for 1 MiB/s."},
+    {"/limit/bandwidth/down", "Download bandwidth (bytes/s)", "Unlimited", {}},
 };
 constexpr NumberField connection_fields[] = {
-    {"/limit/ips", "IP addresses", "Unlimited"},
-    {"/limit/devices", "Devices", "Unlimited"},
-    {"/limit/connections-in", "Incoming connections", "Unlimited"},
-    {"/limit/connections-out", "Outgoing connections", "Unlimited"},
+    {"/limit/ips", "IP addresses", "Unlimited",
+     "Maximum number of distinct IP addresses in use at the same time for this account."},
+    {"/limit/devices", "Devices", "Unlimited", {}},
+    {"/limit/connections-in", "Incoming connections", "Unlimited", {}},
+    {"/limit/connections-out", "Outgoing connections", "Unlimited", {}},
 };
 constexpr std::span<const NumberField> number_groups[] = {
     {&account_id, 1}, {&group_id, 1}, access_fields, traffic_fields, bandwidth_fields, connection_fields,
@@ -91,16 +107,16 @@ void select_user(ConfigUsersState& state, Editor editor, const Json& user = {})
         }
     }
     state.validation.clear();
-    state.reply.reset();
+    state.read_error.clear();
 }
 
 void submit(ConfigUsersState& state, PreviewSession& session, Json request, bool mutation)
 {
-    state.reply.reset();
+    state.read_error.clear();
     state.request = session.submit(std::move(request), 5000);
     state.mutation = mutation;
-    if (!state.request) {
-        state.reply = PreviewReply{PreviewReply::Status::disconnected, "The user connection is unavailable."};
+    if (!state.request && !mutation) {
+        state.read_error = "The user connection is unavailable.";
     }
 }
 
@@ -126,16 +142,22 @@ void update(ConfigUsersState& state, PreviewSession& session, int config_id, std
                 if (state.mutation) {
                     select_user(state, Editor::none);
                 }
+            } else if (state.mutation) {
+                session.add_local_log("error",
+                                      "Wave sent an invalid user list. Refresh users before retrying.");
             } else {
-                *reply = {PreviewReply::Status::rejected, "Wave sent an invalid user list."};
+                state.read_error = "Wave sent an invalid user list.";
             }
-        } else if (reply->status == PreviewReply::Status::timed_out) {
-            reply->message = "Wave did not confirm the request. Refresh users before retrying.";
-        } else if (reply->status == PreviewReply::Status::disconnected) {
-            reply->message = "The user connection closed. Refresh after reconnecting.";
+        } else if (!state.mutation) {
+            if (reply->status == PreviewReply::Status::timed_out) {
+                state.read_error = "Wave did not confirm the request. Refresh users before retrying.";
+            } else if (reply->status == PreviewReply::Status::disconnected) {
+                state.read_error = "The user connection closed. Refresh after reconnecting.";
+            } else {
+                state.read_error =
+                    reply->message.empty() ? "The user list could not be loaded." : std::move(reply->message);
+            }
         }
-        reply->result = nullptr;
-        state.reply = std::move(reply);
     }
     if (state.refresh_needed && !state.request && session.ready()) {
         refresh(state, session, config_id, node, state.page);
@@ -209,11 +231,15 @@ UserPatch pending_patch(const ConfigUsersState& state, bool creating)
     return patch;
 }
 
-void edit_text(const char* label, std::string& text, const char* hint = "", ImGuiInputTextFlags flags = 0)
+void edit_text(const char* label, std::string& text, const char* hint, std::string_view help = {},
+               ImGuiInputTextFlags flags = 0)
 {
     ImGui::PushID(label);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
+    if (!help.empty()) {
+        view::help_marker(help);
+    }
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##value", hint, &text, flags);
     ImGui::PopID();
@@ -221,7 +247,8 @@ void edit_text(const char* label, std::string& text, const char* hint = "", ImGu
 
 void edit_number(ConfigUsersState& state, const NumberField& field)
 {
-    edit_text(field.label, state.numbers.at(field.path), field.hint, ImGuiInputTextFlags_CharsDecimal);
+    edit_text(field.label, state.numbers.at(field.path), field.hint, field.help,
+              ImGuiInputTextFlags_CharsDecimal);
 }
 
 bool begin_fields(const char* id, bool narrow)
@@ -235,11 +262,13 @@ void render_account(ConfigUsersState& state, bool creating, bool narrow)
 {
     if (begin_fields("Account fields", narrow)) {
         ImGui::TableNextColumn();
-        edit_text("Name", state.name, "Optional");
+        edit_text("Name", state.name, "Optional", "An operator label. Enter a unique name if you use one.");
         ImGui::TableNextColumn();
         edit_text("Email", state.email, "Optional");
         ImGui::TableNextColumn();
         edit_text("Password", state.password, creating ? "Required" : "Keep current password",
+                  "Use the credential expected by the WaterWall node. SOCKS5 username and password "
+                  "authentication uses the combined username:password string.",
                   ImGuiInputTextFlags_Password);
         ImGui::TableNextColumn();
         if (creating) {
@@ -247,6 +276,8 @@ void render_account(ConfigUsersState& state, bool creating, bool narrow)
         } else {
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted("User ID");
+            view::help_marker(
+                "WaterWall uses this unique, nonzero ID to track the account across database updates.");
             view::wrapped(state.user_id, Color::secondary_text);
         }
         ImGui::EndTable();
@@ -258,11 +289,14 @@ void render_account(ConfigUsersState& state, bool creating, bool narrow)
 void render_access(ConfigUsersState& state, bool narrow)
 {
     ImGui::Checkbox("Enabled", &state.enabled);
+    view::help_marker("Controls whether WaterWall accepts this tunnel user's credentials.");
     if (begin_fields("Access fields", narrow)) {
         ImGui::TableNextColumn();
         edit_number(state, group_id);
         ImGui::TableNextColumn();
-        edit_text("WireGuard allowed IPs", state.wireguard_ips, "One IPv4 or IPv6 CIDR");
+        edit_text("WireGuard allowed IPs", state.wireguard_ips, "One IPv4 or IPv6 CIDR",
+                  "Enter one IPv4 or IPv6 network with a prefix, such as 192.0.2.15/32 or 2001:db8::15/128. "
+                  "User ranges must be disjoint. Leave this field blank to clear it.");
         for (const auto& field : access_fields) {
             ImGui::TableNextColumn();
             edit_number(state, field);
@@ -427,12 +461,12 @@ void render_editor(ConfigUsersState& state, PreviewSession& session, int config_
         select_user(state, Editor::none);
     }
     ImGui::EndDisabled();
+    if (state.request) {
+        ImGui::SameLine();
+        draw_busy_spinner(ImGui::GetFrameHeight());
+    }
     if (!state.validation.empty()) {
         view::wrapped(state.validation, Color::error);
-    } else if (state.request) {
-        view::wrapped(state.mutation ? "Saving user change…" : "Loading users…", Color::info);
-    } else if (state.reply) {
-        view::feedback(*state.reply);
     }
 }
 
@@ -570,9 +604,10 @@ void render_config_users(ConfigUsersState& state, PreviewSession& session, int c
     }
     ImGui::EndDisabled();
     if (state.request) {
-        view::wrapped(state.mutation ? "Saving user change…" : "Loading users…", Color::info);
-    } else if (state.reply) {
-        view::feedback(*state.reply);
+        ImGui::SameLine();
+        draw_busy_spinner(ImGui::GetFrameHeight());
+    } else if (!state.read_error.empty()) {
+        view::wrapped(state.read_error, Color::error);
     }
     render_paging(state, session, config_id, node);
     if (ImGui::BeginChild("Users", {0, 0}, ImGuiChildFlags_Borders)) {
@@ -606,9 +641,10 @@ std::string describe_config_users(const ConfigUsersState& state)
         }
     }
     if (state.request) {
-        description += state.mutation ? " Saving user change." : " Loading users.";
-    } else if (state.reply && !state.reply->message.empty()) {
-        description += ' ' + state.reply->message;
+        description += ' ';
+        description += state.mutation ? busy_description : "Loading users.";
+    } else if (!state.read_error.empty()) {
+        description += ' ' + state.read_error;
     }
     if (state.users.is_array()) {
         description += std::format(" {} users.", state.total);

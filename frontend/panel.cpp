@@ -77,15 +77,21 @@ struct PanelLayout {
         return std::max(1.0f, canvas_width - workspace.x - margin);
     }
 
-    bool stack_server_status(const PanelState& state, float canvas_width) const
+    bool stack_server_status(const PanelState& state, float viewport_width) const
     {
         const float font = wide ? theme::workspace_font_size : theme::secondary_font_size;
-        // Reserve the pane scrollbar when testing fit so short desktops keep the same columns.
+        // Choose columns independently of document scrolling. Allow for the pane's own scrollbar.
         const float content_width =
-            work_width(canvas_width) - 2 * theme::window_padding.x - theme::scrollbar_size;
+            work_width(viewport_width) - 2 * theme::window_padding.x - theme::scrollbar_size;
         return state.page == PanelPage::server && !server_status_has_columns(content_width, font);
     }
 };
+
+float compact_work_height(const PanelState& state, bool stacked_status)
+{
+    return stacked_status ? std::max(narrow_work_height, state.stacked_server_status_height)
+                          : narrow_work_height;
+}
 
 bool begin_pane(const char* name, ImVec2 size, Color surface, ImGuiWindowFlags flags = 0,
                 ImGuiChildFlags child_flags = 0)
@@ -543,6 +549,7 @@ void render_demo(const char* title, void (*show)(bool*), bool& open, const Canva
 
 void render_dialogs(PanelState& state, PreviewSession& session)
 {
+    session.take_reply(state.refresh_request);
     if (state.requested_dialog != PanelDialog::none) {
         ImGui::OpenPopup(dialog_title(state.requested_dialog));
         state.requested_dialog = PanelDialog::none;
@@ -556,19 +563,24 @@ void render_dialogs(PanelState& state, PreviewSession& session)
         const bool sign_out = dialog == PanelDialog::sign_out;
         const bool diagnostics = dialog == PanelDialog::diagnostics;
         const float width = sign_out ? 350 : (diagnostics || dialog == PanelDialog::input ? 440 : 365);
-        const bool pending = sign_out && state.auth.pending();
+        const bool pending =
+            (sign_out && state.auth.pending()) ||
+            (diagnostics && (state.refresh_request || session.status() == PreviewStatus::loading));
         const std::array actions = {DialogAction{sign_out ? "Cancel" : "Close", pending},
                                     DialogAction{sign_out ? "Sign out" : "Refresh workspace", pending}};
         const auto count = sign_out || diagnostics ? 2 : 1;
-        Dialog frame(title, width, std::span(actions).first(count));
+        Dialog frame(title, width, std::span(actions).first(count),
+                     {.busy = sign_out || diagnostics ? std::optional(pending) : std::nullopt});
         if (!frame) {
             continue;
         }
         switch (dialog) {
         case PanelDialog::sign_out:
-            ImGui::TextWrapped(pending ? "Ending this session…" : "End this session and return to sign-in?");
-            if (!state.auth.error().empty()) {
-                view::wrapped(state.auth.error(), Color::error);
+            ImGui::TextWrapped("End this session and return to sign-in?");
+            if (state.auth.action() == AuthSession::Action::sign_out && !state.auth.error().empty()) {
+                session.add_local_log("error", state.auth.error());
+                state.auth.clear_error();
+                ImGui::CloseCurrentPopup();
             }
             break;
         case PanelDialog::version: {
@@ -593,10 +605,6 @@ void render_dialogs(PanelState& state, PreviewSession& session)
             ImGui::TextWrapped("Workspace transport: JSON WebSocket");
             ImGui::TextWrapped("Renderer: %.0f frames/s, %.2f× scale", ImGui::GetIO().Framerate,
                                ImGui::GetIO().DisplayFramebufferScale.x);
-            if (session.feedback_action() == "refresh") {
-                ImGui::TextWrapped("%.*s", static_cast<int>(session.feedback().size()),
-                                   session.feedback().data());
-            }
             break;
         }
         case PanelDialog::input:
@@ -610,8 +618,12 @@ void render_dialogs(PanelState& state, PreviewSession& session)
             ImGui::CloseCurrentPopup();
         } else if (action == 1 && sign_out) {
             state.auth.submit(AuthSession::Action::sign_out, nlohmann::json::object());
-        } else if (action == 1 && diagnostics && !session.send({{"action", "refresh"}})) {
-            session.start(true);
+        } else if (action == 1 && diagnostics) {
+            if (session.ready()) {
+                state.refresh_request = session.submit({{"action", "refresh"}}, 5000);
+            } else {
+                session.start(true);
+            }
         }
     }
     if (state.metrics_open) {
@@ -633,7 +645,7 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
         const auto& server = view::field(session.data(), "server");
         if (server.is_null()) {
             if (session.status() == PreviewStatus::loading) {
-                view::wrapped("Loading panel data…", Color::secondary_text);
+                draw_busy_spinner(ImGui::GetFrameHeight());
             } else {
                 view::wrapped("Panel connection unavailable.", Color::warning);
                 if (theme::button("Reconnect")) {
@@ -643,7 +655,7 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
             break;
         }
         const float height = render_server_status(server, state.panel_controls, session, stacked_status);
-        if (stacked_status) {
+        if (narrow && stacked_status) {
             state.stacked_server_status_height = height + 2 * theme::window_padding.y;
         }
         break;
@@ -711,18 +723,16 @@ bool panel_tool_window_at(const PanelState& state, float x, float y)
            (state.implot_demo_open && (contains(implot_demo_title) || contains(imgui_demo_title)));
 }
 
-float panel_height(float viewport_width, float canvas_width, const PanelState& state)
+float panel_height(float viewport_width, const PanelState& state)
 {
     const PanelLayout layout(viewport_width, state);
     if (state.entry.page != EntryPage::workspace) {
         return layout.header_height;
     }
-    if (layout.stack_server_status(state, canvas_width)) {
-        return layout.workspace.y + std::max(narrow_work_height, state.stacked_server_status_height) +
-               narrow_logs_height + 2 * margin;
-    }
     if (layout.narrow) {
-        return layout.workspace.y + narrow_work_height + narrow_logs_height + 2 * margin;
+        const float work_height =
+            compact_work_height(state, layout.stack_server_status(state, viewport_width));
+        return layout.workspace.y + work_height + narrow_logs_height + 2 * margin;
     }
     return state.page == PanelPage::server
                ? layout.workspace.y + server_min_work_height + desktop_logs_min_height + 2 * margin
@@ -738,6 +748,7 @@ void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_vie
     if (in_workspace) {
         sync_configs(state, session);
         update_panel_controls(state.panel_controls, session);
+        update_logs_view(state.logs, session);
     }
     const ImVec2 viewport = ImGui::GetIO().DisplaySize;
     if (state.browser_control && state.navigation_open && in_workspace) {
@@ -765,19 +776,18 @@ void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_vie
     } else {
         render_navigation(state, layout, viewport.x, browser_viewport.y);
         const float width = layout.work_width(viewport.x);
-        const bool stacked_status = layout.stack_server_status(state, viewport.x);
+        const bool stacked_status = layout.stack_server_status(state, browser_viewport.x);
         const float logs_height =
-            layout.narrow || stacked_status
-                ? narrow_logs_height
-                : std::floor(std::clamp(viewport.y * 0.25f, desktop_logs_min_height, 244.0f));
+            layout.narrow ? narrow_logs_height
+                          : std::floor(std::clamp(viewport.y * 0.25f, desktop_logs_min_height, 244.0f));
         const float work_height =
-            stacked_status  ? std::max(narrow_work_height, state.stacked_server_status_height)
-            : layout.narrow ? narrow_work_height
-                            : std::max(1.0f, viewport.y - layout.workspace.y - logs_height - 2 * margin);
+            layout.narrow ? compact_work_height(state, stacked_status)
+                          : std::max(1.0f, viewport.y - layout.workspace.y - logs_height - 2 * margin);
         ImGui::PushID(state.page_control());
         ImGui::SetCursorScreenPos(layout.workspace);
-        const auto view_flags =
-            stacked_status ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0;
+        const auto view_flags = layout.narrow && stacked_status
+                                    ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
+                                    : 0;
         if (begin_pane("View", {width, work_height}, Color::canvas, view_flags)) {
             render_view(state, session, layout.narrow, stacked_status);
         }
@@ -821,10 +831,8 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
         if (item != state.config_items.end() && workspace != state.workspaces.end()) {
             description =
                 std::format("Wave Config {}. {}", item->name, describe_config_workspace(workspace->second));
-            const auto message = config_action_message(state.panel_controls, state.config_id);
-            if (!message.empty()) {
-                description += ' ';
-                description += message;
+            if (config_action_pending(state.panel_controls, state.config_id)) {
+                description += std::string(" ") + busy_description;
             }
         }
     }
@@ -837,18 +845,16 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
         if (controls_dialog) {
             result += ' ' + describe_panel_controls(state.panel_controls, session, false);
         }
+        if (!session.logs().empty()) {
+            result += ' ' + describe_logs(state.logs, session.logs());
+        }
         return result;
     }
 
-    std::string result = description + ' ' + describe_logs(state.logs, session.data()["logs"]);
-    const auto action = session.feedback_action();
-    const bool core_settings_feedback = state.page == PanelPage::settings && action == "apply_core_settings";
-    if (!session.feedback().empty() && !core_settings_feedback && state.page != PanelPage::config &&
-        ((!has_server && !controls_dialog) ||
-         (action != "update_panel" && action != "restore_preview_backup" &&
-          action.find("_core") == std::string_view::npos))) {
-        result += " ";
-        result += session.feedback();
+    std::string result = description + ' ' + describe_logs(state.logs, session.logs());
+    if (state.refresh_request || state.logs.clear_request ||
+        (state.auth.pending() && state.auth.action() == AuthSession::Action::sign_out)) {
+        result += std::string(" ") + busy_description;
     }
     if (state.page == PanelPage::server) {
         result += ' ' + describe_server_status(session.data()["server"]);

@@ -15,6 +15,7 @@
 #include <cfloat>
 #include <cmath>
 #include <format>
+#include <limits>
 #include <map>
 #include <set>
 #include <utility>
@@ -304,7 +305,7 @@ void submit(State& state, PreviewSession& session, State::Request operation)
         request["action"] = "get_core_config";
     }
     state.request = session.submit(std::move(request), request_timeout);
-    if (!state.request) {
+    if (!state.request && operation == State::Request::load) {
         state.error = "The configuration connection is unavailable.";
     }
 }
@@ -331,11 +332,18 @@ void poll(State& state, PreviewSession& session)
     if (!result) {
         return;
     }
+    const bool loading = state.operation == State::Request::load;
     if (result->ok()) {
         const auto& config = field(result->result, "config");
         const auto& revision = field(result->result, "revision");
         if (!config.is_object() || !field(config, "nodes").is_array() || revision.is_null()) {
-            state.error = "Wave did not return the configuration and its revision.";
+            if (loading) {
+                state.error = "Wave did not return the configuration and its revision.";
+            } else {
+                session.add_local_log(
+                    "error",
+                    "Wave did not return the saved configuration and its revision. Reload before retrying.");
+            }
             return;
         }
         state.saved = config;
@@ -344,6 +352,7 @@ void poll(State& state, PreviewSession& session)
         state.dirty = false;
         if (state.operation == State::Request::save_import) {
             reset_graph_view(state);
+            state.reply = PreviewReply{PreviewReply::Status::accepted, {}};
         } else {
             state.link_from.reset();
             state.grabbed.reset();
@@ -353,15 +362,14 @@ void poll(State& state, PreviewSession& session)
                 state.selected.reset();
             }
         }
-        if (state.operation == State::Request::load) {
-            return;
+    } else if (loading) {
+        if (result->status == PreviewReply::Status::timed_out) {
+            result->message = "Wave did not confirm the request. Reload to check the saved configuration.";
+        } else if (result->status == PreviewReply::Status::disconnected) {
+            result->message = "The configuration connection closed. Reconnect to continue.";
         }
-    } else if (result->status == PreviewReply::Status::timed_out) {
-        result->message = "Wave did not confirm the request. Reload to check the saved configuration.";
-    } else if (result->status == PreviewReply::Status::disconnected) {
-        result->message = "The configuration connection closed. Reconnect to continue.";
+        state.reply = std::move(result);
     }
-    state.reply = std::move(result);
 }
 
 bool config_active(const PreviewSession& session, int id)
@@ -631,14 +639,16 @@ void open_dialog(State& state, State::Dialog dialog)
     ImGui::OpenPopup(title(dialog));
 }
 
-void close_dialog(State& state)
+void close_dialog(State& state, bool preserve_error = false)
 {
     ImGui::CloseCurrentPopup();
     if (state.dialog == State::Dialog::confirm_import) {
         state.import_config = {};
     }
     state.dialog = State::Dialog::none;
-    state.error.clear();
+    if (!preserve_error) {
+        state.error.clear();
+    }
 }
 
 Json parse_node_settings(std::string_view text, std::string& error)
@@ -808,10 +818,12 @@ bool apply_config_json(State& state)
 }
 
 bool select_target(const State& state, const char* label, std::string& target, bool adding,
-                   const NodeLinkField* setting = nullptr, bool empty_value_is_present = false)
+                   std::string_view help, const NodeLinkField* setting = nullptr,
+                   bool empty_value_is_present = false)
 {
     ImGui::PushID(label);
     ImGui::TextUnformatted(label);
+    help_marker(help);
     ImGui::SetNextItemWidth(-1);
     bool changed = false;
     const auto* preview =
@@ -870,11 +882,52 @@ bool is_link_container(std::string_view path, const NodeLinkField& link)
                            : path.empty();
 }
 
-bool edit_setting_link(const State& state, Json& settings, bool adding, const NodeLinkField& setting)
+std::string_view link_help(const NodeLinkField& link, std::string_view hint)
+{
+    if (link.target_requires_unpaired) {
+        return "Choose a primary HalfDuplexServer in this configuration. Choosing a pair replaces Next for "
+               "this node.";
+    }
+    const std::string_view key = link.key;
+    struct LinkHelp {
+        std::string_view key;
+        std::string_view message;
+    };
+    constexpr LinkHelp messages[] = {
+        {"auth-client-node-name",
+         "Uses this AuthenticationClient's account service. Traffic follows the regular Next link."},
+        {"pair",
+         "Choose the other Bridge in this configuration. Paired sides need compatible traffic layers."},
+        {"dns-next", "DNS queries enter the selected node when DNS mode is chain."},
+        {"fallback-node-name", "Receives the fallback traffic. Next is the main route."},
+        {"destination", "Receives ordinary visitor traffic. Authenticated traffic follows Next."},
+        {"target", "Receives traffic when this routing rule matches."},
+        {"next", "Receives connections when this sniffing route matches."},
+        {"up", "Entry node for sent packets. Choose a different node for received packets."},
+        {"down", "Entry node for received packets. Choose a different node for sent packets."},
+        {"upload",
+         "Entry node for the upload transport. Set Download as well or leave both unset to use Next."},
+        {"download",
+         "Entry node for the download transport. Set Upload as well or leave both unset to use Next."},
+    };
+    const auto found = std::ranges::find(messages, key, &LinkHelp::key);
+    if (found != std::end(messages)) {
+        return found->message;
+    }
+    return hint.empty() ? "Choose another node from this configuration." : hint;
+}
+
+bool edit_setting_link(const State& state, Json& settings, bool adding, const NodeLinkField& setting,
+                       std::string_view hint = {})
 {
     const auto* key = node_link_key(settings, setting);
     auto target = std::string(string_field(settings, key));
-    if (!select_target(state, setting.label, target, adding, &setting, settings.contains(key))) {
+    auto help = std::format("{}\n{}", key, link_help(setting, hint));
+    if (setting.activation_setting) {
+        help += std::format("\nApplies when {} is {}.", setting.activation_setting,
+                            setting.activation_is_boolean ? "enabled" : "set");
+    }
+    if (!select_target(state, setting.label, target, adding, help, &setting, settings.contains(key))) {
         return false;
     }
     if (target.empty()) {
@@ -885,14 +938,40 @@ bool edit_setting_link(const State& state, Json& settings, bool adding, const No
     return true;
 }
 
-void setting_tooltip(const spec::Field& setting)
+std::string setting_help(const spec::Field& setting, std::string_view key)
 {
-    if (setting.kind == spec::Kind::text_or_list) {
-        ImGui::SetItemTooltip("%s\nEnter a JSON string or an array of strings. %s", setting.key,
-                              setting.hint);
-        return;
+    using enum spec::Kind;
+    std::string help = setting.hint;
+    const auto append = [&](std::string_view description) {
+        if (!help.empty()) {
+            help += '\n';
+        }
+        help += description;
+    };
+    const std::string_view field_name = setting.key;
+    if (field_name == "source-port" || field_name == "source-port-range") {
+        append("Matches the local port the peer connected to.");
+    } else if (setting.kind == object_list && field_name == "rules") {
+        append("Each rule needs a condition. All conditions in a rule must match.");
+    } else if (setting.kind == object_list && field_name == "routes") {
+        append("Routes are checked in order. The first match wins.");
+    } else if (setting.kind == object && field_name == "dns-behaviour" && help.empty()) {
+        append("Controls hostname resolution and which IP addresses WaterWall selects.");
     }
-    ImGui::SetItemTooltip("%s%s%s", setting.key, *setting.hint ? "\n" : "", setting.hint);
+    if (setting.kind == text_or_list) {
+        append("Enter one quoted JSON string or an array of quoted strings.");
+    } else if (setting.kind == port_range) {
+        append("The range includes both endpoints.");
+    }
+    const bool numeric =
+        setting.kind == integer || setting.kind == number || setting.kind == integer_or_boolean;
+    const bool bounded_number = numeric && (setting.minimum != std::numeric_limits<std::int32_t>::min() ||
+                                            setting.maximum != std::numeric_limits<std::int32_t>::max());
+    if ((bounded_number && setting.maximum <= 9007199254740991.) || setting.kind == port ||
+        setting.kind == port_list || setting.kind == port_range) {
+        append(std::format("Numeric values range from {} through {}.", setting.minimum, setting.maximum));
+    }
+    return help.empty() ? std::string{} : std::format("{}\n{}", key, help);
 }
 
 bool edit_setting_choice(Json& settings, const spec::Field& setting, const char* key)
@@ -1064,9 +1143,15 @@ bool edit_setting_group(State& state, Json& settings, bool adding, const spec::F
                         const char* key, const std::string& path)
 {
     using enum spec::Kind;
-    const bool expanded =
-        ImGui::TreeNodeEx("##group", ImGuiTreeNodeFlags_SpanAvailWidth, "%s", setting.label);
-    setting_tooltip(setting);
+    const auto help = setting_help(setting, key);
+    const auto flags = help.empty() ? ImGuiTreeNodeFlags_SpanAvailWidth
+                                    : ImGuiTreeNodeFlags_SpanLabelWidth | ImGuiTreeNodeFlags_AllowOverlap;
+    const bool expanded = ImGui::TreeNodeEx("##group", flags, "%s", setting.label);
+    if (help.empty()) {
+        ImGui::SetItemTooltip("%s", key);
+    } else {
+        help_marker(help);
+    }
     if (!expanded) {
         return false;
     }
@@ -1158,11 +1243,11 @@ bool edit_setting_fields(State& state, Json& settings, bool adding, std::span<co
             const auto link =
                 std::ranges::find_if(links, [&](const auto& link) { return matches(setting, link); });
             if (link != links.end()) {
-                changed |= edit_setting_link(state, settings, adding, *link);
+                changed |= edit_setting_link(state, settings, adding, *link, setting.hint);
             } else {
                 const NodeLinkField reference{setting.key, setting.label, NodeLinkKind::reference, nullptr,
                                               nullptr,     nullptr,       setting.aliases};
-                changed |= edit_setting_link(state, settings, adding, reference);
+                changed |= edit_setting_link(state, settings, adding, reference, setting.hint);
             }
             continue;
         }
@@ -1176,7 +1261,12 @@ bool edit_setting_fields(State& state, Json& settings, bool adding, std::span<co
             changed |= edit_setting_group(state, settings, adding, setting, key, path + '/' + setting.key);
         } else {
             ImGui::TextUnformatted(setting.label);
-            setting_tooltip(setting);
+            const auto help = setting_help(setting, key);
+            if (help.empty()) {
+                ImGui::SetItemTooltip("%s", key);
+            } else {
+                help_marker(help);
+            }
             ImGui::SetNextItemWidth(-1);
             if (setting.kind == boolean || setting.kind == choice) {
                 changed |= edit_setting_choice(settings, setting, key);
@@ -1202,6 +1292,8 @@ void edit_node(State& state, bool adding)
         return;
     }
     ImGui::TextUnformatted("Name");
+    help_marker("Names must be unique in this configuration. Renaming updates the links and named references "
+                "Wave recognizes.");
     ImGui::SetNextItemWidth(-1);
     ImGui::InputText("##node-name", &state.node_name);
     ImGui::TextUnformatted("Type");
@@ -1228,7 +1320,9 @@ void edit_node(State& state, bool adding)
         }
         state.invalid_setting_inputs.clear();
     }
-    ImGui::SetItemTooltip("Editing JSON enables this mode and pauses the settings controls.");
+    help_marker("Editing Settings JSON enables Custom JSON and pauses the settings controls, including named "
+                "targets. Clear the checkbox to use those controls once the JSON is valid. The node name and "
+                "top-level Next remain editable. Wave checks the JSON and graph links before saving.");
     if (ImGui::InputTextMultiline("##node-settings", &state.settings_text, {-1, 134})) {
         state.custom_json = true;
         state.invalid_setting_inputs.clear();
@@ -1242,7 +1336,10 @@ void edit_node(State& state, bool adding)
     if (!state.node_type.empty()) {
         const bool router = state.node_type == "Router" || state.node_type == "SniffRouter";
         if (can_send(state.node_type, settings)) {
-            select_target(state, router ? "Default next node" : "Next node", state.node_next, adding);
+            select_target(
+                state, router ? "Default next node" : "Next node", state.node_next, adding,
+                router ? "Receives traffic when no rule or route matches."
+                       : "Choose the next node in this chain. The graph shows this connection in blue.");
         }
         ImGui::SeparatorText(std::format("{} settings", state.node_type).c_str());
         const auto fields = spec::fields(state.node_type);
@@ -1270,7 +1367,7 @@ void edit_node(State& state, bool adding)
     }
 }
 
-void render_dialog(State& state, PreviewSession& session)
+void render_dialog(State& state, PreviewSession& session, bool reload_finished)
 {
     if (state.dialog == State::Dialog::none) {
         return;
@@ -1280,7 +1377,9 @@ void render_dialog(State& state, PreviewSession& session)
             state.import_config = {};
         }
         state.dialog = State::Dialog::none;
-        state.error.clear();
+        if (!reload_finished) {
+            state.error.clear();
+        }
         return;
     }
     if (state.dialog == State::Dialog::add || state.dialog == State::Dialog::edit) {
@@ -1337,18 +1436,14 @@ void render_dialog(State& state, PreviewSession& session)
     }
     if (state.dialog == State::Dialog::confirm_import) {
         const bool pending = state.request.has_value();
-        Dialog popup(import_title, 500, {{"Cancel", pending}, {"Resolve and save", !state.graph_editable}});
+        Dialog popup(import_title, 500, {{"Cancel", pending}, {"Resolve and save", !state.graph_editable}},
+                     {.busy = pending});
         if (popup) {
             if (state.reply && state.reply->ok()) {
                 close_dialog(state);
                 return;
             }
             wrapped(import_notice);
-            if (pending) {
-                wrapped("Saving configuration…", Color::info);
-            } else if (state.reply) {
-                feedback(*state.reply);
-            }
             if (!state.error.empty()) {
                 wrapped(state.error, Color::error);
             }
@@ -1362,14 +1457,22 @@ void render_dialog(State& state, PreviewSession& session)
         return;
     }
     if (state.dialog == State::Dialog::reload) {
-        Dialog popup(reload_title, 460, {{"Cancel"}, {"Reload", !session.ready()}});
+        const bool pending = state.request.has_value();
+        Dialog popup(reload_title, 460, {{"Cancel", pending}, {"Reload", pending || !session.ready()}},
+                     {.busy = pending});
         if (popup) {
+            if (reload_finished) {
+                close_dialog(state, true);
+                return;
+            }
             wrapped("Reload the saved configuration and discard your unsaved changes?");
             const auto action = popup.footer();
-            if (action >= 0) {
+            if (action == 0) {
                 close_dialog(state);
-                if (action == 1) {
-                    submit(state, session, State::Request::load);
+            } else if (action == 1) {
+                submit(state, session, State::Request::load);
+                if (!state.request) {
+                    close_dialog(state, true);
                 }
             }
         }
@@ -1438,9 +1541,6 @@ struct GraphStatus {
 
 GraphStatus graph_status(const State& state, bool active)
 {
-    if (state.request) {
-        return {state.operation == State::Request::load ? "Loading configuration…" : "Saving configuration…"};
-    }
     if (!state.error.empty() && state.dialog == State::Dialog::none) {
         return {state.error, Color::error};
     }
@@ -1452,9 +1552,6 @@ GraphStatus graph_status(const State& state, bool active)
     }
     if (state.link_from) {
         return {"Select the node to connect."};
-    }
-    if (state.reply && !state.reply->message.empty()) {
-        return {state.reply->message, Color::success};
     }
     return {state.dirty ? "Unsaved changes" : ""};
 }
@@ -1530,6 +1627,16 @@ void render_graph_pane(State& state, PreviewSession& session, bool active, bool 
                 fit = ImGui::MenuItem("Fit graph", nullptr, false, !nodes(state).empty());
                 ImGui::EndMenu();
             }
+            help_marker(
+                "Blue links are Next connections. Amber links are traffic branches configured in node "
+                "settings. "
+                "Gray links are references such as pairs and authentication services. Select a node's output "
+                "and another node's input to connect them.",
+                false);
+            if (state.request && state.dialog != State::Dialog::confirm_import &&
+                state.dialog != State::Dialog::reload) {
+                draw_busy_spinner(ImGui::GetFrameHeight());
+            }
             status = graph_status(state, active);
             if (draw_menu_status(status)) {
                 status.message = {};
@@ -1604,6 +1711,7 @@ void render_config_nodes(ConfigNodesState& state, PreviewSession& session, int c
     if (!state.load_requested && session.ready()) {
         submit(state, session, State::Request::load);
     }
+    const bool was_reloading = state.dialog == State::Dialog::reload && state.request.has_value();
     poll(state, session);
     if (session.status() == PreviewStatus::unavailable) {
         wrapped("The configuration connection is unavailable.", Color::warning);
@@ -1616,15 +1724,15 @@ void render_config_nodes(ConfigNodesState& state, PreviewSession& session, int c
     }
     if (!state.saved.is_object()) {
         if (state.request || session.status() == PreviewStatus::loading) {
-            wrapped("Loading configuration…", Color::secondary_text);
+            draw_busy_spinner(ImGui::GetFrameHeight());
         } else if (session.ready()) {
             wrapped("The configuration could not be loaded.", Color::warning);
             if (theme::button("Retry")) {
                 submit(state, session, State::Request::load);
             }
         }
-        if (state.reply) {
-            feedback(*state.reply);
+        if (state.reply && !state.reply->message.empty()) {
+            wrapped(state.reply->message, Color::error);
         }
         if (!state.error.empty()) {
             wrapped(state.error, Color::error);
@@ -1635,7 +1743,7 @@ void render_config_nodes(ConfigNodesState& state, PreviewSession& session, int c
     const bool active = config_active(session, config_id);
     state.graph_editable = !active && !state.request && session.ready();
     render_graph_pane(state, session, active, narrow);
-    render_dialog(state, session);
+    render_dialog(state, session, was_reloading && !state.request);
 }
 
 std::string describe_config_nodes(const ConfigNodesState& state)
@@ -1675,7 +1783,10 @@ std::string describe_config_nodes(const ConfigNodesState& state)
     if (state.dirty) {
         description += " Unsaved changes.";
     }
-    if (state.reply && !state.reply->message.empty()) {
+    if (state.request) {
+        description += ' ';
+        description += busy_description;
+    } else if (state.reply && !state.reply->message.empty()) {
         description += ' ' + state.reply->message;
     }
     if (!state.error.empty()) {

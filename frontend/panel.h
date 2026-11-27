@@ -70,6 +70,7 @@ struct PanelState {
     bool implot_demo_open = false;
     int browser_control = 0;
     PanelDialog requested_dialog = PanelDialog::none;
+    std::optional<std::uint64_t> refresh_request;
     char input_sample[257]{};
 
     int page_control() const;
@@ -78,7 +79,7 @@ struct PanelState {
 
 const char* panel_page_name(PanelPage page);
 std::span<const PanelNavigationItem> panel_navigation();
-float panel_height(float viewport_width, float canvas_width, const PanelState& state);
+float panel_height(float viewport_width, const PanelState& state);
 void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_viewport, int browser_focus);
 bool panel_tool_window_at(const PanelState& state, float x, float y);
 std::string describe_panel(const PanelState& state, const PreviewSession& session);

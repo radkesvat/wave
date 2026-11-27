@@ -17,9 +17,16 @@ class AuthStore {
         std::int64_t expires_at;
     };
 
+    struct IssuedSession {
+        std::string token;
+        int lifetime_seconds = 0;
+    };
+
     enum class SetupResult {
         created,
-        closed
+        closed,
+        invalid_password,
+        weak_password
     };
     enum class SignInResult {
         accepted,
@@ -29,20 +36,20 @@ class AuthStore {
     enum class UpdateResult {
         updated,
         invalid,
+        invalid_password,
+        weak_password,
         unauthorized,
         busy
     };
-
-    static constexpr int session_seconds = 24 * 60 * 60;
 
     explicit AuthStore(std::shared_ptr<PanelDatabase> database);
     ~AuthStore();
 
     bool installed() const;
     static bool valid_username(std::string_view username);
-    static bool valid_password(std::string_view password);
+    static bool valid_password_input(std::string_view password);
     SetupResult setup(std::string_view username, std::string_view password);
-    SignInResult sign_in(std::string_view username, std::string_view password, std::string& token);
+    SignInResult sign_in(std::string_view username, std::string_view password, IssuedSession& session);
     std::optional<Session> session(std::string_view token) const;
     void sign_out(std::string_view token);
     UpdateResult update_admin(std::string_view token, std::string_view username,

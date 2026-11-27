@@ -114,6 +114,8 @@ void AuthSession::request_failed(int status)
     pending_ = false;
     if (status == 429) {
         error_ = "Wait a moment and try again.";
+    } else if (status == 422 && (action_ == Action::setup || action_ == Action::update_administrator)) {
+        error_ = "Choose a less predictable password. A longer password may help.";
     } else if (action_ == Action::setup && status == 400) {
         error_ = "Check the username and password requirements.";
     } else if (action_ == Action::sign_in && status == 401) {

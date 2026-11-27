@@ -9,6 +9,7 @@
 #include "linux_metrics.h"
 #include "panel_settings.h"
 #include "preview_backup.h"
+#include "session_settings.h"
 #include "waterwall.h"
 #include "waterwall_logs.h"
 #include "waterwall_users.h"
@@ -48,6 +49,17 @@ constexpr std::size_t max_core_configs = 64;
 bool core_in_use(std::string_view state)
 {
     return state == "starting" || state == "running" || state == "stopping";
+}
+
+bool workspace_mutation(std::string_view action)
+{
+    constexpr std::string_view actions[] = {
+        "install_core", "start_core", "stop_core", "restart_core", "update_panel",
+        "create_core_config", "set_core_config_enabled", "remove_core_config", "restore_preview_backup",
+        "apply_settings", "apply_core_settings", "apply_session_settings", "save_core_config",
+        "create_config_user", "edit_config_user", "delete_config_user",
+    };
+    return std::ranges::find(actions, action) != std::end(actions);
 }
 
 Json make_core()
@@ -131,6 +143,7 @@ class Preview {
           config_users_(database_->directory()), core_(database_->directory()),
           core_logs_(database_->directory())
     {
+        data_["settings"]["session_expiry_days"] = database_->session_expiry_days();
         load_core_settings();
         if (database_->claim_waterwall_install()) {
             core_.install_if_missing();
@@ -303,6 +316,11 @@ class Preview {
                      : too_large                         ? Reply{false, "That panel request is too large."}
                      : action == "get_live_config_users" ? get_live_config_users(request, lock)
                                                          : dispatch(action, request);
+        if (!reply.ok && !reply.feedback.empty() && workspace_mutation(action)) {
+            log("error", reply.feedback);
+            reply.changed = true;
+            reply.feedback_in_logs_only = true;
+        }
         sync_core();
         if (reply.changed) {
             ++revision_;
@@ -366,7 +384,6 @@ class Preview {
             const auto reply = start_core();
             if (!reply.ok) {
                 restart_error_ = "Could not restart WaterWall. " + reply.feedback;
-                log("error", restart_error_);
             }
         }
         sync_core();
@@ -376,7 +393,6 @@ class Preview {
     {
         auto& core = data_["server"]["core"];
         const auto state = core_.state();
-        core["state"] = state;
         if (!core_in_use(state)) {
             core_logs_.stop();
             live_configs_.clear();
@@ -386,10 +402,21 @@ class Preview {
         }
         const auto& error = core_error();
         if (error.empty()) {
+            if (const auto previous = core.find("state"); previous != core.end()) {
+                if (*previous == "installing" && state == "stopped") {
+                    log("success", "WaterWall installed.");
+                } else if (*previous == "starting" && state == "running") {
+                    log("success", "WaterWall started.");
+                } else if (*previous == "stopping" && state == "stopped") {
+                    log("success", "WaterWall stopped.");
+                }
+            }
             core.erase("error");
-        } else {
+        } else if (!core.contains("error") || core["error"] != error) {
             core["error"] = error;
+            log("error", error);
         }
+        core["state"] = state;
     }
 
     const std::string& core_error() const
@@ -406,6 +433,23 @@ class Preview {
         }
         data_["settings"] = std::move(settings);
         return complete("Applied sample TLS settings.");
+    }
+
+    Reply apply_session_settings(const Json& input)
+    {
+        const auto days = input.find("session_expiry_days");
+        if (days == input.end() || !integer_value(*days, 1, max_session_expiry_days)) {
+            return {false, "Enter a whole number from 1 to " + std::to_string(max_session_expiry_days) +
+                               " for session expiry."};
+        }
+        const auto selected = days->get<int>();
+        try {
+            database_->save_session_expiry_days(selected);
+        } catch (const std::runtime_error&) {
+            return {false, "Could not save session expiry in wave-db.json."};
+        }
+        data_["settings"]["session_expiry_days"] = selected;
+        return complete("Saved session expiry for future sign-ins.");
     }
 
     Reply apply_core_settings(const Json& input)
@@ -864,13 +908,18 @@ class Preview {
             return {false, "Save the node with a database in its config folder before managing its users."};
         }
         auto result = config_users_.execute(action, name, db, input);
+        if (result.success && action != "get_config_users") {
+            auto reply = complete(std::move(result.message));
+            reply.result = std::move(result.result);
+            return reply;
+        }
         return {result.success, std::move(result.message), false, std::move(result.result)};
     }
 
     Reply dispatch(std::string_view action, const Json& input)
     {
         if (action == "refresh") {
-            return {true, "Workspace refreshed."};
+            return complete("Workspace refreshed.", "info");
         }
         if (action == "install_core" || action == "start_core" || action == "stop_core" ||
             action == "restart_core") {
@@ -897,6 +946,9 @@ class Preview {
         }
         if (action == "apply_settings") {
             return apply_settings(input);
+        }
+        if (action == "apply_session_settings") {
+            return apply_session_settings(input);
         }
         if (action == "apply_core_settings") {
             return apply_core_settings(input);

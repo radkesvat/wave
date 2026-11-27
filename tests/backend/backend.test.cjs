@@ -132,7 +132,7 @@ test('initializes a private database beside the executable and preserves existin
 });
 
 test('serves uncached entry assets and protects HTTP data with an administrator session', async () => {
-    const credentials = { username: 'fixture-user', password: 'fake fixture test passphrase' };
+    const credentials = { username: 'fixture-user', password: 'fake fixture test passphrase 9Jw4c' };
     const request = (path, options = {}) =>
         fetch(new URL(path, url), { redirect: 'manual', signal: AbortSignal.timeout(timeout), ...options });
     const post = (action, origin = url.origin) => request(`/api/auth/${action}`, {
@@ -251,7 +251,7 @@ async function connectPreview(t, base, sessionCookie) {
 }
 
 async function fixtureSession(fixture) {
-    const credentials = { username: 'fixture-admin', password: 'fixture core test passphrase' };
+    const credentials = { username: 'fixture-admin', password: 'fixture core test passphrase 4Kq7v' };
     const post = action => fetch(new URL('/api/auth/' + action, fixture.origin), {
         method: 'POST',
         headers: { Origin: fixture.origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json' },
@@ -376,19 +376,33 @@ function configPath(name) {
     return join(coreFixture.configDir, name, 'config.json');
 }
 
+function panelLogs(frame, level, message = frame.feedback) {
+    return frame.data.logs.filter(row => row.source === 'panel' && row.level === level && row.message === message);
+}
+
 test('starts, restarts, and reaps WaterWall with the selected configs supplied through stdin',
     { skip: process.platform !== 'linux' }, async t => {
         const { socket, initial } = await connectPreview(t);
         const observer = await connectPreview(t);
         assert.equal(initial.server.version, '1.6.0');
         assert.deepEqual(initial.server.available_panel_versions, ['1.6.0']);
+        const rejectedStart = nextPreviewSnapshot(observer.socket, frame =>
+            panelLogs(frame, 'error', 'Enable at least one config before starting WaterWall.').length > 0);
         const empty = await requestPreview(socket, 'start_core');
         assert.equal(empty.ok, false);
         assert.match(empty.feedback, /enable.*config/i);
+        assert.equal(empty.feedback_in_logs_only, true);
+        assert.equal(panelLogs(empty, 'error').length, 1);
+        assert.equal(panelLogs(await rejectedStart, 'error', empty.feedback).length, 1);
         const stoppedRestart = await requestPreview(socket, 'restart_core');
         assert.equal(stoppedRestart.ok, false);
         assert.match(stoppedRestart.feedback, /must be running/i);
-        assert.equal(stoppedRestart.feedback_in_logs_only, undefined);
+        assert.equal(stoppedRestart.feedback_in_logs_only, true);
+        assert.equal(panelLogs(stoppedRestart, 'error').length, 1);
+        const refreshed = await requestPreview(socket, 'refresh');
+        assert.equal(refreshed.ok, true);
+        assert.equal(refreshed.feedback_in_logs_only, true);
+        assert.equal(panelLogs(refreshed, 'info').length, 1);
 
         const active = await createCoreConfig(socket, 'Main config', true);
         const inactive = await createCoreConfig(socket, 'Skip disabled');
@@ -437,11 +451,14 @@ test('starts, restarts, and reaps WaterWall with the selected configs supplied t
             frame.data.logs.some(row => row.message === expected.message)));
         const running = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'running');
         assert.equal((await requestPreview(socket, 'start_core')).ok, true);
-        assert.deepEqual((await running).data.server.core.configs, [{ ...active, active: true }, inactive]);
+        const started = await running;
+        assert.deepEqual(started.data.server.core.configs, [{ ...active, active: true }, inactive]);
+        assert.equal(panelLogs(started, 'success', 'WaterWall started.').length, 1);
         const diagnostics = await requestPreview(socket, 'diagnostics');
         assert.equal(diagnostics.ok, true, diagnostics.feedback);
         assert.match(diagnostics.feedback, /WaterWall is running/);
         assert.equal(diagnostics.data.logs.at(-1).message, diagnostics.feedback);
+        assert.equal(panelLogs(diagnostics, 'success', 'WaterWall started.').length, 1);
         const child = JSON.parse(await waitForFile(coreFixture.processFile));
         assert.deepEqual(child.args, ['--config:stdin']);
         assert.equal(child.cwd, dirname(backend));
@@ -495,8 +512,11 @@ test('starts, restarts, and reaps WaterWall with the selected configs supplied t
         assert.match(duplicate.feedback, /must be running/i);
         assert.equal(await waitForFile(coreFixture.terminatedFile), String(child.pid));
         await starting;
-        assert.deepEqual((await resumed).data.server.core.configs,
+        const restarted = await resumed;
+        assert.deepEqual(restarted.data.server.core.configs,
             [{ ...active, active: true }, { ...enabled, active: true }]);
+        assert.equal(panelLogs(restarted, 'success', 'WaterWall started.').length, 1);
+        assert.equal(panelLogs(restarted, 'success', 'WaterWall stopped.').length, 0);
         const replacement = JSON.parse(await waitForFile(coreFixture.processFile));
         assert.notEqual(replacement.pid, child.pid);
         assert.throws(() => process.kill(child.pid, 0), { code: 'ESRCH' });
@@ -505,8 +525,22 @@ test('starts, restarts, and reaps WaterWall with the selected configs supplied t
 
         const stopped = nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.state === 'stopped');
         assert.equal((await requestPreview(socket, 'stop_core')).ok, true);
-        assert.deepEqual((await stopped).data.server.core.configs, [active, enabled]);
+        const reaped = await stopped;
+        assert.deepEqual(reaped.data.server.core.configs, [active, enabled]);
+        assert.equal(panelLogs(reaped, 'success', 'WaterWall stopped.').length, 1);
         assert.throws(() => process.kill(replacement.pid, 0), { code: 'ESRCH' });
+
+        await writeFile(coreFixture.program, '#!/bin/sh\nexit 7\n');
+        const exited = nextPreviewSnapshot(observer.socket, frame =>
+            frame.data.server.core.error?.includes('WaterWall exited.'));
+        assert.equal((await requestPreview(socket, 'start_core')).ok, true);
+        const failed = await exited;
+        const error = failed.data.server.core.error;
+        assert.equal(panelLogs(failed, 'error', error).length, 1);
+        assert.equal(panelLogs(failed, 'success', 'WaterWall stopped.').length, 1);
+        const afterExit = await nextPreviewSnapshot(observer.socket, frame => frame.data.server.core.error === error);
+        assert.equal(panelLogs(afterExit, 'error', error).length, 1);
+
         for (const { id } of [active, enabled]) {
             assert.equal((await requestPreview(socket, 'remove_core_config', { id })).ok, true);
         }
@@ -563,7 +597,8 @@ test('attempts first-run installation once and lets an authenticated administrat
         assert.equal((await requestPreview(first.socket, 'install_core')).ok, false);
         const firstFailure = failedInstall(first.socket);
         await writeFile(released, '');
-        await firstFailure;
+        const firstFailed = await firstFailure;
+        assert.equal(panelLogs(firstFailed, 'error', firstFailed.data.server.core.error).length, 1);
         assert.equal((await invoked()).length, 1);
         assert.deepEqual(await readdir(binDir), []);
 
@@ -582,13 +617,15 @@ test('attempts first-run installation once and lets an authenticated administrat
         assert.equal(retry.data.server.core.state, 'installing');
         const secondFailure = failedInstall(restarted.socket);
         await writeFile(released, '');
-        await secondFailure;
+        const secondFailed = await secondFailure;
+        assert.equal(panelLogs(secondFailed, 'error', secondFailed.data.server.core.error).length, 1);
+        assert.equal(panelLogs(secondFailed, 'success', 'WaterWall installed.').length, 0);
         assert.equal((await invoked()).length, 2);
         assert.deepEqual(await readdir(binDir), []);
 
         const installed = nextPreviewSnapshot(restarted.socket, frame => frame.data.server.core.state === 'stopped');
         const staged = await seedCore(fixture.backend, { executable: true });
-        await installed;
+        assert.equal(panelLogs(await installed, 'success', 'WaterWall installed.').length, 0);
         const deleted = nextPreviewSnapshot(restarted.socket, frame => frame.data.server.core.state === 'missing');
         await unlink(staged.program);
         await deleted;
@@ -767,6 +804,8 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
         const rejected = await open(socket);
         assert.equal(rejected.ok, false);
         assert.match(rejected.feedback, expected);
+        assert.equal(rejected.feedback_in_logs_only, undefined);
+        assert.equal(panelLogs(rejected, 'error').length, 0);
         assert.equal(await readFile(file, 'utf8'), contents);
     }
     await writeFile(file, JSON.stringify(skeleton, null, 2) + '\n');
@@ -821,6 +860,8 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     };
     const created = await users(socket, 'staff', 'create_config_user', { user });
     assert.equal(created.ok, true, created.feedback);
+    assert.equal(created.feedback_in_logs_only, true);
+    assert.equal(panelLogs(created, 'success').length, 1);
     assert.equal(created.result.total, 1);
     const [record] = created.result.users;
     const { password: _, ...expected } = user;
@@ -873,6 +914,8 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     const overlap = await create({ password: otherPassword, 'wireguard-allowed-ips': '192.0.2.1/32' });
     assert.equal(overlap.ok, false);
     assert.match(overlap.feedback, /overlap/i);
+    assert.equal(overlap.feedback_in_logs_only, true);
+    assert.equal(panelLogs(overlap, 'error').length, 1);
     assert.equal(await readFile(databases[0], 'utf8'), existing);
 
     const notes = 'x'.repeat(9 * 1024);
@@ -881,6 +924,7 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
         limit: { traffic: { up: null, down: '0' } }, time: { 'expire-at-ms': null },
     });
     assert.equal(edited.ok, true, edited.feedback);
+    assert.equal(edited.feedback_in_logs_only, true);
     const updated = {
         ...record, name: 'Jordan', notes, enabled: false, 'wireguard-allowed-ips': '',
         limit: { ...record.limit, traffic: { total: record.limit.traffic.total, down: '0' } },
@@ -924,6 +968,7 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     assert.equal(JSON.parse(await readFile(databases[0], 'utf8')).users[0].password, otherPassword);
     const deleted = await users(restarted.socket, 'directory', 'delete_config_user', { user_id: record.id });
     assert.equal(deleted.ok, true, deleted.feedback);
+    assert.equal(deleted.feedback_in_logs_only, true);
     assert.deepEqual(deleted.result.users, []);
     assert.deepEqual(JSON.parse(await readFile(databases[0], 'utf8')), { users: [] });
 });
@@ -1098,6 +1143,8 @@ test('restores backup metadata atomically and preserves running and edited confi
         for (const name of [active.name, '../escape', 'Blocked profile']) {
             const rejected = await restore([...configs, { name, enabled: false }]);
             assert.equal(rejected.ok, false);
+            assert.equal(rejected.feedback_in_logs_only, true);
+            assert.ok(panelLogs(rejected, 'error').length > 0);
             assert.deepEqual(rejected.data.server.core.configs, [active, standby]);
         }
         assert.equal(await readFile(database, 'utf8'), stored);

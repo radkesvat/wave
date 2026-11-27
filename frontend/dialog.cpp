@@ -18,19 +18,40 @@ constexpr float title_padding = 4;
 
 } // namespace
 
-Dialog::Dialog(const char* title, float width, std::initializer_list<DialogAction> actions, bool* open,
-               float entry_top)
-    : Dialog(title, width, std::span(actions), open, entry_top)
+void draw_busy_spinner(float row_height)
+{
+    const auto pos = ImGui::GetCursorScreenPos();
+    ImGui::Dummy({busy_spinner_width, row_height});
+    if (!ImGui::IsItemVisible()) {
+        return;
+    }
+
+    constexpr int segments = 30;
+    const float radius = std::min(9.0f, row_height * 0.35f);
+    const float time = static_cast<float>(ImGui::GetTime());
+    const float sweep = (0.9f - 0.75f * std::abs(std::sin(time * 1.8f))) * 2 * IM_PI;
+    const ImVec2 center{pos.x + busy_spinner_width * 0.5f, pos.y + row_height * 0.5f};
+    auto* draw = ImGui::GetWindowDrawList();
+    draw->PathArcTo(center, radius, time * 8.0f - sweep, time * 8.0f, segments);
+    draw->PathStroke(ImGui::GetColorU32(theme::packed(theme::Color::info)), 0, 3.0f);
+}
+
+Dialog::Dialog(const char* title, float width, std::initializer_list<DialogAction> actions,
+               DialogOptions options)
+    : Dialog(title, width, std::span(actions), options)
 {
 }
 
-Dialog::Dialog(const char* title, float width, std::span<const DialogAction> actions, bool* open,
-               float entry_top)
+Dialog::Dialog(const char* title, float width, std::span<const DialogAction> actions, DialogOptions options)
 {
     if (!ImGui::IsPopupOpen(title)) {
         return;
     }
     const auto viewport = visible_canvas();
+    const auto [open, entry_top, busy, footer_error, reveal_footer_error] = options;
+    busy_ = busy.value_or(false);
+    footer_error_ = footer_error;
+    reveal_footer_error_ = reveal_footer_error;
     const auto& style = ImGui::GetStyle();
     const float font = ImGui::GetFontSize();
     const float scale = font / theme::secondary_font_size;
@@ -44,18 +65,31 @@ Dialog::Dialog(const char* title, float width, std::span<const DialogAction> act
     const auto layout_footer = [&](float available_width) {
         buttons_.clear();
         last_row_ = 0;
+        action_offset_ = 0;
         float right = available_width;
+        // Leave room beside the primary action in both the idle and busy states.
+        const float left =
+            busy ? std::min(busy_spinner_width + style.ItemSpacing.x, available_width * 0.5f) : 0;
         // Fit rows from the right so the primary action stays at the bottom right.
         for (auto it = actions.rbegin(); it != actions.rend(); ++it) {
             const float text_width = ImGui::CalcTextSize(it->label, nullptr, true).x;
-            const float button_width =
+            const float preferred =
                 std::min(available_width, std::max(94.0f * scale, std::ceil(text_width) + 2 * padding.x));
-            if (right < button_width) {
+            if (!buttons_.empty() && right - preferred < (last_row_ == 0 ? left : 0)) {
                 ++last_row_;
                 right = available_width;
             }
+            const float button_width = std::min(preferred, right - (last_row_ == 0 ? left : 0));
             buttons_.push_back({*it, right - button_width, button_width, last_row_});
             right -= button_width + style.ItemSpacing.x;
+        }
+        if (!footer_error_.empty()) {
+            const auto start = footer_error_.data();
+            const auto end = start + footer_error_.size();
+            const auto text_size = ImGui::CalcTextSize(start, end);
+            if (busy_ || last_row_ > 0 || text_size.x > right || text_size.y > button_height_) {
+                action_offset_ = ImGui::CalcTextSize(start, end, false, available_width).y + row_gap;
+            }
         }
     };
     layout_footer(content_width);
@@ -74,7 +108,8 @@ Dialog::Dialog(const char* title, float width, std::span<const DialogAction> act
     }
     const float height = std::max(1.0f, bottom - top);
     const float content_height = height - chrome_height;
-    const float footer_height = (last_row_ + 1) * (button_height_ + row_gap) + theme::border_width + row_gap;
+    const float footer_height =
+        action_offset_ + (last_row_ + 1) * (button_height_ + row_gap) + theme::border_width + row_gap;
     // Keep a label and its field visible together when deciding whether to pin the actions.
     scroll_footer_ = content_height - footer_height < minimum_body_height;
     const float body_height = std::max(1.0f, content_height - (scroll_footer_ ? 0.0f : footer_height));
@@ -140,18 +175,38 @@ int Dialog::footer()
     }
     ImGui::Separator();
     const ImVec2 start = ImGui::GetCursorScreenPos();
+    if (!footer_error_.empty()) {
+        if (action_offset_ == 0) {
+            const float height =
+                ImGui::CalcTextSize(footer_error_.data(), footer_error_.data() + footer_error_.size()).y;
+            ImGui::SetCursorScreenPos({start.x, start.y + std::floor((button_height_ - height) * 0.5f)});
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::rgba(theme::Color::error));
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted(footer_error_.data(), footer_error_.data() + footer_error_.size());
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+        if (scroll_footer_ && reveal_footer_error_) {
+            ImGui::SetScrollHereY(0.65f);
+        }
+    }
     const float step = button_height_ + ImGui::GetStyle().ItemSpacing.y;
+    const float actions_top = start.y + action_offset_;
     int activated = -1;
     int index = 0;
     for (auto it = buttons_.rbegin(); it != buttons_.rend(); ++it, ++index) {
         const auto& button = *it;
         ImGui::SetCursorScreenPos(
-            {start.x + button.x, start.y + (last_row_ - button.row_from_bottom) * step});
+            {start.x + button.x, actions_top + (last_row_ - button.row_from_bottom) * step});
         ImGui::BeginDisabled(button.action.disabled);
         if (ImGui::Button(button.action.label, {button.width, button_height_})) {
             activated = index;
         }
         ImGui::EndDisabled();
+    }
+    if (busy_) {
+        ImGui::SetCursorScreenPos({start.x, actions_top + last_row_ * step});
+        draw_busy_spinner(button_height_);
     }
     if (scroll_footer_) {
         ImGui::EndChild();

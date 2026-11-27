@@ -30,18 +30,17 @@ struct PanelControlsState {
     std::string remove_name;
     bool remove_has_unsaved_changes = false;
     nlohmann::json restore_request;
-    bool lifecycle_request = false;
     std::optional<std::uint64_t> request_id;
-    std::optional<PreviewReply> reply;
+    std::optional<bool> request_accepted;
+    std::string restore_error;
 };
 
 void update_panel_controls(PanelControlsState& state, PreviewSession& session);
 void render_create_config_menu(PanelControlsState& state, const PreviewSession& session);
 void render_config_header(PanelControlsState& state, PreviewSession& session, const nlohmann::json& config,
                           int config_id, bool dirty, bool narrow);
-std::string_view config_action_message(const PanelControlsState& state, int config_id);
-float panel_controls_height(const PanelControlsState& state, const PreviewSession& session, float width,
-                            bool compact);
+bool config_action_pending(const PanelControlsState& state, int config_id);
+float panel_controls_height(const PreviewSession& session, float width, bool compact);
 void render_panel_controls(PanelControlsState& state, PreviewSession& session, float width, bool compact);
 void render_panel_control_dialog(PanelControlsState& state, PreviewSession& session);
 std::string describe_panel_controls(const PanelControlsState& state, const PreviewSession& session,

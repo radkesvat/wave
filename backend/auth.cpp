@@ -71,7 +71,7 @@ std::string session_cookie(const Request& request)
     return token.size() <= 1024 ? std::string(token) : std::string{};
 }
 
-void set_cookie(Response& response, bool secure, std::string_view token)
+void set_cookie(Response& response, bool secure, std::string_view token, int lifetime_seconds = 0)
 {
     auto value = std::string(cookie_name(secure)) + std::string(token) + "; Path=/";
     if (secure) {
@@ -79,7 +79,7 @@ void set_cookie(Response& response, bool secure, std::string_view token)
     }
     value += "; HttpOnly; SameSite=Strict; Max-Age=";
     value += token.empty() ? "0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
-                           : std::to_string(AuthStore::session_seconds);
+                           : std::to_string(lifetime_seconds);
     response.set_header("Set-Cookie", value);
 }
 
@@ -205,7 +205,7 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         const auto input = Json::parse(req.body, nullptr, false);
         const auto username = credential(input, "username");
         const auto password = credential(input, "password");
-        if (!AuthStore::valid_username(username) || !AuthStore::valid_password(password)) {
+        if (!AuthStore::valid_username(username)) {
             res.status = 400;
             return;
         }
@@ -216,6 +216,12 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         case AuthStore::SetupResult::closed:
             res.status = 409;
             break;
+        case AuthStore::SetupResult::invalid_password:
+            res.status = 400;
+            break;
+        case AuthStore::SetupResult::weak_password:
+            res.status = 422;
+            break;
         }
     });
 
@@ -223,14 +229,14 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         const auto input = Json::parse(req.body, nullptr, false);
         const auto username = credential(input, "username");
         const auto password = credential(input, "password");
-        if (!AuthStore::valid_username(username) || !AuthStore::valid_password(password)) {
+        if (!AuthStore::valid_username(username) || !AuthStore::valid_password_input(password)) {
             res.status = 401;
             return;
         }
-        std::string token;
-        switch (store->sign_in(username, password, token)) {
+        AuthStore::IssuedSession session;
+        switch (store->sign_in(username, password, session)) {
         case AuthStore::SignInResult::accepted:
-            set_cookie(res, secure, token);
+            set_cookie(res, secure, session.token, session.lifetime_seconds);
             res.status = 204;
             break;
         case AuthStore::SignInResult::invalid:
@@ -254,16 +260,12 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         const auto username = credential(input, "username");
         const auto current_password = credential(input, "current_password");
         const auto new_password = input.find("password");
-        if (!AuthStore::valid_username(username) || !AuthStore::valid_password(current_password) ||
+        if (!AuthStore::valid_username(username) || !AuthStore::valid_password_input(current_password) ||
             new_password == input.end() || !new_password->is_string()) {
             res.status = 400;
             return;
         }
         const auto& password = new_password->get_ref<const std::string&>();
-        if (!password.empty() && !AuthStore::valid_password(password)) {
-            res.status = 400;
-            return;
-        }
         switch (store->update_admin(session_cookie(req), username, current_password, password)) {
         case AuthStore::UpdateResult::updated:
             set_cookie(res, secure, {});
@@ -274,6 +276,12 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
             break;
         case AuthStore::UpdateResult::invalid:
             res.status = 403;
+            break;
+        case AuthStore::UpdateResult::invalid_password:
+            res.status = 400;
+            break;
+        case AuthStore::UpdateResult::weak_password:
+            res.status = 422;
             break;
         case AuthStore::UpdateResult::busy:
             res.set_header("Retry-After", "1");

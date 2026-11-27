@@ -126,8 +126,12 @@ Replace `--dry-run --Werror` with `-i` to apply the format.
 
 The backend needs CMake 3.24 or newer, Ninja, host C and C++20 compilers, and
 the OpenSSL 3 development package. The first configure downloads cpp-httplib
-v0.67.0, nlohmann/json v3.12.0, and the Argon2 reference implementation release
-`20190702` and verifies their pinned archive checksums. [cpp-httplib release](https://github.com/yhirose/cpp-httplib/releases/tag/v0.67.0), [nlohmann/json release](https://github.com/nlohmann/json/releases/tag/v3.12.0)
+v0.67.0, nlohmann/json v3.12.0, the Argon2 reference implementation release
+`20190702`, and zxcvbn-c v2.7, then verifies their pinned archive checksums.
+[cpp-httplib release](https://github.com/yhirose/cpp-httplib/releases/tag/v0.67.0),
+[nlohmann/json release](https://github.com/nlohmann/json/releases/tag/v3.12.0),
+[zxcvbn-c release](https://github.com/tsyrogit/zxcvbn-c/releases/tag/v2.7),
+[zxcvbn-c license](licenses/zxcvbn-c.txt)
 
 On Linux, the build patches cpp-httplib so closing a WebSocket wakes a thread
 that is still reading terminal input. Linux builds include HTTPS support by
@@ -166,8 +170,7 @@ and Internal messages. The five source checkboxes control what appears in the
 list and what **Copy** includes. The pane also provides search and auto-scroll.
 **Clear** clears the panel's view.
 
-Completed changes such as saving settings or enabling a config appear in
-**Logs**. Errors and warnings stay visible where the action was taken.
+Workspace operation results appear in **Logs**.
 
 Menu opens version information and signs you out. Tools opens diagnostics
 and input helpers. **ImGui Demo** and **ImPlot Demo** toggle the libraries'
@@ -179,6 +182,13 @@ visible viewport, including when the page is scrolled. Entry dialogs center
 beneath Wave's header when there is room. In very short viewports, the
 dialog body and actions scroll together. At larger heights, the actions
 stay visible while a long body scrolls. Action rows wrap on narrow screens.
+During a request, a circular spinner appears at the lower left of the dialog.
+Actions outside a dialog show a spinner beside their controls. Workspace
+operation results are recorded in **Logs**. Forms show validation where you
+enter the values.
+
+Hover over or focus a **(?)** beside a field to read its help. On a touch
+screen, tap the marker and tap outside the help to dismiss it.
 
 ### First-run setup
 
@@ -188,8 +198,10 @@ with those credentials to open the workspace. A browser with a valid
 session opens the workspace directly.
 
 Use **Settings → Panel → Administrator** to change the username or password.
-Saving changes signs out every active session. The **Panel** tab also shows
-the sample domain, certificate chain path, and private key path.
+Saving administrator credentials signs out every active session. In the
+**Panel** tab, **Session expiry (days)** controls how long new sign-ins last
+and defaults to 3 days. The tab also shows the sample domain, certificate
+chain path, and private key path.
 **Apply changes** keeps those sample values for the current preview process.
 Configure deployment TLS in `wave-db.json`. [Administrator setup](authentication.md#set-up-the-administrator)
 
@@ -212,10 +224,9 @@ under CPU, beside Host Network. When space is tight, the five cards stack in ord
 from CPU and Memory through Server Information, Panel Controls, and Host Network.
 Each plot shows current readings in a legend inside its upper-left corner.
 On a phone, swipe through the cards to reach Logs.
-At short desktop heights, scroll inside the work pane to see the rest of
-the grid. Server Status reserves the browser scrollbar gutter on platforms
-with a classic scrollbar, so the column count stays consistent as the page
-starts or stops scrolling.
+On desktop, scroll inside the work pane when the cards stack or the window
+is short. Logs stays in place, and the header uses the full canvas width.
+The column count follows the browser viewport width.
 
 `--site-dir` selects a frontend build directory relative to the current
 working directory or by absolute path. It defaults to `build/web-release/site`
@@ -422,7 +433,9 @@ and commits metadata, and saves the imported nodes as plain JSON. The graph
 updates after the save succeeds. Paste and expansion are limited to 1 MiB each.
 
 Wave edits JSON config files up to 256 KiB. If another browser or a local
-editor changes the file first, reload it before saving again. The editor
+editor changes the file first, reload it before saving again. When you confirm
+a reload with unsaved changes, the dialog stays open with a spinner until
+Wave receives the saved config or the request fails. The editor
 rejects duplicate JSON object keys and NUL characters because WaterWall
 rejects them. Add and configure the nodes needed for each chain before enabling
 the config. WaterWall checks each node's settings and chain compatibility when
@@ -480,10 +493,13 @@ The workspace snapshot reports the build version in `server.version` and
 any `error` from the installer or process, `configs`, and the `lifecycle`
 and `configs` capability flags. Requests use the existing `request_id` and
 snapshot reply. The install, start, stop, and restart replies confirm receipt and
-later snapshots report completion.
+later snapshots report completion. Stop and restart dialogs keep the spinner
+visible while WaterWall is changing state. The Panel Controls card shows the
+current core state. Installation and process outcomes appear in **Logs**.
 
-When a reply includes `feedback_in_logs_only: true`, Wave shows its success
-message in Logs. The reply still carries `feedback` and any `result` data.
+When a reply includes `feedback_in_logs_only: true`, its message has been written
+to Logs. The reply still carries `feedback` and any `result` data. Workspace
+changes that time out or lose their connection add a browser-local log entry.
 While a reply is pending, the controls block duplicate submissions. If the
 connection closes, Server Status shows the last snapshot and offers to reconnect.
 

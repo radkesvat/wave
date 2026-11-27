@@ -23,6 +23,8 @@ class PanelDatabase {
     const std::filesystem::path& directory() const;
     const PanelSettings& settings() const;
     const nlohmann::json& initial_contents() const;
+    int session_expiry_days() const;
+    void save_session_expiry_days(int days);
     bool claim_waterwall_install();
     void save_auth(const nlohmann::json& admins, const nlohmann::json& auth);
     void save_core_settings(const nlohmann::json& settings);

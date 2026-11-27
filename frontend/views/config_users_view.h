@@ -30,7 +30,6 @@ struct ConfigUsersState {
     nlohmann::json users;
     nlohmann::json selected_user;
     std::optional<std::uint64_t> request;
-    std::optional<PreviewReply> reply;
     std::string name;
     std::string email;
     std::string notes;
@@ -38,6 +37,7 @@ struct ConfigUsersState {
     std::string password;
     std::map<std::string_view, std::string> numbers;
     std::string validation;
+    std::string read_error;
     std::string user_id;
     bool open_account = false;
     bool enabled = true;

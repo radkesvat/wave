@@ -1,6 +1,7 @@
 #include "core_settings_view.h"
 
 #include "core_settings.h"
+#include "dialog.h"
 #include "view_helpers.h"
 #include "wave_version.h"
 
@@ -22,10 +23,127 @@ using Section = CoreSettingsDraft::Section;
 using theme::Color;
 using view::Json;
 
-constexpr char saving[] = "Saving core settings…";
 constexpr char help[] = "Changes apply on the next core start. Enable configs from their workspace headers.";
 constexpr char save_label[] = "Save core settings";
 constexpr char revert_label[] = "Revert edits";
+
+struct HelpText {
+    std::string_view key;
+    std::string_view description;
+};
+
+// WaterWall v1.6.0 core settings and c-ares options.
+constexpr HelpText field_help[] = {
+    {"workers",
+     "If omitted or set to 0 or less, WaterWall uses all online logical CPUs. It caps the count at 254 "
+     "workers."},
+    {"ram-profile",
+     "Sizes memory pools and sets defaults for memory-sensitive node settings. Defaults to Server (L2)."},
+    {"mtu", "Default MTU for nodes that inherit the core setting. A node can override it. Defaults to 1500 "
+            "bytes."},
+    {"libs-path", "Directory used to load external tunnel libraries. Defaults to libs/."},
+    {"splice",
+     "Allows eligible stream chains to move data through kernel pipes. Defaults to enabled. Every node in "
+     "the chain and the platform must support splice."},
+    {"tcp-tune",
+     "Lets WaterWall try to raise Linux kernel TCP memory limits at startup when splice is enabled. "
+     "Defaults to enabled on Linux."},
+    {"try-enabling-bbr",
+     "Lets WaterWall try to enable the BBR congestion controller at startup on Linux. Defaults to enabled "
+     "on Linux."},
+    {"tcp-stack-receive-budget",
+     "Per-worker target for advertised userspace TCP receive windows. Defaults to 32 MiB. Enter 0 to "
+     "disable adaptation."},
+    {"lwip-memory-budget",
+     "Total memory limit for growable lwIP pools and retained packet data across the process. Defaults to "
+     "512 MiB."},
+    {"lwip-max-tcp-flows",
+     "Maximum number of TCP states across the process, including opening and closing connections. "
+     "Defaults to 65,536."},
+    {"lwip-max-udp-flows", "Maximum number of UDP states across the process. Defaults to 65,536."},
+    {"lwip-max-tcp-listeners",
+     "Maximum number of userspace TCP listeners across the process. Defaults to 1,024."},
+    {"lwip-max-tcp-segments",
+     "Maximum number of TCP segments held in send, receive, and retransmit queues. Defaults to 1,048,576."},
+    {"lwip-max-rx-wrappers",
+     "Maximum number of objects retaining incoming packets in lwIP. Defaults to 262,144."},
+    {"path",
+     "WaterWall appends each log file name directly to this directory. End it with /. Defaults to log/."},
+    {"loglevel",
+     "Sets the minimum severity written by this logger. Defaults to Info. Silent disables output from "
+     "this logger."},
+    {"file",
+     "File name under the log directory. Use a distinct file name for each logger so Wave can identify "
+     "its source."},
+    {"console",
+     "Writes this logger's messages to the core console as well as its configured file. Defaults to "
+     "enabled."},
+    {"domain-strategy",
+     "Default address selection for nodes that inherit the core DNS preference. Prefer IPv4 falls back to "
+     "IPv6. IPv4 only and IPv6 only require the selected family."},
+    {"servers",
+     "Enter DNS servers separated by commas. Use [IPv6]:port when specifying an IPv6 port. Leave blank to "
+     "use system resolvers."},
+    {"domains",
+     "Suffixes the resolver can append to relative names. Enter one search domain per line. Leave blank "
+     "to use the system search list."},
+    {"lookups", "Choose whether to consult DNS, the hosts file, or both in order. The core default uses the "
+                "resolver's system lookup order."},
+    {"timeout-ms",
+     "Initial time allowed for one DNS attempt before the resolver has response history for the server. "
+     "Defaults to 1000 ms."},
+    {"max-timeout-ms",
+     "Upper limit for a single DNS attempt, including retry attempts. A full lookup can take longer. "
+     "Defaults to 5000 ms."},
+    {"tries", "Number of query attempts allowed per DNS server. Defaults to 5."},
+    {"query-cache-max-ttl",
+     "Maximum time DNS results stay in the query cache. Defaults to 1800 seconds. Enter 0 to disable the "
+     "cache."},
+    {"ndots",
+     "Minimum dots in a name before the resolver tries it as written ahead of the search domains. Accepts "
+     "0 to 15."},
+    {"udp-port", "Default destination port for DNS over UDP."},
+    {"tcp-port", "Default destination port for DNS over TCP."},
+    {"socket-send-buffer-size",
+     "Requested socket send buffer size for the resolver, in bytes. Leave blank to use the system socket "
+     "default."},
+    {"socket-receive-buffer-size",
+     "Requested socket receive buffer size for the resolver, in bytes. Leave blank to use the system "
+     "socket default."},
+    {"edns-packet-size", "Maximum UDP payload size advertised to DNS servers when EDNS is enabled."},
+    {"udp-max-queries", "Maximum queries a resolver sends through one UDP socket before rotating it."},
+    {"rotate",
+     "Rotates the starting DNS server across queries. Core default follows the resolver's system setting."},
+    {"resolvconf-path",
+     "File the resolver reads for system DNS configuration. Defaults to /etc/resolv.conf on Linux."},
+    {"hosts-path",
+     "File used for local host-name lookups when the lookup order includes hosts. Defaults to /etc/hosts "
+     "on Linux."},
+    {"sortlist", "Orders DNS address results by preferred networks. Use c-ares sortlist syntax."},
+    {"flags",
+     "The defaults enable EDNS and reuse idle DNS connections. Override core defaults replaces the entire "
+     "flag set with the checked options."},
+    {"retry-chance",
+     "Controls how often c-ares retries failed DNS servers after the retry delay. Defaults to 10."},
+    {"retry-delay-ms", "Wait before a failed DNS server is eligible to be retried. Defaults to 5000 ms."},
+    {"use-vc", "Send DNS queries over TCP."},
+    {"primary", "Ask the resolver to use only its first DNS server."},
+    {"ignore-truncated", "Avoid switching to TCP when a server returns a truncated UDP reply."},
+    {"no-recurse", "Request that DNS servers skip recursion for these queries."},
+    {"stayopen", "Keep idle DNS connections available for later queries."},
+    {"no-search", "Skip search-domain expansion when looking up a name."},
+    {"no-aliases", "Skip the host alias file named by HOSTALIASES."},
+    {"no-check-response", "Skip the resolver's usual checks for certain DNS response errors."},
+    {"edns", "Use Extended DNS to advertise features such as a larger UDP reply size."},
+    {"no-default-server", "Skip the resolver's fallback server when no DNS servers are configured."},
+    {"dns0x20", "Randomize letter case in outgoing DNS query names and check that replies match it."},
+};
+
+std::string_view describe_field(std::string_view key, std::string_view fallback = {})
+{
+    const auto found = std::ranges::find(field_help, key, &HelpText::key);
+    return found == std::end(field_help) ? fallback : found->description;
+}
 
 const Json& current(const CoreSettingsDraft& draft, const Json::json_pointer& path)
 {
@@ -36,7 +154,7 @@ const Json& current(const CoreSettingsDraft& draft, const Json::json_pointer& pa
 void set_value(CoreSettingsDraft& draft, const Json::json_pointer& path, Json value)
 {
     draft.errors.erase(path.to_string());
-    draft.reply.reset();
+    draft.validation.clear();
     if (!value.is_null()) {
         draft.settings[path] = std::move(value);
         return;
@@ -105,7 +223,6 @@ void edit_text(CoreSettingsDraft& draft, const spec::Field& field, const Json::j
     const auto& value = current(draft, path);
     auto& text = draft.inputs.try_emplace(key, initial_text(field.kind, value)).first->second;
     if (field.kind == spec::Kind::domains) {
-        view::wrapped(field.hint, Color::secondary_text);
         if (ImGui::InputTextMultiline("##value", &text, {-1, 84})) {
             set_value(draft, path, domain_list(text));
         }
@@ -126,7 +243,7 @@ void edit_text(CoreSettingsDraft& draft, const spec::Field& field, const Json::j
             if (parsed.ec == std::errc{} && parsed.ptr == end && spec::valid_integer(field, number)) {
                 set_value(draft, path, number);
             } else {
-                draft.reply.reset();
+                draft.validation.clear();
                 draft.errors[key] =
                     std::format("{} requires a whole number {}from {} to {}.", field.label,
                                 field.allow_zero ? "of 0 or " : "", field.minimum, field.maximum);
@@ -227,6 +344,7 @@ void edit_flags(CoreSettingsDraft& draft, const Json::json_pointer& path)
             }
             set_value(draft, path, value);
         }
+        view::help_marker(describe_field(option.value));
     }
 }
 
@@ -240,7 +358,7 @@ void field_editor(CoreSettingsDraft& draft, std::string_view group, const spec::
         ImGui::AlignTextToFramePadding();
     }
     ImGui::TextUnformatted(field.label);
-    ImGui::SetItemTooltip("%s", hint ? hint : field.hint);
+    view::help_marker(describe_field(field.key, field.hint));
     ImGui::SetNextItemWidth(-1);
     switch (field.kind) {
     case spec::Kind::integer:
@@ -297,8 +415,6 @@ void runtime(CoreSettingsDraft& draft)
 void logging(CoreSettingsDraft& draft)
 {
     field_editor(draft, "/log", spec::log_path);
-    view::wrapped("End the directory with / so WaterWall can append the log file names.",
-                  Color::secondary_text);
     for (const auto& logger : spec::loggers) {
         const auto group = std::format("/log/{}", logger.value);
         const auto file = std::format("{}.log", logger.value);
@@ -329,6 +445,8 @@ void dns(CoreSettingsDraft& draft)
                 std::erase_if(draft.errors, within_group);
             }
         }
+        view::help_marker(
+            "Set the retry behavior for failed DNS servers. Leave unchecked to use c-ares defaults.");
         if (configured) {
             fields(draft, group, spec::failover_fields);
         }
@@ -386,16 +504,12 @@ void save(CoreSettingsDraft& draft, PreviewSession& session)
 {
     auto normalized = spec::normalize(draft.settings);
     if (!normalized.issue.empty()) {
-        draft.reply = PreviewReply{PreviewReply::Status::rejected, std::move(normalized.issue)};
+        draft.validation = std::move(normalized.issue);
         return;
     }
-    draft.reply.reset();
+    draft.validation.clear();
     draft.request = session.submit(
         {{"action", "apply_core_settings"}, {"settings", std::move(normalized.settings)}}, 5000);
-    if (!draft.request) {
-        draft.reply =
-            PreviewReply{PreviewReply::Status::disconnected, "The settings connection is unavailable."};
-    }
 }
 
 } // namespace
@@ -404,15 +518,8 @@ void update_core_settings(CoreSettingsDraft& draft, PreviewSession& session)
 {
     const auto& snapshot = view::field(session.data(), "core_settings");
     draft.notice = view::string_field(session.data(), "core_settings_notice");
-    if (auto reply = session.take_reply(draft.request)) {
-        if (reply->ok()) {
-            reload(draft, snapshot);
-        } else if (reply->status == PreviewReply::Status::timed_out) {
-            reply->message = "Wave did not confirm the save. Check the current settings before retrying.";
-        } else if (reply->status == PreviewReply::Status::disconnected) {
-            reply->message = "The settings connection closed. Try again after reconnecting.";
-        }
-        draft.reply = std::move(reply);
+    if (auto reply = session.take_reply(draft.request); reply && reply->ok()) {
+        reload(draft, snapshot);
     }
     if (!draft.request && !draft.dirty() && snapshot.is_object() && snapshot != draft.source) {
         reload(draft, snapshot);
@@ -428,11 +535,13 @@ void render_core_settings(CoreSettingsDraft& draft, PreviewSession& session)
     }
     const auto& snapshot = view::field(session.data(), "core_settings");
     if (!session.ready()) {
-        view::wrapped(session.status() == PreviewStatus::loading ? "Loading core settings…"
-                                                                 : "Settings connection unavailable.",
-                      Color::warning);
-        if (session.status() == PreviewStatus::unavailable && theme::button("Reconnect")) {
-            session.start(true);
+        if (session.status() == PreviewStatus::loading) {
+            draw_busy_spinner(ImGui::GetFrameHeight());
+        } else {
+            view::wrapped("Settings connection unavailable.", Color::warning);
+            if (theme::button("Reconnect")) {
+                session.start(true);
+            }
         }
     }
     if (!draft.source.is_object()) {
@@ -442,17 +551,7 @@ void render_core_settings(CoreSettingsDraft& draft, PreviewSession& session)
         return;
     }
     ImGui::BeginDisabled(draft.request.has_value());
-    std::string message;
-    auto message_color = Color::info;
-    if (!draft.errors.empty()) {
-        message = draft.errors.begin()->second;
-        message_color = Color::error;
-    } else if (draft.request) {
-        message = saving;
-    } else if (draft.reply) {
-        message = draft.reply->message;
-        message_color = draft.reply->ok() ? Color::success : Color::error;
-    }
+    const auto& message = draft.errors.empty() ? draft.validation : draft.errors.begin()->second;
     const float width = ImGui::GetContentRegionAvail().x;
     const auto spacing = ImGui::GetStyle().ItemSpacing;
     const float controls_width =
@@ -475,16 +574,20 @@ void render_core_settings(CoreSettingsDraft& draft, PreviewSession& session)
     ImGui::BeginDisabled(!draft.dirty() || !snapshot.is_object());
     if (theme::button(revert_label)) {
         reload(draft, snapshot);
-        draft.reply.reset();
+        draft.validation.clear();
     }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
+    if (draft.request) {
+        ImGui::SameLine();
+        draw_busy_spinner(ImGui::GetFrameHeight());
+    }
     if (!message.empty()) {
         if (inline_message) {
             ImGui::SameLine();
             ImGui::AlignTextToFramePadding();
         }
-        view::wrapped(message, message_color);
+        view::wrapped(message, Color::error);
     }
 }
 
@@ -497,11 +600,10 @@ std::string describe_core_settings(const CoreSettingsDraft& draft)
     }
     if (!draft.errors.empty()) {
         description += ' ' + draft.errors.begin()->second;
+    } else if (!draft.validation.empty()) {
+        description += ' ' + draft.validation;
     } else if (draft.request) {
-        description += ' ';
-        description += saving;
-    } else if (draft.reply && !draft.reply->message.empty()) {
-        description += ' ' + draft.reply->message;
+        description += std::string(" ") + busy_description;
     }
     return description;
 }

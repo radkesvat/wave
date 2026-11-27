@@ -104,12 +104,19 @@ request claims the account. Start Wave as the service account.
 Open the listener URL. For HTTPS, use the configured `tls.domain` and the
 listener port. The browser omits the port for 443. On **Set up administrator**,
 enter a username of up to 64 ASCII letters, digits, periods, underscores,
-or hyphens. Use a password of at least 15 characters and up to 256 UTF-8 bytes
-without ASCII control characters. Select **Create administrator**, then sign
-in with the new credentials. [Pre-DNS verification](#verify-https-before-dns)
+or hyphens. New passwords need at least 6 characters, including an English
+letter (A–Z or a–z) and a digit (0–9). Symbols are optional. Wave accepts
+up to 256 UTF-8 bytes and rejects ASCII control characters. It checks for
+common passwords and predictable patterns using zxcvbn-c locally. Select
+**Create administrator**, then sign in with the new credentials.
+The setup and sign-in dialogs show a circular spinner in the lower-left
+corner while Wave checks the request.
+If sign-in fails, the message appears below the divider in the dialog footer.
+[Pre-DNS verification](#verify-https-before-dns)
 
 To change the username or password, go to **Settings → Panel → Administrator**.
 Enter the current password and leave **New password** blank to keep it.
+Passwords created under an earlier policy still work at sign-in.
 **Save administrator** revokes all sessions and returns you to sign-in.
 
 ## Verify HTTPS before DNS
@@ -164,9 +171,14 @@ viewer. Renewal uses the existing administrator state and sessions.
 
 ## Sessions
 
-Sign-in issues a 24-hour HS256 JWT in a host-only cookie with `HttpOnly`,
-`SameSite=Strict`, and `Max-Age`. HTTPS uses `__Host-wave_session` with
-`Secure`, and HTTP uses `wave_session`. Expiry is fixed at sign-in. Up to 16
+Set **Session expiry (days)** under **Settings → Panel**. It defaults to
+3 days and accepts whole numbers from 1 to 365. Wave saves the value as
+`session_expiry_days` in `wave-db.json`. Changes take effect for new sign-ins
+as soon as they are saved. Active sessions keep the expiry set at sign-in.
+
+Sign-in issues an HS256 JWT in a host-only cookie with `HttpOnly`,
+`SameSite=Strict`, and `Max-Age` set to the configured lifetime. HTTPS uses
+`__Host-wave_session` with `Secure`, and HTTP uses `wave_session`. Up to 16
 sessions can be active, with later sign-ins replacing the oldest when the
 limit is reached. **Menu → Sign out** revokes the current session and clears
 its cookie. Revocation survives a backend restart. Treat restoration of

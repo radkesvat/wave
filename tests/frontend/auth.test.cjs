@@ -14,29 +14,88 @@ function settleCanvas(page) {
     return page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
+async function matchingPixels(page, clip, color) {
+    const image = await page.screenshot({ clip });
+    return page.evaluate(async ({ content, color }) => {
+        const bitmap = await createImageBitmap(new Blob([Uint8Array.from(atob(content), c => c.charCodeAt(0))]));
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const context = canvas.getContext('2d');
+        context.drawImage(bitmap, 0, 0);
+        const pixels = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+        const [r, g, b] = color;
+        const matches = [];
+        for (let i = 0; i < pixels.length; i += 4) {
+            if (pixels[i] === r && pixels[i + 1] === g && pixels[i + 2] === b) matches.push(i / 4);
+        }
+        return matches;
+    }, { content: image.toString('base64'), color });
+}
+
 async function visibleInputs(page, top, bottom) {
     await page.mouse.move(0, 0);
     await settleCanvas(page);
     const x = 780;
-    const image = await page.screenshot({ clip: { x, y: top, width: 1, height: bottom - top } });
-    return page.evaluate(async ({ content, x, top }) => {
-        const bitmap = await createImageBitmap(new Blob([Uint8Array.from(atob(content), c => c.charCodeAt(0))]));
-        const canvas = new OffscreenCanvas(1, bitmap.height);
-        const context = canvas.getContext('2d');
-        context.drawImage(bitmap, 0, 0);
-        const pixels = context.getImageData(0, 0, 1, canvas.height).data;
-        const positions = [];
-        let start = -1;
-        for (let y = 0; y <= canvas.height; y++) {
-            const inset = pixels[4 * y] === 13 && pixels[4 * y + 1] === 11 && pixels[4 * y + 2] === 14;
-            if (inset && start === -1) start = y;
-            if (!inset && start !== -1) {
-                if (y - start >= 18 && y - start < 36) positions.push({ x, y: top + Math.floor((y + start) / 2) });
-                start = -1;
-            }
+    const pixels = new Set(await matchingPixels(page, { x, y: top, width: 1, height: bottom - top }, [13, 11, 14]));
+    const positions = [];
+    let start = -1;
+    for (let y = 0; y <= bottom - top; y++) {
+        const inset = pixels.has(y);
+        if (inset && start === -1) start = y;
+        if (!inset && start !== -1) {
+            if (y - start >= 18 && y - start < 36) positions.push({ x, y: top + Math.floor((y + start) / 2) });
+            start = -1;
         }
-        return positions;
-    }, { content: image.toString('base64'), x, top });
+    }
+    return positions;
+}
+
+async function entryDialogFrame(page) {
+    await settleCanvas(page);
+    const { width, height } = page.viewportSize();
+    const y = 110;
+    const outline = await matchingPixels(page, { x: Math.floor(width / 2), y, width: 1, height: height - y },
+        [138, 132, 149]);
+    assert.ok(outline.length >= 2, 'Expected the entry dialog outline.');
+    return { top: y + outline[0], bottom: y + outline.at(-1) + 1 };
+}
+
+function entryDialogWidth(page) {
+    return Math.min(500, page.viewportSize().width - 24);
+}
+
+async function entrySpinner(page, frame) {
+    const pixels = await matchingPixels(page, {
+        x: Math.floor((page.viewportSize().width - entryDialogWidth(page)) / 2) + 10,
+        y: frame.bottom - 42, width: 40, height: 34,
+    }, [81, 165, 246]);
+    return pixels.length > 0;
+}
+
+async function expectFooterError(page, frame) {
+    const { width } = page.viewportSize();
+    const dialogWidth = entryDialogWidth(page);
+    const height = frame.bottom - frame.top;
+    const line = await matchingPixels(page, {
+        x: Math.floor(width / 2), y: frame.top, width: 1, height,
+    }, [61, 58, 67]);
+    assert.ok(line.length, 'Expected the footer divider.');
+
+    const error = await matchingPixels(page, {
+        x: Math.floor((width - dialogWidth) / 2), y: frame.top, width: dialogWidth, height,
+    }, [241, 127, 111]);
+    assert.ok(error.length, 'Expected visible sign-in rejection text.');
+    assert.ok(error.every(pixel => Math.floor(pixel / dialogWidth) > line.at(-1)),
+        'The sign-in error is below the footer divider.');
+}
+
+async function holdFirstAuthRequest(page, endpoint) {
+    const gate = Promise.withResolvers();
+    let requests = 0;
+    await page.route(endpoint, async route => {
+        if (++requests === 1) await gate.promise;
+        await route.continue();
+    });
+    return { release: gate.resolve, requests: () => requests };
 }
 
 async function fillInput(page, field, text, paste = false) {
@@ -84,17 +143,70 @@ test('authenticates an administrator and closes the terminal on sign-out', async
     const context = await browser.newContext({ viewport });
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: fixture.origin });
     const page = await context.newPage();
-    const credentials = { username: 'fixture-browser', password: 'fake browser test passphrase 🔒' };
+    const credentials = { username: 'fixture-browser', password: 'fake browser test passphrase 5Vx2m 🔒' };
 
     await page.goto(fixture.origin + '/panel');
     await waitForStatus(page, 'Set up administrator.');
     assert.equal((await context.request.get(fixture.origin + '/terminal/xterm.js')).status(), 401);
-    const setup = page.waitForRequest('**/api/auth/setup', { timeout });
+    const setupEndpoint = '**/api/auth/setup';
+    const initialSetupFrame = await entryDialogFrame(page);
+    assert.equal(await entrySpinner(page, initialSetupFrame), false, 'The setup dialog starts idle.');
+    const heldSetup = await holdFirstAuthRequest(page, setupEndpoint);
+    let rejectedSetup;
+    try {
+        await submitCredentials(page, { ...credentials, password: 'Password1' });
+        await waitForStatus(page, 'Set up administrator. Operation in progress.');
+        assert.deepEqual(await entryDialogFrame(page), initialSetupFrame, 'Setup keeps its dialog size while pending.');
+        assert.equal(await entrySpinner(page, initialSetupFrame), true, 'Setup progress appears in the lower-left footer.');
+        await page.mouse.click(820, initialSetupFrame.bottom - 25, { delay: 40 });
+        await page.keyboard.press('Enter');
+        await settleCanvas(page);
+        assert.equal(heldSetup.requests(), 1, 'Setup sends one request while it is pending.');
+        rejectedSetup = page.waitForResponse(setupEndpoint, { timeout });
+    } finally {
+        heldSetup.release();
+    }
+    assert.equal((await rejectedSetup).status(), 422);
+    await waitForStatus(page, 'Set up administrator. Choose a less predictable password. A longer password may help.');
+    assert.equal(await entrySpinner(page, await entryDialogFrame(page)), false, 'The rejected setup returns to idle.');
+    const setup = page.waitForRequest(setupEndpoint, { timeout });
     await submitCredentials(page, credentials, true);
     assert.deepEqual((await setup).postDataJSON(), credentials);
 
     await waitForStatus(page, 'Sign in to Wave.');
-    await submitCredentials(page, credentials);
+    assert.equal(heldSetup.requests(), 2, 'Retrying the rejected setup reaches the backend.');
+    const signInFrame = await entryDialogFrame(page);
+    const signInEndpoint = '**/api/auth/sign-in';
+    const rejectedSignIn = page.waitForResponse(signInEndpoint, { timeout });
+    await submitCredentials(page, { ...credentials, password: 'different fixture passphrase 88' });
+    assert.equal((await rejectedSignIn).status(), 401);
+    const cooldown = delay(1100);
+    await waitForStatus(page, 'Sign in to Wave. The username or password was rejected.');
+    const rejectionFrame = await entryDialogFrame(page);
+    await expectFooterError(page, rejectionFrame);
+    assert.equal(await entrySpinner(page, rejectionFrame), false, 'The rejected sign-in returns to idle.');
+    await page.setViewportSize({ width: 324, height: viewport.height });
+    await expectFooterError(page, await entryDialogFrame(page));
+    await page.setViewportSize(viewport);
+    // The backend throttles attempts for one second following a rejected sign-in.
+    await cooldown;
+
+    const heldSignIn = await holdFirstAuthRequest(page, signInEndpoint);
+    let acceptedSignIn;
+    try {
+        await submitCredentials(page, credentials);
+        await waitForStatus(page, 'Sign in to Wave. Operation in progress.');
+        assert.deepEqual(await entryDialogFrame(page), signInFrame, 'Sign-in keeps its dialog size while pending.');
+        assert.equal(await entrySpinner(page, signInFrame), true, 'Sign-in progress appears in the lower-left footer.');
+        const progressText = await matchingPixels(page, {
+            x: (viewport.width - 500) / 2 + 50, y: signInFrame.bottom - 42, width: 300, height: 34,
+        }, [81, 165, 246]);
+        assert.equal(progressText.length, 0, 'The sign-in footer shows progress only with the spinner.');
+        acceptedSignIn = page.waitForResponse(signInEndpoint, { timeout });
+    } finally {
+        heldSignIn.release();
+    }
+    assert.equal((await acceptedSignIn).status(), 204);
     const workspace = /Wave Server Status.*CPU/;
     await waitForStatus(page, workspace);
     await page.reload();

@@ -12,7 +12,7 @@ const { authFixture, timeout } = require('./auth_fixture.cjs');
 async function administrator(t) {
     const fixture = await authFixture(t, undefined, { encrypted: false });
     await fixture.start();
-    const credentials = { username: 'fixture-admin', password: 'console fixture passphrase' };
+    const credentials = { username: 'fixture-admin', password: 'console fixture passphrase 6Ax9m' };
     function post(action, data = {}, cookie) {
         const headers = { Origin: fixture.origin, 'Content-Type': 'application/json', 'X-Wave-CSRF': '1' };
         if (cookie) headers.Cookie = cookie;

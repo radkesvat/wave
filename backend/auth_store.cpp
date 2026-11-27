@@ -8,6 +8,7 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
+#include <zxcvbn.h>
 
 #include <algorithm>
 #include <array>
@@ -27,6 +28,30 @@ using namespace std::chrono_literals;
 constexpr std::size_t max_sessions = 16;
 constexpr std::size_t secret_size = 64;
 constexpr std::size_t session_id_size = 32;
+constexpr double minimum_password_strength_bits = 20.0;
+
+bool valid_new_password_shape(std::string_view password)
+{
+    if (!AuthStore::valid_password_input(password)) {
+        return false;
+    }
+    // The JSON parser validates UTF-8. Each byte outside the continuation
+    // range starts one code point.
+    const auto characters = std::ranges::count_if(password, [](unsigned char byte) {
+        return (byte & 0xc0) != 0x80;
+    });
+    return characters >= 6 &&
+           password.find_first_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != password.npos &&
+           password.find_first_of("0123456789") != password.npos;
+}
+
+bool strong_password(std::string_view username, std::string_view password)
+{
+    const std::string account(username);
+    const std::string candidate(password);
+    const char* dictionary[] = {account.c_str(), "wave", "waterwall", nullptr};
+    return ZxcvbnMatch(candidate.c_str(), dictionary, nullptr) >= minimum_password_strength_bits;
+}
 
 std::string hex(const unsigned char* data, std::size_t size)
 {
@@ -316,15 +341,12 @@ bool AuthStore::valid_username(std::string_view username)
                                       "QRSTUVWXYZ0123456789._-") == username.npos;
 }
 
-bool AuthStore::valid_password(std::string_view password)
+bool AuthStore::valid_password_input(std::string_view password)
 {
     if (password.size() > 256 || password.find_first_not_of(' ') == password.npos) {
         return false;
     }
-    if (std::ranges::any_of(password, [](unsigned char byte) { return byte < 0x20 || byte == 0x7f; })) {
-        return false;
-    }
-    return std::ranges::count_if(password, [](unsigned char byte) { return (byte & 0xc0) != 0x80; }) >= 15;
+    return std::ranges::none_of(password, [](unsigned char byte) { return byte < 0x20 || byte == 0x7f; });
 }
 
 AuthStore::SetupResult AuthStore::setup(std::string_view username, std::string_view password)
@@ -334,12 +356,18 @@ AuthStore::SetupResult AuthStore::setup(std::string_view username, std::string_v
     if (impl_->admin) {
         return SetupResult::closed;
     }
+    if (!valid_new_password_shape(password)) {
+        return SetupResult::invalid_password;
+    }
+    if (!strong_password(username, password)) {
+        return SetupResult::weak_password;
+    }
     impl_->commit(Admin{std::string(username), hash_password(password), random_hex(32), {}});
     return SetupResult::created;
 }
 
 AuthStore::SignInResult AuthStore::sign_in(std::string_view username, std::string_view password,
-                                           std::string& token)
+                                           IssuedSession& session)
 {
     // Allow one memory-hard password check at a time and back off after a failed
     // attempt.
@@ -371,9 +399,11 @@ AuthStore::SignInResult AuthStore::sign_in(std::string_view username, std::strin
     if (next.sessions.size() == max_sessions) {
         next.sessions.erase(next.sessions.begin());
     }
-    next.sessions.push_back(next.record(random_hex(16), now + session_seconds));
+    const auto lifetime = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::days(impl_->database->session_expiry_days()));
+    next.sessions.push_back(next.record(random_hex(16), now + lifetime.count()));
     impl_->commit(std::move(next));
-    token = impl_->admin->sessions.back().token;
+    session = {impl_->admin->sessions.back().token, static_cast<int>(lifetime.count())};
     return SignInResult::accepted;
 }
 
@@ -412,6 +442,9 @@ AuthStore::UpdateResult AuthStore::update_admin(std::string_view token, std::str
                                                 std::string_view current_password,
                                                 std::string_view new_password)
 {
+    if (!new_password.empty() && !valid_new_password_shape(new_password)) {
+        return UpdateResult::invalid_password;
+    }
     std::unique_lock attempt(impl_->sign_in_mutex, std::try_to_lock);
     if (!attempt || std::chrono::steady_clock::now() < impl_->retry_after) {
         return UpdateResult::busy;
@@ -428,6 +461,9 @@ AuthStore::UpdateResult AuthStore::update_admin(std::string_view token, std::str
     if (!verify_password(current_password, stored_hash)) {
         impl_->retry_after = std::chrono::steady_clock::now() + 1s;
         return UpdateResult::invalid;
+    }
+    if (!new_password.empty() && !strong_password(username, new_password)) {
+        return UpdateResult::weak_password;
     }
     auto next_hash = new_password.empty() ? std::move(stored_hash) : hash_password(new_password);
     std::lock_guard lock(impl_->mutex);

@@ -14,8 +14,6 @@
         font: 1rem/1.5 system-ui, sans-serif;
       }
 
-      :root.server-status { scrollbar-gutter: stable; }
-
       @media not (forced-colors: active) {
         :root.classic-scrollbars::-webkit-scrollbar,
         :root.classic-scrollbars::-webkit-scrollbar-track { background-color: var(--scrollbar-track); }
@@ -436,8 +434,7 @@
           canvas.setAttribute("aria-label", description);
         }
 
-        function updateNavigation(page, open, menuOpen, toolsOpen, modal, serverStatus) {
-          document.documentElement.classList.toggle("server-status", serverStatus);
+        function updateNavigation(page, open, menuOpen, toolsOpen, modal) {
           const updateExpanded = (element, expanded) => {
             const value = expanded ? "true" : "false";
             if (element.getAttribute("aria-expanded") !== value) element.setAttribute("aria-expanded", value);

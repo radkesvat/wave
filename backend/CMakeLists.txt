@@ -40,6 +40,32 @@ add_library(wave-argon2 STATIC
 target_include_directories(wave-argon2 PUBLIC "${argon2_SOURCE_DIR}/include")
 target_link_libraries(wave-argon2 PRIVATE Threads::Threads)
 
+# zxcvbn-c v2.7. Embed its dictionary in the backend for offline password checks.
+FetchContent_Declare(zxcvbn
+    URL https://codeload.github.com/tsyrogit/zxcvbn-c/tar.gz/refs/tags/v2.7
+    URL_HASH SHA256=0548647d8cda5c0d52e6e00cd6896005f2813869f9ed93c245536129e3bd3f4b
+    SOURCE_SUBDIR wave-embedded
+)
+FetchContent_MakeAvailable(zxcvbn)
+add_executable(wave-zxcvbn-dict "${zxcvbn_SOURCE_DIR}/dict-generate.cpp")
+target_compile_features(wave-zxcvbn-dict PRIVATE cxx_std_11)
+set(zxcvbn_words
+    words-eng_wiki.txt words-female.txt words-male.txt words-passwd.txt words-surname.txt words-tv_film.txt
+)
+list(TRANSFORM zxcvbn_words PREPEND "${zxcvbn_SOURCE_DIR}/")
+set(zxcvbn_dictionary "${CMAKE_CURRENT_BINARY_DIR}/dict-src.h")
+add_custom_command(
+    OUTPUT "${zxcvbn_dictionary}"
+    COMMAND wave-zxcvbn-dict -o "${zxcvbn_dictionary}" ${zxcvbn_words}
+    DEPENDS wave-zxcvbn-dict ${zxcvbn_words}
+    VERBATIM
+)
+add_library(wave-zxcvbn STATIC "${zxcvbn_SOURCE_DIR}/zxcvbn.c" "${zxcvbn_dictionary}")
+target_include_directories(wave-zxcvbn PUBLIC "${zxcvbn_SOURCE_DIR}" PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+if(UNIX)
+    target_link_libraries(wave-zxcvbn PRIVATE m)
+endif()
+
 add_executable(wave-backend
     main.cpp panel_settings.cpp preview.cpp linux_metrics.cpp auth.cpp auth_store.cpp
     waterwall.cpp waterwall_install.cpp waterwall_logs.cpp waterwall_users.cpp
@@ -53,7 +79,7 @@ set_target_properties(wave-backend PROPERTIES
 )
 target_include_directories(wave-backend PRIVATE "${PROJECT_SOURCE_DIR}/common" "${PROJECT_BINARY_DIR}/generated")
 target_link_libraries(wave-backend PRIVATE
-    httplib::httplib nlohmann_json::nlohmann_json OpenSSL::Crypto Threads::Threads wave-argon2
+    httplib::httplib nlohmann_json::nlohmann_json OpenSSL::Crypto Threads::Threads wave-argon2 wave-zxcvbn
 )
 if(WIN32)
     target_link_libraries(wave-backend PRIVATE advapi32)

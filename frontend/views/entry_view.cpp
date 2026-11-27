@@ -25,7 +25,7 @@ void render_entry(EntryViewState& state, AuthSession& session, float entry_top)
 {
     if (state.page == EntryPage::checking) {
         ImGui::SetCursorPos({12, entry_top + 12});
-        view::wrapped(checking_message);
+        draw_busy_spinner(ImGui::GetFrameHeight());
         return;
     }
 
@@ -36,32 +36,41 @@ void render_entry(EntryViewState& state, AuthSession& session, float entry_top)
     const std::string caption = std::string(title(state.page)) + entry_popup;
     const bool pending = session.pending();
     const bool ready = state.username.front() && state.password.front();
+    const std::string_view feedback = pending ? std::string_view{} : session.error();
+    const bool new_error = !feedback.empty() && feedback != state.message;
     Dialog dialog(caption.c_str(), 500, {{setup ? "Create administrator" : "Sign in", pending || !ready}},
-                  nullptr, entry_top);
+                  {.entry_top = entry_top,
+                   .busy = pending,
+                   .footer_error = setup ? std::string_view{} : feedback,
+                   .reveal_footer_error = !setup && new_error});
     if (!dialog) {
         return;
     }
 
     if (setup) {
-        view::wrapped("Use up to 64 letters, digits, dots, underscores, or hyphens for the username. "
-                      "Choose a password of at least 15 characters.");
+        view::wrapped("Use up to 64 letters, digits, dots, underscores, or hyphens for the username.");
+        view::wrapped(new_password_requirements);
     }
     constexpr auto enter_submits = ImGuiInputTextFlags_EnterReturnsTrue;
     ImGui::BeginDisabled(pending);
-    const bool username_enter = view::edit("Username", state.username, "", enter_submits);
+    const bool username_enter =
+        view::edit("Username", state.username, "", enter_submits,
+                   setup ? "Use this username to sign in to Wave after setup. Usernames are case-sensitive."
+                         : "Enter the current administrator username. Usernames are case-sensitive.");
     const bool password_enter =
-        view::edit("Password", state.password, "", enter_submits | ImGuiInputTextFlags_Password);
+        view::edit("Password", state.password, "", enter_submits | ImGuiInputTextFlags_Password,
+                   setup ? "Wave checks for common passwords and predictable patterns. A longer passphrase "
+                           "can help you choose a less predictable password."
+                         : "Use the password for your Wave administrator account. WaterWall user credentials "
+                           "are managed separately.");
     ImGui::EndDisabled();
 
-    const std::string_view feedback =
-        pending ? (setup ? "Creating the account…" : "Signing in…") : std::string_view(session.error());
-    if (!feedback.empty()) {
-        view::wrapped(feedback, pending ? Color::info : Color::error);
-        if (feedback != state.message) {
+    if (setup && !feedback.empty()) {
+        view::wrapped(feedback, Color::error);
+        if (new_error) {
             ImGui::SetScrollHereY(1);
         }
     }
-    state.message = feedback;
     const int action = dialog.footer();
     if (!pending && state.username.front() && state.password.front() &&
         (action == 0 || username_enter || password_enter)) {
@@ -69,6 +78,7 @@ void render_entry(EntryViewState& state, AuthSession& session, float entry_top)
                        {{"username", state.username.data()}, {"password", state.password.data()}});
         state.password.fill('\0');
     }
+    state.message = session.pending() ? busy_description : feedback;
 }
 
 std::string describe_entry(const EntryViewState& state)

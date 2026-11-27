@@ -2,6 +2,7 @@
 #include "panel.h"
 #include "preview_session.h"
 #include "theme.h"
+#include "views/view_helpers.h"
 
 #include <GLES3/gl3.h>
 #include <SDL.h>
@@ -78,8 +79,8 @@ EM_JS(void, update_config_tabs, (const char* encoded, int tab), {
     Module['updateConfigTabs'](UTF8ToString(encoded), tab);
 });
 
-EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools, bool modal, bool server_status), {
-    Module['updateNavigation'](page, open, menu, tools, modal, server_status);
+EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools, bool modal), {
+    Module['updateNavigation'](page, open, menu, tools, modal);
 });
 
 EM_JS(void, update_console, (bool active, float x, float y, float width, float height, bool high_contrast), {
@@ -254,8 +255,7 @@ struct Application {
             return false;
         }
 
-        const int required_height = static_cast<int>(
-            std::ceil(wave::panel_height(viewport_width, static_cast<float>(css_width), panel)));
+        const int required_height = static_cast<int>(std::ceil(wave::panel_height(viewport_width, panel)));
         if (minimum_height != required_height) {
             minimum_height = required_height;
             set_panel_height(minimum_height);
@@ -377,6 +377,10 @@ struct Application {
         SDL_GL_SwapWindow(window);
 
         auto description = wave::describe_panel(panel, session);
+        if (const auto help = wave::view::visible_help_description(); !help.empty()) {
+            description += ' ';
+            description += help;
+        }
         if (description != displayed_description) {
             update_panel_description(description.c_str());
             displayed_description = std::move(description);
@@ -385,8 +389,7 @@ struct Application {
         update_config_controls();
         update_navigation(in_workspace ? panel.page_control() : 0, panel.navigation_open && in_workspace,
                           in_workspace && panel.menu_open, in_workspace && panel.tools_open,
-                          !in_workspace || wave::dialog_open(),
-                          panel.page == wave::PanelPage::server && in_workspace);
+                          !in_workspace || wave::dialog_open());
         const auto& console = panel.console;
         update_console(in_workspace && panel.page == wave::PanelPage::console, console.left, console.top,
                        console.width, console.height, panel.high_contrast);

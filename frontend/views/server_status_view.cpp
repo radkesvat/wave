@@ -175,7 +175,7 @@ float title_band_height()
     return ImGui::GetFontSize() + 10;
 }
 
-bool begin_card(const char* title, ImVec2 pos, ImVec2 size)
+bool begin_card(const char* title, ImVec2 pos, ImVec2 size, std::string_view help = {})
 {
     ImGui::SetCursorScreenPos(pos);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, card_padding);
@@ -196,17 +196,24 @@ bool begin_card(const char* title, ImVec2 pos, ImVec2 size)
                            packed(Color::raised), theme::pane_radius - 1, ImDrawFlags_RoundCornersTop);
         draw.AddLineH(child.x + 1, child.x + width - 1, child.y + band, packed(Color::divider),
                       theme::border_width);
-        draw_text(draw, {child.x + std::floor((width - text_width(title)) * 0.5f), child.y + 5},
-                  Color::primary_text, title);
+        const float label_width = text_width(title);
+        const float gap = ImGui::GetStyle().ItemInnerSpacing.x;
+        const float marker_width = help.empty() ? 0 : gap + text_width(view::help_marker_label);
+        const float label_x = child.x + std::floor((width - label_width - marker_width) * 0.5f);
+        draw_text(draw, {label_x, child.y + 5}, Color::primary_text, title);
+        if (!help.empty()) {
+            ImGui::SetCursorScreenPos({label_x + label_width + gap, child.y + 5});
+            view::help_marker(help, false);
+        }
         ImGui::SetCursorScreenPos({child.x + card_padding.x, child.y + band + card_padding.y});
     }
     return visible;
 }
 
 void chart_card(const char* title, ImVec2 pos, ImVec2 size, const StatusTicks& ticks, float left_gutter,
-                StatusScale scale, std::initializer_list<StatusSeries> series)
+                StatusScale scale, std::initializer_list<StatusSeries> series, std::string_view help = {})
 {
-    if (begin_card(title, pos, size)) {
+    if (begin_card(title, pos, size, help)) {
         render_status_plot(ticks, left_gutter, scale,
                            std::max(minimum_plot_height, ImGui::GetContentRegionAvail().y), series);
     }
@@ -251,8 +258,7 @@ float render_server_status(const Json& server, PanelControlsState& controls, Pre
     float memory_height = chart_minimum_height;
     float traffic_height = chart_minimum_height;
     float info_height = card_frame_height + information.height;
-    float controls_height =
-        card_frame_height + panel_controls_height(controls, session, controls_body, !stacked);
+    float controls_height = card_frame_height + panel_controls_height(session, controls_body, !stacked);
     if (!stacked) {
         const float top_minimum = chart_minimum_height;
         const float bottom_minimum = std::max({info_height, controls_height, traffic_height});
@@ -285,7 +291,9 @@ float render_server_status(const Json& server, PanelControlsState& controls, Pre
                {{samples.upload, "Upload", Color::info,
                  traffic_reading("Upload", samples.upload_now, network_scale)},
                 {samples.download, "Download", Color::accent,
-                 traffic_reading("Download", samples.download_now, network_scale)}});
+                 traffic_reading("Download", samples.download_now, network_scale)}},
+               "Upload and download combine traffic across the host interfaces visible to Wave, excluding "
+               "loopback. The chart shows transfer rates in KiB/s or MiB/s.");
     return traffic_y + traffic_height - start.y;
 }
 

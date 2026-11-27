@@ -21,9 +21,7 @@ using ControlsDialog = PanelControlsState::Dialog;
 
 constexpr char popup_id[] = "###ServerPanelControlsDialog";
 constexpr char target_label[] = "Target panel version";
-constexpr char pending_message[] = "Applying change…";
 constexpr char unsaved_config_warning[] = "Unsaved node changes will be lost.";
-constexpr char disconnected_message[] = "The preview connection closed before confirming the change.";
 constexpr char restore_message[] =
     "Choose a backup JSON file to replace the sample TLS settings and inactive config list.";
 constexpr char backup_selected_message[] = "Wave preview backup selected.";
@@ -82,9 +80,9 @@ std::string core_state_label(const Json& core)
 std::string controls_notice(const Json& server, const PreviewSession& session)
 {
     if (!session.ready()) {
-        return session.status() == PreviewStatus::loading
-                   ? "Reconnecting to the preview…"
-                   : "Preview disconnected. Showing last reported values.";
+        return session.status() == PreviewStatus::unavailable
+                   ? "Preview disconnected. Showing last reported values."
+                   : "";
     }
     const auto& core = field(server, "core");
     const bool lifecycle = supports(core, "lifecycle");
@@ -111,7 +109,7 @@ void open_dialog(PanelControlsState& state, ControlsDialog dialog)
     state.dialog = dialog;
     state.open_dialog = true;
     state.action_config_id = 0;
-    state.reply.reset();
+    state.request_accepted.reset();
 }
 
 void close_dialog(PanelControlsState& state)
@@ -125,33 +123,26 @@ void submit(PanelControlsState& state, PreviewSession& session, Json request)
     if (state.request_id) {
         return;
     }
-    const auto action = string_field(request, "action");
-    state.lifecycle_request = action == "install_core" || action == "start_core" || action == "stop_core" ||
-                              action == "restart_core";
     state.action_config_id = 0;
-    state.reply.reset();
+    state.request_accepted.reset();
     state.request_id = session.submit(std::move(request), 5000);
     if (!state.request_id) {
-        state.reply =
-            PreviewReply{PreviewReply::Status::disconnected, "The preview connection is unavailable."};
+        state.request_accepted = false;
     }
 }
 
-std::string_view action_message(const PanelControlsState& state)
+bool core_transition_pending(const PreviewSession& session)
 {
-    return state.request_id ? pending_message : state.reply ? std::string_view(state.reply->message) : "";
+    const auto core_state = string_field(field(server_snapshot(session), "core"), "state");
+    return session.ready() &&
+           (core_state == "installing" || core_state == "starting" || core_state == "stopping");
 }
 
-void show_result(const PanelControlsState& state, const PreviewSession& session)
+bool dialog_pending(const PanelControlsState& state, const PreviewSession& session)
 {
-    if (state.request_id) {
-        wrapped(pending_message, Color::info);
-    } else if (state.reply) {
-        feedback(*state.reply);
-    }
-    if (!session.ready() && (!state.reply || state.reply->status != PreviewReply::Status::disconnected)) {
-        wrapped("The preview connection is unavailable.", Color::warning);
-    }
+    const bool lifecycle = state.dialog == ControlsDialog::stop || state.dialog == ControlsDialog::restart;
+    return state.request_id ||
+           (lifecycle && state.request_accepted.value_or(false) && core_transition_pending(session));
 }
 
 float control_height(float minimum = 40.0f)
@@ -165,27 +156,19 @@ struct ControlsLayout {
     bool has_core;
     bool reconnect;
     std::string_view core_state;
-    std::string_view core_error;
     std::string state_label;
     std::string active_label;
     std::string notice;
-    std::string_view result;
 
-    ControlsLayout(const PanelControlsState& state, const PreviewSession& session, const Json& server,
-                   float width, bool compact)
+    ControlsLayout(const PreviewSession& session, const Json& server, float width, bool compact)
         : width(width), frame_height(control_height(compact ? 32.0f : 40.0f)),
           has_core(field(server, "core").is_object()),
           reconnect(session.status() == PreviewStatus::unavailable),
           core_state(string_field(field(server, "core"), "state")),
-          core_error(string_field(field(server, "core"), "error")),
           state_label(core_state_label(field(server, "core"))),
           active_label(std::format("Panel version {}", string_field(server, "version", wave::version))),
-          notice(controls_notice(server, session)),
-          result(state.action_config_id == 0 ? action_message(state) : std::string_view{})
+          notice(controls_notice(server, session))
     {
-        if (core_error == result) {
-            result = {};
-        }
     }
 
     bool show_install() const
@@ -203,11 +186,7 @@ struct ControlsLayout {
             }
         };
         if (has_core) {
-            if (core_error.empty()) {
-                line(state_label);
-            } else {
-                height += ImGui::GetTextLineHeight() + gap;
-            }
+            line(state_label);
             const int button_rows = show_install() ? 2 : 3;
             height += button_rows * (frame_height + gap) + 2 * gap;
         }
@@ -215,7 +194,6 @@ struct ControlsLayout {
         line(target_label);
         height += 2 * (frame_height + gap);
         line(notice);
-        line(result);
         if (reconnect) {
             height += frame_height + gap;
         }
@@ -243,37 +221,12 @@ struct ControlsLayout {
     }
 };
 
-void draw_core_status(const ControlsLayout& layout)
-{
-    if (layout.core_error.empty()) {
-        wrapped(layout.state_label);
-        return;
-    }
-
-    std::string line(layout.core_error);
-    std::ranges::replace_if(line, [](char c) { return c == '\n' || c == '\r'; }, ' ');
-    ImGui::Dummy({layout.width, ImGui::GetTextLineHeight()});
-    const auto min = ImGui::GetItemRectMin();
-    const auto max = ImGui::GetItemRectMax();
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::rgba(Color::error));
-    ImGui::RenderTextEllipsis(ImGui::GetWindowDrawList(), min, max, max.x, line.data(),
-                              line.data() + line.size(), nullptr);
-    ImGui::PopStyleColor();
-
-    if (ImGui::BeginItemTooltip()) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 32 * ImGui::GetFontSize());
-        text(layout.state_label);
-        text(layout.core_error);
-        ImGui::PopTextWrapPos();
-        ImGui::EndTooltip();
-    }
-}
-
 void draw_panel_versions(PanelControlsState& state, const Json& server, const ControlsLayout& layout,
                          bool disabled)
 {
     wrapped(layout.active_label);
     wrapped(target_label, Color::secondary_text);
+    help_marker("This selects a release of the Wave panel. WaterWall runs as a separate core process.");
     const auto& versions = array_field(server, "available_panel_versions");
     const auto active = string_field(server, "version", wave::version);
     const auto selected = state.target_version.empty() ? active : std::string_view(state.target_version);
@@ -349,11 +302,13 @@ void render_create(PanelControlsState& state, PreviewSession& session, const Jso
     Dialog frame(
         "Create new config###ServerPanelControlsDialog", 380,
         {{"Cancel", pending},
-         {"Create config", pending || unavailable || core_config_name(state.config_name.data()).empty()}});
+         {"Create config", pending || unavailable || core_config_name(state.config_name.data()).empty()}},
+        {.busy = pending});
     if (!frame) {
         return;
     }
     ImGui::TextUnformatted("Config name");
+    help_marker("Wave uses this name for the config folder. Use up to 64 UTF-8 bytes and leave out slashes.");
     ImGui::BeginDisabled(pending || unavailable);
     if (ImGui::IsWindowAppearing()) {
         ImGui::SetKeyboardFocusHere();
@@ -368,12 +323,13 @@ void render_create(PanelControlsState& state, PreviewSession& session, const Jso
     } else {
         wrapped("Enter a valid filename of up to 64 bytes.", Color::error);
     }
-    if (session.ready() && unavailable) {
-        wrapped("Config creation is unavailable.", Color::warning);
+    if (unavailable && !pending) {
+        wrapped(session.ready() ? "Config creation is unavailable."
+                                : "The preview connection is unavailable.",
+                Color::warning);
     }
-    show_result(state, session);
     const int action = frame.footer();
-    if (action == 0 || (state.reply && state.reply->ok())) {
+    if (action == 0 || state.request_accepted.has_value()) {
         close_dialog(state);
     } else if (action == 1 && !name.empty()) {
         submit(state, session, {{"action", "create_core_config"}, {"name", state.config_name.data()}});
@@ -424,9 +380,10 @@ void render_confirmation(PanelControlsState& state, PreviewSession& session, con
         request = {{"action", restart ? "restart_core" : "stop_core"}};
     }
 
-    const bool pending = state.request_id.has_value();
+    const bool pending = dialog_pending(state, session);
     Dialog frame(title, 380,
-                 {{"Cancel", pending}, {label, pending || !session.ready() || !unavailable.empty()}});
+                 {{"Cancel", pending}, {label, pending || !session.ready() || !unavailable.empty()}},
+                 {.busy = pending});
     if (!frame) {
         return;
     }
@@ -434,15 +391,15 @@ void render_confirmation(PanelControlsState& state, PreviewSession& session, con
     if (remove && state.remove_has_unsaved_changes) {
         wrapped(unsaved_config_warning, Color::warning);
     }
-    if (session.ready() && !unavailable.empty() && !state.reply && !pending) {
-        wrapped(unavailable, Color::warning);
-    }
-    show_result(state, session);
-    const int action = frame.footer();
-    if (action == 0 || (state.reply && state.reply->ok())) {
-        if (action == 0 && remove) {
-            state.reply.reset();
+    if (!state.request_accepted && !pending) {
+        if (!session.ready()) {
+            wrapped("The preview connection is unavailable.", Color::warning);
+        } else if (!unavailable.empty()) {
+            wrapped(unavailable, Color::warning);
         }
+    }
+    const int action = frame.footer();
+    if (action == 0 || (state.request_accepted.has_value() && !pending)) {
         close_dialog(state);
     } else if (action == 1) {
         submit(state, session, std::move(request));
@@ -482,7 +439,7 @@ void render_restore(PanelControlsState& state, PreviewSession& session)
         }
         if (request["backup"].is_null() ||
             request.dump().size() + request_id_bytes > max_preview_restore_request_bytes) {
-            state.reply = PreviewReply{PreviewReply::Status::rejected, invalid};
+            state.restore_error = invalid;
         } else {
             state.restore_request = std::move(request);
         }
@@ -492,7 +449,7 @@ void render_restore(PanelControlsState& state, PreviewSession& session)
     const bool unavailable = !can_use_backup(session);
     const bool selected = state.restore_request.is_object();
     Dialog frame("Restore backup###ServerPanelControlsDialog", 380,
-                 {{"Cancel", pending}, {"Restore", pending || unavailable || !selected}});
+                 {{"Cancel", pending}, {"Restore", pending || unavailable || !selected}}, {.busy = pending});
     if (!frame) {
         return;
     }
@@ -500,16 +457,22 @@ void render_restore(PanelControlsState& state, PreviewSession& session)
     ImGui::BeginDisabled(pending || unavailable);
     if (theme::button("Choose file", {-1, control_height()})) {
         state.restore_request = nullptr;
-        state.reply.reset();
+        state.restore_error.clear();
         choose_preview_json_file(max_preview_backup_file_bytes);
     }
     ImGui::EndDisabled();
     if (selected) {
         wrapped(backup_selected_message, Color::secondary_text);
     }
-    show_result(state, session);
+    if (unavailable && !pending) {
+        wrapped(session.ready() ? "Backup restore is unavailable." : "The preview connection is unavailable.",
+                Color::warning);
+    }
+    if (!state.restore_error.empty()) {
+        wrapped(state.restore_error, Color::error);
+    }
     const int action = frame.footer();
-    if (action == 0 || (state.reply && state.reply->ok())) {
+    if (action == 0 || state.request_accepted.has_value()) {
         clear_preview_json_file();
         state.restore_request = nullptr;
         close_dialog(state);
@@ -523,16 +486,7 @@ void render_restore(PanelControlsState& state, PreviewSession& session)
 void update_panel_controls(PanelControlsState& state, PreviewSession& session)
 {
     if (auto reply = session.take_reply(state.request_id)) {
-        if (reply->status == PreviewReply::Status::timed_out) {
-            reply->message =
-                "The preview did not confirm the change. Check the current state before retrying.";
-        } else if (reply->status == PreviewReply::Status::disconnected) {
-            reply->message = disconnected_message;
-        } else if (state.lifecycle_request && reply->ok()) {
-            // The current process state reports progress after a lifecycle request is accepted.
-            reply->message.clear();
-        }
-        state.reply = std::move(reply);
+        state.request_accepted = reply->ok();
     }
     const auto& server = server_snapshot(session);
     if (state.dialog != ControlsDialog::update && (state.target_version == string_field(server, "version") ||
@@ -562,7 +516,10 @@ void render_config_header(PanelControlsState& state, PreviewSession& session, co
     const float delete_width = std::max(view::button_width(delete_label), narrow ? 44.0f : 0.0f);
     const auto name = string_field(config, "name");
     const auto start = ImGui::GetCursorScreenPos();
-    const float offset = ImGui::GetContentRegionAvail().x - switch_hit.x - style.ItemSpacing.x - delete_width;
+    const bool pending = config_action_pending(state, config_id);
+    const float indicator = pending ? busy_spinner_width + style.ItemSpacing.x : 0;
+    const float offset =
+        ImGui::GetContentRegionAvail().x - switch_hit.x - style.ItemSpacing.x - delete_width - indicator;
     const float title_width = offset - style.ItemSpacing.x;
     if (title_width > 0) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + title_width);
@@ -576,6 +533,10 @@ void render_config_header(PanelControlsState& state, PreviewSession& session, co
         ImGui::SetCursorScreenPos({start.x + offset, start.y});
     } else {
         wrapped(name);
+    }
+    if (pending) {
+        draw_busy_spinner(height);
+        ImGui::SameLine();
     }
 
     const auto& core = field(server_snapshot(session), "core");
@@ -603,42 +564,42 @@ void render_config_header(PanelControlsState& state, PreviewSession& session, co
         ImGui::SetTooltip("Stop WaterWall before deleting this config.");
     }
     ImGui::EndDisabled();
-
-    const auto message = config_action_message(state, config_id);
-    if (!message.empty()) {
-        const auto color = !state.reply ? Color::info : state.reply->ok() ? Color::success : Color::error;
-        wrapped(message, color);
-    }
 }
 
-std::string_view config_action_message(const PanelControlsState& state, int config_id)
+bool config_action_pending(const PanelControlsState& state, int config_id)
 {
-    return config_id > 0 && state.action_config_id == config_id ? action_message(state) : std::string_view{};
+    return state.request_id && state.action_config_id == config_id;
 }
 
-float panel_controls_height(const PanelControlsState& state, const PreviewSession& session, float width,
-                            bool compact)
+float panel_controls_height(const PreviewSession& session, float width, bool compact)
 {
-    return ControlsLayout(state, session, server_snapshot(session), width, compact).height();
+    return ControlsLayout(session, server_snapshot(session), width, compact).height();
 }
 
 void render_panel_controls(PanelControlsState& state, PreviewSession& session, float width, bool compact)
 {
     const auto& server = server_snapshot(session);
     const auto& core = field(server, "core");
-    const ControlsLayout layout(state, session, server, width, compact);
+    const ControlsLayout layout(session, server, width, compact);
+    const bool lifecycle_busy = core_transition_pending(session);
     const bool disabled = !session.ready() || state.request_id.has_value();
+    const bool busy = state.dialog == ControlsDialog::none &&
+                      (lifecycle_busy || (state.request_id && state.action_config_id == 0) ||
+                       session.status() == PreviewStatus::loading);
     const float button_space = std::max(2.0f, width - ImGui::GetStyle().ItemSpacing.x);
     const float primary_width = std::floor(button_space * 2.0f / 3.0f);
     const float secondary_width = button_space - primary_width;
     ImGui::BeginGroup();
     if (layout.has_core) {
-        draw_core_status(layout);
-        const bool lifecycle_disabled = disabled || !supports(core, "lifecycle");
+        if (busy) {
+            draw_busy_spinner(ImGui::GetTextLineHeight());
+            ImGui::SameLine();
+        }
+        wrapped(layout.state_label);
+        const bool lifecycle_disabled = disabled || lifecycle_busy || !supports(core, "lifecycle");
         if (layout.show_install()) {
             const bool installing = layout.core_state == "installing";
-            if (layout.button(installing ? "Installing core…" : "Install core",
-                              lifecycle_disabled || installing)) {
+            if (layout.button("Install core", lifecycle_disabled || installing)) {
                 submit(state, session, {{"action", "install_core"}});
             }
         } else {
@@ -666,21 +627,16 @@ void render_panel_controls(PanelControlsState& state, PreviewSession& session, f
         const bool backup_disabled = disabled || !can_use_backup(session);
         if (layout.button("Backup", backup_disabled, primary_width)) {
             download_backup(session);
+            session.add_local_log("info", "Requested download of the Wave preview backup.");
         }
         ImGui::SameLine();
         if (layout.button("Restore", backup_disabled, secondary_width)) {
+            state.restore_error.clear();
             open_dialog(state, ControlsDialog::restore);
         }
     }
     if (!layout.notice.empty()) {
         wrapped(layout.notice, Color::secondary_text);
-    }
-    if (!layout.result.empty()) {
-        if (state.request_id) {
-            wrapped(pending_message, Color::info);
-        } else if (state.reply) {
-            feedback(*state.reply);
-        }
     }
     if (layout.reconnect && layout.button("Reconnect")) {
         session.start(true);
@@ -734,10 +690,6 @@ std::string describe_panel_controls(const PanelControlsState& state, const Previ
         description = "Panel Controls. ";
         if (core.is_object()) {
             description += core_state_label(core) + ' ';
-            const auto error = string_field(core, "error");
-            if (!error.empty() && (state.action_config_id != 0 || action_message(state) != error)) {
-                description += std::format("Core error. {} ", error);
-            }
         }
         const auto active = string_field(server, "version", wave::version);
         const auto target = state.target_version.empty() ? active : std::string_view(state.target_version);
@@ -773,10 +725,15 @@ std::string describe_panel_controls(const PanelControlsState& state, const Previ
         if (state.restore_request.is_object()) {
             description += std::string(backup_selected_message) + ' ';
         }
+        if (!state.restore_error.empty()) {
+            description += state.restore_error + ' ';
+        }
         break;
     }
-    if (state.action_config_id == 0) {
-        description += action_message(state);
+    const bool lifecycle_busy =
+        include_status && state.dialog == ControlsDialog::none && core_transition_pending(session);
+    if (lifecycle_busy || (state.action_config_id == 0 && dialog_pending(state, session))) {
+        description += busy_description;
     }
     return description;
 }

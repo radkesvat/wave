@@ -6,6 +6,9 @@
 
 namespace wave {
 
+inline constexpr char new_password_requirements[] =
+    "Use at least 6 characters, including a letter A–Z or a–z and a digit 0–9. Symbols are optional.";
+
 class AuthSession {
   public:
     enum class Page {
