@@ -567,8 +567,8 @@ void serve_console(WebSocket& socket, const std::function<bool()>& session, cons
 void configure_console_route(httplib::Server& server, std::shared_ptr<AuthStore> store,
                              const std::filesystem::path& directory)
 {
-    server.WebSocket("/ws/console", [store = std::move(store), directory](const httplib::Request& request,
-                                                                      WebSocket& socket) {
+    server.WebSocket(panel_route("/ws/console"), [store = std::move(store), directory](const httplib::Request& request,
+                                                                                   WebSocket& socket) {
         const auto session = websocket_session(store, request);
         if (!session()) {
             socket.close(CloseStatus::PolicyViolation, "Session ended.");

@@ -20,6 +20,7 @@ using theme::Color;
 using ControlsDialog = PanelControlsState::Dialog;
 
 constexpr char popup_id[] = "###ServerPanelControlsDialog";
+constexpr std::string_view core_state_prefix = "WaterWall core ";
 constexpr char target_label[] = "Target version";
 constexpr char unsaved_config_warning[] = "Unsaved node changes will be lost.";
 constexpr char restore_message[] =
@@ -74,7 +75,7 @@ const Json* find_config(const Json& core, int id)
 std::string core_state_label(const Json& core)
 {
     const auto state = string_field(core, "state", "unavailable");
-    return std::format("WaterWall core {}.", state);
+    return std::format("{}{}.", core_state_prefix, state);
 }
 
 std::string controls_notice(const Json& server, const PreviewSession& session)
@@ -96,7 +97,7 @@ std::string controls_notice(const Json& server, const PreviewSession& session)
         notice = "Lifecycle controls are unavailable. ";
     }
     if (!versions) {
-        notice += "Panel version updates are unavailable. ";
+        notice += "Version updates are unavailable. ";
     }
     if (!configs) {
         notice += "Config changes are unavailable.";
@@ -166,7 +167,7 @@ struct ControlsLayout {
           reconnect(session.status() == PreviewStatus::unavailable),
           core_state(string_field(field(server, "core"), "state")),
           state_label(core_state_label(field(server, "core"))),
-          active_label(std::format("Panel version {}", string_field(server, "version", wave::version))),
+          active_label(std::format("Version {}", string_field(server, "version", wave::version))),
           notice(controls_notice(server, session))
     {
     }
@@ -226,7 +227,7 @@ void draw_panel_versions(PanelControlsState& state, const Json& server, const Co
 {
     wrapped(layout.active_label);
     wrapped(target_label, Color::secondary_text);
-    help_marker("This selects a release of the Wave panel. WaterWall runs as a separate core process.");
+    help_marker(shared_version_help);
     const auto& versions = array_field(server, "available_panel_versions");
     const auto active = string_field(server, "version", wave::version);
     const auto selected = state.target_version.empty() ? active : std::string_view(state.target_version);
@@ -263,34 +264,14 @@ void draw_panel_versions(PanelControlsState& state, const Json& server, const Co
     }
 }
 
-bool config_enabled_switch(ImVec2 hit_size, ImVec2 track_size, bool enabled, bool available, bool active)
+bool config_enabled_switch(ImVec2 hit_size, ImVec2 track_size, bool enabled, bool active)
 {
-    const bool pressed = ImGui::InvisibleButton("##config-enabled", hit_size, ImGuiButtonFlags_EnableNav);
-    if (ImGui::IsItemVisible()) {
-        const auto origin = ImGui::GetItemRectMin();
-        const ImVec2 min{origin.x + (hit_size.x - track_size.x) / 2,
-                         origin.y + (hit_size.y - track_size.y) / 2};
-        const ImVec2 max{min.x + track_size.x, min.y + track_size.y};
-        const float radius = track_size.y / 2;
-        const bool hovered = available && ImGui::IsItemHovered();
-        const auto track = enabled ? Color::accent : hovered ? Color::hover : Color::raised;
-        const auto thumb = enabled ? Color::canvas : Color::primary_text;
-        auto* draw = ImGui::GetWindowDrawList();
-        draw->AddRectFilled(min, max, ImGui::GetColorU32(theme::packed(track)), radius);
-        if (!enabled) {
-            draw->AddRect(min, max, ImGui::GetColorU32(theme::packed(Color::control_border)), radius,
-                          theme::border_width);
-        }
-        draw->AddCircleFilled({enabled ? max.x - radius : min.x + radius, min.y + radius}, radius - 3,
-                              ImGui::GetColorU32(theme::packed(thumb)));
-        if (hovered) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled) ||
-            (ImGui::GetIO().NavVisible && ImGui::IsItemFocused())) {
-            ImGui::SetTooltip("%s%s", enabled ? "Config enabled" : "Config disabled",
-                              active ? "\nStop WaterWall before changing this config." : "");
-        }
+    const bool pressed = toggle_switch("##config-enabled", hit_size, track_size, enabled);
+    if (ImGui::IsItemVisible() &&
+        (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled) ||
+         (ImGui::GetIO().NavVisible && ImGui::IsItemFocused()))) {
+        ImGui::SetTooltip("%s%s", enabled ? "Config enabled" : "Config disabled",
+                          active ? "\nStop WaterWall before changing this config." : "");
     }
     return pressed;
 }
@@ -373,9 +354,9 @@ void render_confirmation(PanelControlsState& state, PreviewSession& session, con
         label = "Update panel";
         question = std::format("Update Wave to version {}?", state.target_version);
         if (!has_panel_version(server, state.target_version)) {
-            unavailable = "That panel version is unavailable.";
+            unavailable = "That version is unavailable.";
         } else if (state.target_version == string_field(server, "version")) {
-            unavailable = "That panel version is already active.";
+            unavailable = "That version is already active.";
         }
         request = {{"action", "update_panel"}, {"version", state.target_version}};
     } else {
@@ -557,7 +538,7 @@ void render_config_header(PanelControlsState& state, PreviewSession& session, co
     const bool available = session.ready() && can_edit_configs(core) && !active && !state.request_id;
     const bool enabled = bool_field(config, "enabled");
     ImGui::BeginDisabled(!available);
-    if (config_enabled_switch(switch_hit, switch_track, enabled, available, active)) {
+    if (config_enabled_switch(switch_hit, switch_track, enabled, active)) {
         submit(state, session,
                {{"action", "set_core_config_enabled"}, {"id", config_id}, {"enabled", !enabled}});
         state.action_config_id = config_id;
@@ -607,7 +588,15 @@ void render_panel_controls(PanelControlsState& state, PreviewSession& session, f
             draw_busy_spinner(ImGui::GetTextLineHeight());
             ImGui::SameLine();
         }
-        wrapped(layout.state_label);
+        const auto state_color = core_status_color(layout.core_state, Color::primary_text);
+        if (state_color != Color::primary_text &&
+            ImGui::CalcTextSize(layout.state_label.c_str()).x <= ImGui::GetContentRegionAvail().x) {
+            text(core_state_prefix);
+            ImGui::SameLine(0, 0);
+            wrapped(std::string_view(layout.state_label).substr(core_state_prefix.size()), state_color);
+        } else {
+            wrapped(layout.state_label, state_color);
+        }
         const bool lifecycle_disabled = disabled || lifecycle_busy || !supports(core, "lifecycle");
         if (layout.show_install()) {
             const bool installing = layout.core_state == "installing";
@@ -705,7 +694,7 @@ std::string describe_panel_controls(const PanelControlsState& state, const Previ
         }
         const auto active = string_field(server, "version", wave::version);
         const auto target = state.target_version.empty() ? active : std::string_view(state.target_version);
-        description += std::format("Panel version {}. Target panel version {}. ", active, target);
+        description += std::format("Version {}. Target version {}. ", active, target);
         const auto notice = controls_notice(server, session);
         if (!notice.empty()) {
             description += notice + ' ';

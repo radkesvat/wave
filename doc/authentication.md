@@ -53,7 +53,15 @@ TLS directly and requires TLS 1.2 or newer. A missing or false
 `tls.enabled` starts the HTTP listener, where browsers send passwords and
 session cookies over the network in cleartext.
 
-To enable TLS, edit `wave-db.json` before starting Wave.
+In **Settings → Panel → TLS**, turn on **Enable TLS**, enter the domain and
+PEM paths, and select **Apply changes**. Wave validates the files before
+saving. Restart the Wave backend to use the saved settings, then reconnect
+over HTTPS with the configured hostname and listener port. Turn off
+**Enable TLS** and apply to return to HTTP after a restart. The fields stay
+locked while the switch is off, and Wave keeps the saved hostname and paths.
+
+To configure TLS before first sign-in or recover an unavailable listener,
+set the same values in `wave-db.json` while Wave is stopped.
 
 ```json
 {
@@ -91,18 +99,32 @@ roots. Give the service account read access to the PEM files and traversal
 access to their parent directories. Restrict private key access to the
 service account and trusted operators.
 
-## Set up the administrator
+## Set the panel base path
 
 Before starting with an empty `admin` array, bind to loopback or restrict
-network access to the intended administrator. The first successful setup
-request claims the account. Start Wave as the service account.
+network access to the intended administrator. Start Wave as the service account.
 
 ```sh
 ./build/backend-release/wave-backend --site-dir build/web-release/site
 ```
 
-Open the listener URL. For HTTPS, use the configured `tls.domain` and the
-listener port. The browser omits the port for 443. On **Set up administrator**,
+When `panel-base-path` is missing from `wave-db.json`, open the listener's root
+URL. **Panel base path** starts with `/panel`. You can choose another path,
+such as `/admin/wave`. Start with a slash and use letters, digits, hyphens, or
+underscores in each segment. Leave out the trailing slash. Wave reserves
+`/_wave-setup` for setup. Save the path to open the panel there immediately.
+An existing installation that starts with a missing path asks you to sign in
+as the administrator before choosing a replacement.
+
+Use the saved path for subsequent visits. Pages, assets, API requests, and
+WebSockets all use that prefix. For example, `/panel` serves the workspace at
+`/panel/` and its data socket at `/panel/ws/workspace`. Requests outside the
+selected prefix receive the stock nginx **404 Not Found** HTML from Wave.
+
+## Set up the administrator
+
+For HTTPS, use the configured `tls.domain` and the listener port. The browser
+omits the port for 443. Open the panel at its base path. On **Set up administrator**,
 enter a username of up to 64 ASCII letters, digits, periods, underscores,
 or hyphens. New passwords need at least 6 characters, including an English
 letter (A–Z or a–z) and a digit (0–9). Symbols are optional. Wave accepts
@@ -128,24 +150,26 @@ chain. With a private CA, trust the CA in the test browser or its test trust
 store first. Remove the mapping when testing is complete.
 
 For a single request from the server host to the example loopback listener,
-use `curl --resolve`. Enter the hostname privately. The URL still supplies
-the name for SNI and certificate verification. A successful unauthenticated
-request to `/` returns `303`.
+use `curl --resolve`. The URL supplies the name for SNI and certificate
+verification. An unauthenticated request to the saved base path returns `303`.
+Use `/` while the panel is waiting for its base path.
 
 ```sh
 read -r -s -p 'Wave hostname ' wave_tls_hostname
 printf '\n'
+read -r -p 'Wave entry path (for example /panel/) ' wave_tls_path
 curl --noproxy '*' --resolve "${wave_tls_hostname}:8443:127.0.0.1" \
   --silent --fail --output /dev/null --write-out '%{http_code}\n' \
-  "https://${wave_tls_hostname}:8443/"
-unset wave_tls_hostname
+  "https://${wave_tls_hostname}:8443${wave_tls_path}"
+unset wave_tls_hostname wave_tls_path
 ```
 
 Use the corresponding test IP and port for a remote test client. For a
 private CA, supply its trusted CA PEM with `--cacert`, using a local path
 entered privately. Keep hostname and trust checks enabled. After sign-in,
-confirm the browser connects to `/ws/panel` over WSS and the workspace
-shows the signed-in administrator.
+confirm the browser connects to the session socket over WSS and the workspace
+shows the signed-in administrator. The default session socket is
+`/panel/ws/panel`.
 
 ## Renew TLS
 
@@ -186,14 +210,14 @@ older database backups as credential recovery because unexpired sessions
 from those backups may become valid again.
 
 The entry routes and their shared WebAssembly assets load without a cookie.
-The panel, `/api/session`, and WebSockets require a current session. An
+The panel, `/panel/api/session`, and WebSockets require a current session. An
 unauthenticated browser goes to sign-in, or administrator setup if the
-database has no account.
+database has no account. The route examples below use `/panel` as the base path.
 
 Authentication POST requests require a same-origin `Origin`, JSON, and
-`X-Wave-CSRF: 1`. `POST /api/auth/admin` takes `username`,
+`X-Wave-CSRF: 1`. `POST /panel/api/auth/admin` takes `username`,
 `current_password`, and `password`. An empty new password keeps the
-current one. The session monitor at `/ws/panel` and the workspace sockets
+current one. The session monitor at `/panel/ws/panel` and the workspace sockets
 check origin and session before upgrading. Active connections close when
 their session expires or is revoked.
 

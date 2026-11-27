@@ -19,100 +19,142 @@ namespace {
 using namespace view;
 using theme::Color;
 
-void sync_settings(SettingsViewState& state, const Json& settings)
+constexpr char tls_dialog_title[] = "Apply TLS settings";
+constexpr char tls_restart_notice[] = "Restart Wave to apply the saved TLS settings.";
+constexpr char tls_unavailable[] = "TLS settings are unavailable on this backend.";
+
+void sync_tls_settings(TlsSettingsDraft& draft, const Json& settings)
 {
-    if (state.dirty || settings == state.source || !settings.is_object()) {
+    draft.restart_required = bool_field(settings, "restart_required");
+    if (draft.dirty || draft.request || settings == draft.source || !settings.is_object()) {
         return;
     }
-    fill(state.domain, string_field(settings, "domain"));
-    fill(state.certificate_path, string_field(settings, "certificate_path"));
-    fill(state.private_key_path, string_field(settings, "private_key_path"));
-    state.source = settings;
+    draft.enabled = bool_field(settings, "enabled");
+    draft.domain = string_field(settings, "domain");
+    draft.certificate_chain = string_field(settings, "certificate_chain");
+    draft.private_key = string_field(settings, "private_key");
+    draft.source = settings;
 }
 
-bool finish_settings_save(SettingsViewState& state, PreviewSession& session)
+bool tls_settings_changed(const TlsSettingsDraft& draft)
 {
-    if (auto reply = session.take_reply(state.apply_request)) {
-        if (reply->ok()) {
-            state.dirty = false;
-            state.source = nullptr;
-        }
-        return true;
+    return draft.enabled != bool_field(draft.source, "enabled") ||
+           (draft.enabled && (draft.domain != string_field(draft.source, "domain") ||
+                              draft.certificate_chain != string_field(draft.source, "certificate_chain") ||
+                              draft.private_key != string_field(draft.source, "private_key")));
+}
+
+bool edit_tls_field(const char* label, std::string& value, const char* hint, std::string_view help)
+{
+    ImGui::PushID(label);
+    ImGui::TextUnformatted(label);
+    help_marker(help);
+    ImGui::SetNextItemWidth(-1);
+    const bool changed = ImGui::InputTextWithHint("##value", hint, &value);
+    ImGui::PopID();
+    return changed;
+}
+
+void submit_tls_settings(TlsSettingsDraft& draft, PreviewSession& session)
+{
+    Json settings = {{"enabled", draft.enabled}};
+    if (draft.enabled) {
+        settings["domain"] = draft.domain;
+        settings["certificate_chain"] = draft.certificate_chain;
+        settings["private_key"] = draft.private_key;
     }
-    return false;
+    draft.request =
+        session.submit({{"action", "apply_tls_settings"}, {"settings", std::move(settings)}}, 5000);
 }
 
-void submit_settings(SettingsViewState& state, PreviewSession& session)
+void render_tls_settings(TlsSettingsDraft& draft, const Json& settings, bool narrow)
 {
-    Json draft = {{"domain", state.domain.data()},
-                  {"certificate_path", state.certificate_path.data()},
-                  {"private_key_path", state.private_key_path.data()}};
-    state.apply_request =
-        session.submit({{"action", "apply_settings"}, {"settings", std::move(draft)}}, 5000);
-}
-
-void render_tls_settings(SettingsViewState& state, PreviewSession& session, bool narrow)
-{
-    const auto& settings = field(session.data(), "settings");
-    sync_settings(state, settings);
-    ImGui::BeginDisabled(state.apply_request.has_value());
-    state.dirty |=
-        edit("Domain", state.domain, "panel.example.test", 0,
-             "Use a hostname such as panel.example.test. These sample values apply to the preview. "
-             "Set the live HTTPS hostname in wave-db.json.");
-    state.dirty |= edit("Certificate chain path", state.certificate_path, "", 0,
-                        "Sample path to a PEM file. The chain starts with the server certificate and then "
-                        "lists its intermediate certificates. Set the live path in wave-db.json.");
-    state.dirty |= edit("Private key path", state.private_key_path, "", 0,
-                        "Sample path to the PEM private key that matches the server certificate. "
-                        "Configure an unencrypted key for live HTTPS in wave-db.json.");
-
-    const bool valid = state.domain[0] != '\0';
-    if (state.dirty && !valid) {
-        wrapped("Enter a domain.", Color::error);
+    if (!bool_field(settings, "supported")) {
+        wrapped(tls_unavailable, Color::warning);
+        return;
     }
-    ImGui::BeginDisabled(!state.dirty || !valid);
+    ImGui::BeginDisabled(draft.request.has_value());
+    if (toggle_switch("Enable TLS", {48, std::max(26.0f, ImGui::GetFrameHeight())}, {42, 22},
+                      draft.enabled)) {
+        draft.enabled = !draft.enabled;
+        draft.dirty = true;
+    }
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Enable TLS");
+    help_marker("Wave switches between HTTPS and HTTP when the backend restarts.");
+
+    ImGui::BeginDisabled(!draft.enabled);
+    draft.dirty |= edit_tls_field("Domain", draft.domain, "panel.example.test",
+                                  "Enter the lowercase DNS hostname that the certificate covers.");
+    draft.dirty |= edit_tls_field("Certificate chain path", draft.certificate_chain, "",
+                                  "Enter an absolute PEM path on this server. Put the server certificate "
+                                  "first, followed by its intermediates.");
+    draft.dirty |= edit_tls_field("Private key path", draft.private_key, "",
+                                  "Enter the absolute path to the matching unencrypted PEM private key "
+                                  "on this server.");
+    ImGui::EndDisabled();
+
+    const bool complete = !draft.enabled || (!draft.domain.empty() && !draft.certificate_chain.empty() &&
+                                             !draft.private_key.empty());
+    ImGui::BeginDisabled(!tls_settings_changed(draft) || !complete);
     if (theme::button("Apply changes")) {
-        ImGui::OpenPopup("Apply preview TLS settings");
+        ImGui::OpenPopup(tls_dialog_title);
     }
     ImGui::EndDisabled();
-    if (state.apply_request && !ImGui::IsPopupOpen("Apply preview TLS settings")) {
+    if (draft.request && !ImGui::IsPopupOpen(tls_dialog_title)) {
         ImGui::SameLine();
         draw_busy_spinner(ImGui::GetFrameHeight());
     }
-    if (state.dirty) {
+    if (draft.dirty) {
         if (!narrow) {
             ImGui::SameLine();
         }
         if (theme::button("Revert edits")) {
-            state.dirty = false;
-            state.source = nullptr;
-            sync_settings(state, settings);
+            draft.dirty = false;
+            draft.source = nullptr;
+            sync_tls_settings(draft, settings);
         }
     }
     ImGui::EndDisabled();
+    if (draft.restart_required) {
+        wrapped(tls_restart_notice, Color::secondary_text);
+    }
 }
 
-void render_tls_dialog(SettingsViewState& state, PreviewSession& session)
+void render_tls_dialog(TlsSettingsDraft& draft, PreviewSession& session)
 {
-    const bool finished = finish_settings_save(state, session);
-    const bool pending = state.apply_request.has_value();
-    if (Dialog frame{"Apply preview TLS settings",
-                     370,
-                     {{pending ? "Close" : "Cancel"}, {"Confirm apply", pending || !session.ready()}},
-                     {.busy = pending}};
+    const auto reply = session.take_reply(draft.request);
+    if (reply && reply->ok()) {
+        draft.dirty = false;
+        draft.source = nullptr;
+    }
+    const bool pending = draft.request.has_value();
+    if (Dialog frame{
+            tls_dialog_title,
+            370,
+            {{pending ? "Close" : "Cancel", pending}, {"Confirm apply", pending || !session.ready()}},
+            {.busy = pending}};
         frame) {
-        ImGui::TextWrapped("Save these TLS settings for the current preview process?");
+        draft.confirming = true;
+        if (draft.enabled) {
+            wrapped("Restart Wave after saving, then reconnect over HTTPS using the configured hostname.");
+        } else {
+            wrapped("Restart Wave after saving, then reconnect over HTTP. Credentials and sessions will "
+                    "travel without TLS.");
+        }
         if (!session.ready() && !pending) {
-            wrapped("The preview connection is unavailable.", Color::warning);
+            wrapped("The settings connection is unavailable.", Color::warning);
         }
         const int action = frame.footer();
-        if (action == 0 || finished) {
+        if (action == 0 || reply) {
             ImGui::CloseCurrentPopup();
+            draft.confirming = false;
         } else if (action == 1) {
-            submit_settings(state, session);
-            if (!state.apply_request) {
+            submit_tls_settings(draft, session);
+            if (!draft.request) {
                 ImGui::CloseCurrentPopup();
+                draft.confirming = false;
             }
         }
     }
@@ -271,14 +313,14 @@ void render_panel_settings(SettingsViewState& state, AuthSession& auth, PreviewS
         return visible;
     };
 
-    if (session.status() != PreviewStatus::loading || state.apply_request) {
-        if (begin_card("Preview TLS")) {
+    if (session.status() != PreviewStatus::loading || state.tls.request) {
+        if (begin_card("TLS")) {
             if (session.ready()) {
-                render_tls_settings(state, session, narrow);
+                render_tls_settings(state.tls, field(field(session.data(), "settings"), "tls"), narrow);
             } else {
                 show_settings_connection(session);
             }
-            render_tls_dialog(state, session);
+            render_tls_dialog(state.tls, session);
         }
         ImGui::EndChild();
     }
@@ -300,6 +342,8 @@ void render_settings(SettingsViewState& state, AuthSession& auth, PreviewSession
 {
     update_core_settings(state.core, session);
     update_session_settings(state.sessions, session);
+    sync_tls_settings(state.tls, field(field(session.data(), "settings"), "tls"));
+    state.tls.confirming = false;
     if (!ImGui::BeginTabBar("Settings tabs")) {
         return;
     }
@@ -339,6 +383,17 @@ std::string describe_settings(const SettingsViewState& state, const AuthSession&
         return "Core tab. " + describe_core_settings(state.core);
     }
     std::string description = "Panel tab. Administrator settings.";
+    const auto& tls = state.tls;
+    if (bool_field(tls.source, "supported")) {
+        description += tls.enabled ? " TLS settings. Enable TLS on."
+                                   : " TLS settings. Enable TLS off. Certificate fields locked.";
+        if (tls.restart_required) {
+            description += std::string(" ") + tls_restart_notice;
+        }
+    }
+    if (tls.confirming) {
+        description += std::string(" ") + tls_dialog_title + '.';
+    }
     if (auth.action() == AuthSession::Action::update_administrator) {
         if (!auth.error().empty()) {
             description += ' ' + auth.error();
@@ -352,7 +407,7 @@ std::string describe_settings(const SettingsViewState& state, const AuthSession&
             description += ' ' + expiry_error();
         }
     }
-    if (state.apply_request || sessions.request ||
+    if (tls.request || sessions.request ||
         (auth.pending() && auth.action() == AuthSession::Action::update_administrator)) {
         description += std::string(" ") + busy_description;
     }

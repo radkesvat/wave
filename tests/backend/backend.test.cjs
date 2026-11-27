@@ -11,7 +11,7 @@ const { createInterface } = require('node:readline');
 const { after, before, test } = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
 const { isDeepStrictEqual, promisify } = require('node:util');
-const { authFixture, rotatingLogPath, seedCore } = require('./auth_fixture.cjs');
+const { authFixture, panelBasePath, rotatingLogPath, seedCore } = require('./auth_fixture.cjs');
 
 const sourceBackend = process.env.WAVE_BACKEND;
 const run = promisify(execFile);
@@ -61,7 +61,7 @@ before(async () => {
     coreFixture = await seedCore(backend, { executable: process.platform === 'linux' });
     database = join(dirname(backend), 'wave-db.json');
     await writeFile(database, JSON.stringify({
-        listen: { host: '127.0.0.1', port: 0 }, waterwall_install_attempted: true,
+        listen: { host: '127.0.0.1', port: 0 }, 'panel-base-path': panelBasePath, waterwall_install_attempted: true,
     }));
     await mkdir(join(cwd, siteDir));
     for (const [name, contents] of Object.entries(assets)) {
@@ -131,30 +131,14 @@ test('initializes a private database beside the executable and preserves existin
     await assert.rejects(stat(join(cwd, 'wave-db.json')), { code: 'ENOENT' });
 });
 
-test('serves uncached entry assets and protects HTTP data with an administrator session', async () => {
-    const credentials = { username: 'fixture-user', password: 'fake fixture test passphrase 9Jw4c' };
-    const request = (path, options = {}) =>
-        fetch(new URL(path, url), { redirect: 'manual', signal: AbortSignal.timeout(timeout), ...options });
-    const post = (action, origin = url.origin) => request(`/api/auth/${action}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Wave-CSRF': '1', Origin: origin },
-        body: JSON.stringify(credentials),
-    });
-    const files = (await readdir(cwd, { recursive: true })).sort();
-    assert.equal((await request('/panel')).headers.get('location'), '/setup');
-    for (const [path, asset] of [['/setup', 'index.html'], ['/index.js', 'index.js'], ['/index.wasm', 'index.wasm']]) {
-        const response = await request(path);
-        assert.equal(response.status, 200);
-        assert.equal(response.headers.get('cache-control'), 'no-store');
-        assert.deepEqual(Buffer.from(await response.arrayBuffer()), assets[asset]);
-        if (asset === 'index.wasm') assert.equal(response.headers.get('content-type'), 'application/wasm');
-    }
-    assert.equal((await request('/api/session')).status, 401);
-    const upgrade = await new Promise((resolve, reject) => {
-        const probe = httpRequest(new URL('/ws/preview', url), {
+function websocketStatus(base, path, headers = {}) {
+    const endpoint = new URL(path, base);
+    return new Promise((resolve, reject) => {
+        const probe = httpRequest(endpoint, {
             headers: {
-                Origin: url.origin, Connection: 'Upgrade', Upgrade: 'websocket',
+                Origin: endpoint.origin, Connection: 'Upgrade', Upgrade: 'websocket',
                 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': Buffer.alloc(16).toString('base64'),
+                ...headers,
             },
             signal: AbortSignal.timeout(timeout),
         });
@@ -169,12 +153,165 @@ test('serves uncached entry assets and protects HTTP data with an administrator 
         probe.on('error', reject);
         probe.end();
     });
-    assert.equal(upgrade, 401);
+}
+
+function panelClient(origin) {
+    const request = (path, options = {}) =>
+        fetch(new URL(path, origin), { redirect: 'manual', signal: AbortSignal.timeout(timeout), ...options });
+    const post = (path, data, headers = {}) => request(path, {
+        method: 'POST', body: JSON.stringify(data),
+        headers: { 'Content-Type': 'application/json', 'X-Wave-CSRF': '1', Origin: origin, ...headers },
+    });
+    return { request, post };
+}
+
+async function assertNotFound(response) {
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get('location'), null);
+    assert.equal(response.headers.get('content-type'), 'text/html');
+    const expected = Buffer.from([
+        '<html>',
+        '<head><title>404 Not Found</title></head>',
+        '<body>',
+        '<center><h1>404 Not Found</h1></center>',
+        '<hr><center>nginx</center>',
+        '</body>',
+        '</html>',
+        '',
+    ].join('\r\n'));
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), expected);
+}
+
+const bootstrapPath = '/_wave-setup';
+const basePathEndpoint = `${bootstrapPath}/api/auth/base-path`;
+
+test('selects a base path on first run and scopes the configured panel routes', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false, basePath: null });
+    const loopback = JSON.parse(await readFile(fixture.database, 'utf8'));
+    await unlink(fixture.database);
+    // Create the database without ever binding its fresh public listener defaults.
+    await expectStartupFailure(['--site-dir', join(fixture.cwd, 'missing site')], /Cannot access site directory/,
+        fixture.backend);
+    const fresh = JSON.parse(await readFile(fixture.database, 'utf8'));
+    assert.deepEqual(fresh.admin, []);
+    assert.equal(fresh['panel-base-path'], undefined);
+    await writeFile(fixture.database, JSON.stringify({ ...fresh, ...loopback }));
+    await fixture.start();
+
+    const { request, post } = panelClient(fixture.origin);
+    const chosen = '/chosen';
+    const selection = { 'panel-base-path': chosen };
+    for (const path of ['/', '/panel', `${bootstrapPath}/`]) {
+        const response = await request(path);
+        assert.equal(response.status, 303);
+        assert.equal(response.headers.get('location'), `${bootstrapPath}/base-path`);
+    }
+    assert.equal(await (await request(`${bootstrapPath}/base-path`)).text(), fixture.index);
+    assert.equal((await request(`${bootstrapPath}/index.wasm`)).status, 200);
+    assert.equal((await request(`${bootstrapPath}/index.js`)).status, 200);
+    await assertNotFound(await request(`${bootstrapPath}/api/session`));
+    assert.equal(await websocketStatus(fixture.origin, `${bootstrapPath}/ws/workspace`), 404);
+    assert.equal((await post(basePathEndpoint, selection, { Origin: 'https://other.example.test' })).status, 403);
+    assert.equal((await post(basePathEndpoint, { 'panel-base-path': '/invalid/' })).status, 400);
+    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8'))['panel-base-path'], undefined);
+
+    const saved = await post(basePathEndpoint, selection);
+    assert.equal(saved.status, 201);
+    assert.equal(saved.headers.get('location'), `${chosen}/`);
+    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8'))['panel-base-path'], chosen);
+    for (const path of ['/', '/panel', '/panel/', `${bootstrapPath}/`, '/index.wasm', `${chosen}-other/`,
+        `${chosen}/unknown`]) {
+        await assertNotFound(await request(path));
+    }
+    await assertNotFound(await post(basePathEndpoint, { 'panel-base-path': '/other' }));
+    const canonical = await request(chosen);
+    assert.equal(canonical.status, 303);
+    assert.equal(canonical.headers.get('location'), `${chosen}/`);
+    assert.equal((await request(`${chosen}/`)).headers.get('location'), `${chosen}/setup`);
+    assert.equal((await request(`${chosen}/index.wasm`)).status, 200);
+    assert.equal((await request(`${chosen}/api/session`)).status, 401);
+
+    const credentials = { username: 'bootstrap-admin', password: 'fixture bootstrap passphrase 7Dm3J' };
+    assert.equal((await post(`${chosen}/api/auth/setup`, credentials)).status, 201);
+    assert.equal((await request(`${chosen}/`)).headers.get('location'), `${chosen}/sign-in`);
+    const login = await post(`${chosen}/api/auth/sign-in`, credentials);
+    assert.equal(login.status, 204);
+    const headers = { Cookie: login.headers.get('set-cookie').split(';', 1)[0] };
+    assert.equal(await (await request(`${chosen}/`, { headers })).text(), fixture.index);
+    assert.equal((await (await request(`${chosen}/api/session`, { headers })).json()).username, credentials.username);
+    for (const path of ['/ws/workspace', '/panel/ws/workspace', `${chosen}-other/ws/workspace`]) {
+        assert.equal(await websocketStatus(fixture.origin, path, headers), 404);
+    }
+    assert.equal(await websocketStatus(fixture.origin, `${chosen}/ws/workspace`), 401);
+    const { initial } = await connectPreview(t, fixture.origin, headers.Cookie, chosen);
+    assert.ok(initial.server);
+    const session = connectSocket('/ws/panel', fixture.origin, headers.Cookie, chosen);
+    t.after(() => session.close());
+    const [frame] = await once(session, 'message', { signal: AbortSignal.timeout(timeout) });
+    assert.equal(JSON.parse(frame.data).username, credentials.username);
+});
+
+test('requires the existing administrator to sign in before recovering the base path', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    const { request, post } = panelClient(fixture.origin);
+    const credentials = { username: 'recovery-admin', password: 'fixture recovery passphrase 8Tz4L' };
+    await fixture.start();
+    assert.equal((await post(`${panelBasePath}/api/auth/setup`, credentials)).status, 201);
+    await fixture.stop();
+    const database = JSON.parse(await readFile(fixture.database, 'utf8'));
+    delete database['panel-base-path'];
+    await writeFile(fixture.database, JSON.stringify(database));
+    await fixture.start();
+
+    const chosen = '/chosen';
+    const selection = { 'panel-base-path': chosen };
+    const entry = await request('/');
+    assert.equal(entry.status, 303);
+    assert.equal(entry.headers.get('location'), `${bootstrapPath}/sign-in`);
+    assert.equal(await (await request(`${bootstrapPath}/sign-in`)).text(), fixture.index);
+    assert.equal((await post(basePathEndpoint, selection)).status, 401);
+    assert.equal((await post(basePathEndpoint, selection, { Cookie: 'wave_session=invalid' })).status, 401);
+    await assertNotFound(await post(`${bootstrapPath}/api/auth/setup`, credentials));
+    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8'))['panel-base-path'], undefined);
+
+    const login = await post(`${bootstrapPath}/api/auth/sign-in`, credentials);
+    assert.equal(login.status, 204);
+    const headers = { Cookie: login.headers.get('set-cookie').split(';', 1)[0] };
+    assert.equal((await request('/', { headers })).headers.get('location'), `${bootstrapPath}/base-path`);
+    const saved = await post(basePathEndpoint, selection, headers);
+    assert.equal(saved.status, 201);
+    assert.equal(saved.headers.get('location'), `${chosen}/`);
+    const persisted = JSON.parse(await readFile(fixture.database, 'utf8'));
+    assert.equal(persisted['panel-base-path'], chosen);
+    assert.deepEqual(persisted.admin, database.admin);
+    assert.equal((await request(`${chosen}/`, { headers })).status, 200);
+    assert.equal((await (await request(`${chosen}/api/session`, { headers })).json()).username, credentials.username);
+    await assertNotFound(await post(basePathEndpoint, selection, headers));
+    await assertNotFound(await request(`${panelBasePath}/`, { headers }));
+});
+
+test('serves uncached entry assets and protects HTTP data with an administrator session', async () => {
+    const credentials = { username: 'fixture-user', password: 'fake fixture test passphrase 9Jw4c' };
+    const web = panelClient(url.origin);
+    const request = (path, options) => web.request(panelBasePath + path, options);
+    const post = (action, origin = url.origin) =>
+        web.post(`${panelBasePath}/api/auth/${action}`, credentials, { Origin: origin });
+    const files = (await readdir(cwd, { recursive: true })).sort();
+    assert.equal((await request('/')).headers.get('location'), `${panelBasePath}/setup`);
+    for (const [path, asset] of [['/setup', 'index.html'], ['/index.js', 'index.js'], ['/index.wasm', 'index.wasm']]) {
+        const response = await request(path);
+        assert.equal(response.status, 200);
+        assert.equal(response.headers.get('cache-control'), 'no-store');
+        assert.deepEqual(Buffer.from(await response.arrayBuffer()), assets[asset]);
+        if (asset === 'index.wasm') assert.equal(response.headers.get('content-type'), 'application/wasm');
+    }
+    assert.equal((await request('/api/session')).status, 401);
+    assert.equal(await websocketStatus(url, `${panelBasePath}/ws/workspace`), 401);
 
     assert.equal((await post('setup', 'https://other.example.test')).status, 403);
     assert.equal((await post('setup')).status, 201);
     assert.equal((await post('setup')).status, 409);
-    assert.equal((await request('/panel')).headers.get('location'), '/sign-in');
+    assert.equal((await request('/')).headers.get('location'), `${panelBasePath}/sign-in`);
     const login = await post('sign-in');
     assert.equal(login.status, 204);
     const [value, ...flags] = login.headers.get('set-cookie').split('; ');
@@ -193,8 +330,8 @@ test('serves uncached entry assets and protects HTTP data with an administrator 
     assert.deepEqual((await readdir(cwd, { recursive: true })).sort(), files);
 });
 
-function connectSocket(path, base = url, sessionCookie = cookie) {
-    const endpoint = new URL(path, base);
+function connectSocket(path, base = url, sessionCookie = cookie, basePath = panelBasePath) {
+    const endpoint = new URL(basePath + path, base);
     const origin = endpoint.origin;
     endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
     return new WebSocket(endpoint, { headers: { Cookie: sessionCookie, Origin: origin } });
@@ -244,15 +381,15 @@ async function nextPreviewSnapshot(socket, matches = () => true, wait = timeout)
     }
 }
 
-async function connectPreview(t, base, sessionCookie) {
-    const socket = connectSocket('/ws/preview', base, sessionCookie);
+async function connectPreview(t, base, sessionCookie, basePath) {
+    const socket = connectSocket('/ws/workspace', base, sessionCookie, basePath);
     t.after(() => socket.close());
     return { socket, initial: (await nextPreviewSnapshot(socket)).data };
 }
 
 async function fixtureSession(fixture) {
     const credentials = { username: 'fixture-admin', password: 'fixture core test passphrase 4Kq7v' };
-    const post = action => fetch(new URL('/api/auth/' + action, fixture.origin), {
+    const post = action => fetch(new URL(`${fixture.basePath}/api/auth/${action}`, fixture.origin), {
         method: 'POST',
         headers: { Origin: fixture.origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json' },
         body: JSON.stringify(credentials),

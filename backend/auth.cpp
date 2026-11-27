@@ -1,11 +1,15 @@
 #include "auth.h"
 
 #include "auth_store.h"
+#include "panel_base_path.h"
+#include "panel_settings.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <memory>
+#include <stdexcept>
 #include <string_view>
 
 namespace wave {
@@ -18,6 +22,77 @@ using httplib::Server;
 using Decision = Server::HandlerResponse;
 
 constexpr std::string_view panel_socket = "/ws/panel";
+constexpr std::string_view page_routes[] = {"/", "/index.html", "/setup", "/sign-in", "/base-path"};
+constexpr std::string_view websocket_routes[] = {"/ws", panel_socket, "/ws/console", "/ws/overview",
+                                                  "/ws/workspace"};
+constexpr std::string_view sign_in_route = "/api/auth/sign-in";
+constexpr std::string_view base_path_route = "/api/auth/base-path";
+
+struct SiteAsset {
+    std::string_view path;
+    std::string_view content_type;
+    bool public_file = false;
+};
+
+constexpr SiteAsset site_assets[] = {
+    {"/index.js", "text/javascript; charset=utf-8", true},
+    {"/index.wasm", "application/wasm", true},
+    {"/console.js", "text/javascript; charset=utf-8"},
+    {"/terminal/xterm.js", "text/javascript; charset=utf-8"},
+    {"/terminal/addon-fit.js", "text/javascript; charset=utf-8"},
+    {"/terminal/xterm.css", "text/css; charset=utf-8"},
+    {"/licenses/wave.txt", "text/plain; charset=utf-8"},
+    {"/licenses/dear-imgui.txt", "text/plain; charset=utf-8"},
+    {"/licenses/poppins.txt", "text/plain; charset=utf-8"},
+    {"/licenses/nlohmann-json.txt", "text/plain; charset=utf-8"},
+    {"/licenses/nlohmann-json-third-party.txt", "text/plain; charset=utf-8"},
+    {"/licenses/implot.txt", "text/plain; charset=utf-8"},
+    {"/licenses/xterm.txt", "text/plain; charset=utf-8"},
+    {"/licenses/xterm-addon-fit.txt", "text/plain; charset=utf-8"},
+};
+
+enum class Access { missing, entry, authenticated, websocket, base_path_setup };
+
+Access route_access(std::string_view route, std::string_view method, bool bootstrap)
+{
+    if (method == "POST") {
+        if (route == sign_in_route) {
+            return Access::entry;
+        }
+        if (bootstrap) {
+            return route == base_path_route ? Access::base_path_setup : Access::missing;
+        }
+        if (route == "/api/auth/setup" || route == "/api/auth/sign-out") {
+            return Access::entry;
+        }
+        return route == "/api/auth/admin" ? Access::authenticated : Access::missing;
+    }
+    if (method != "GET" && method != "HEAD") {
+        return Access::missing;
+    }
+    if (std::ranges::find(page_routes, route) != std::end(page_routes)) {
+        if ((bootstrap && (route == "/index.html" || route == "/setup")) ||
+            (!bootstrap && route == "/base-path")) {
+            return Access::missing;
+        }
+        return Access::entry;
+    }
+    if (const auto asset = std::ranges::find(site_assets, route, &SiteAsset::path); asset != std::end(site_assets)) {
+        return asset->public_file ? Access::entry : bootstrap ? Access::missing : Access::authenticated;
+    }
+    if (bootstrap) {
+        return Access::missing;
+    }
+    if (std::ranges::find(websocket_routes, route) != std::end(websocket_routes)) {
+        return Access::websocket;
+    }
+    return route == "/api/session" ? Access::authenticated : Access::missing;
+}
+
+std::string_view setup_page(bool installed, bool authenticated)
+{
+    return installed && !authenticated ? "/sign-in" : "/base-path";
+}
 
 bool secure_transport(const Request& request)
 {
@@ -89,14 +164,17 @@ Decision reject(Response& response, int status)
     return Decision::Handled;
 }
 
-bool is_entry_asset(const Request& request)
+Decision not_found(Response& response)
 {
-    if (request.method != "GET" && request.method != "HEAD") {
-        return false;
-    }
-    return request.path == "/" || request.path == "/index.html" || request.path == "/setup" ||
-           request.path == "/sign-in" || request.path == "/panel" || request.path == "/index.js" ||
-           request.path == "/index.wasm";
+    response.set_content("<html>\r\n"
+                         "<head><title>404 Not Found</title></head>\r\n"
+                         "<body>\r\n"
+                         "<center><h1>404 Not Found</h1></center>\r\n"
+                         "<hr><center>nginx</center>\r\n"
+                         "</body>\r\n"
+                         "</html>\r\n",
+                         "text/html");
+    return reject(response, 404);
 }
 
 std::string_view credential(const Json& input, const char* name)
@@ -113,6 +191,18 @@ Json session_data(const AuthStore::Session& session)
 
 } // namespace
 
+std::string panel_route(std::string_view suffix)
+{
+    std::string pattern = "((?:/[A-Za-z0-9_-]+)+)";
+    for (const auto character : suffix) {
+        if (std::string_view(R"(.^$|()[]{}*+?\)").find(character) != std::string_view::npos) {
+            pattern += '\\';
+        }
+        pattern += character;
+    }
+    return pattern;
+}
+
 std::function<bool()> websocket_session(const std::shared_ptr<AuthStore>& store,
                                         const Request& request)
 {
@@ -120,7 +210,7 @@ std::function<bool()> websocket_session(const std::shared_ptr<AuthStore>& store,
 }
 
 void configure_authenticated_routes(Server& server, const std::filesystem::path& site_dir,
-                                    std::shared_ptr<AuthStore> store, bool secure,
+                                    std::shared_ptr<AuthStore> store, std::shared_ptr<PanelDatabase> database, bool secure,
                                     const std::string& authority)
 {
     server.set_default_headers({{"Cache-Control", "no-store"},
@@ -129,38 +219,62 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
                                 {"Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'"}});
     server.set_payload_max_length(4096);
 
-    // The pre-routing hook also runs before WebSocket upgrades. Only entry resources and
-    // the three same-origin auth requests may proceed without an active session.
-    server.set_pre_routing_handler([store, secure, authority](const Request& req, Response& res) {
+    // The pre-routing hook checks the configured prefix before HTTP dispatch and WebSocket upgrades.
+    server.set_pre_routing_handler([store, database, secure, authority](const Request& req, Response& res) {
+        const auto raw_path = std::string_view(req.target).substr(0, req.target.find('?'));
+        if (raw_path != req.path) {
+            return not_found(res);
+        }
+        const auto base_path = database->panel_base_path();
+        const bool bootstrap = base_path.empty();
+        const auto prefix = bootstrap ? panel_setup_prefix : std::string_view(base_path);
+        const bool read = req.method == "GET" || req.method == "HEAD";
+        const bool setup_redirect = bootstrap && read && (raw_path == "/" || raw_path == "/panel");
+        if (!setup_redirect && !has_panel_prefix(raw_path, prefix)) {
+            return not_found(res);
+        }
+        const auto suffix = setup_redirect ? std::string_view{} : raw_path.substr(prefix.size());
+        const bool redirect = setup_redirect || (!bootstrap && read && suffix.empty());
+        const auto access = route_access(suffix, req.method, bootstrap);
+        if (!redirect && access == Access::missing) {
+            return not_found(res);
+        }
+
         const auto host = req.get_header_value("Host");
         if (secure_transport(req) != secure || req.get_header_value_count("Host") != 1 ||
             (secure && host != authority)) {
             return reject(res, 403);
         }
+        if (redirect) {
+            const auto destination = setup_redirect ? setup_page(store->installed(),
+                                                                 store->session(session_cookie(req)).has_value())
+                                                    : "/";
+            res.set_redirect(std::string(prefix).append(destination), 303);
+            return Decision::Handled;
+        }
         const auto origin = (secure ? "https://" : "http://") + host;
-        if ((req.path == "/ws" || req.path.starts_with("/ws/")) && !exact_header(req, "Origin", origin)) {
+        if (access == Access::websocket && !exact_header(req, "Origin", origin)) {
             return reject(res, 403);
         }
-        if (req.method != "GET" && req.method != "HEAD") {
-            if (!exact_header(req, "Origin", origin) || !exact_header(req, "X-Wave-CSRF", "1") ||
-                !exact_header(req, "Content-Type", "application/json")) {
-                return reject(res, 403);
-            }
-            if (req.method == "POST" && (req.path == "/api/auth/setup" || req.path == "/api/auth/sign-in" ||
-                                         req.path == "/api/auth/sign-out")) {
-                return Decision::Unhandled;
-            }
+        if (!read && (!exact_header(req, "Origin", origin) || !exact_header(req, "X-Wave-CSRF", "1") ||
+                      !exact_header(req, "Content-Type", "application/json"))) {
+            return reject(res, 403);
         }
-        if (is_entry_asset(req) || store->session(session_cookie(req))) {
+        if (access == Access::entry || (access == Access::base_path_setup && !store->installed()) ||
+            store->session(session_cookie(req))) {
             return Decision::Unhandled;
         }
         return reject(res, 401);
     });
 
     const auto page = [store, secure, index = (site_dir / "index.html").string()](const Request& req, Response& res) {
+        const auto prefix = req.matches[1].str();
         const auto token = session_cookie(req);
         const auto session = store->session(token);
-        const auto current = session ? "/panel" : store->installed() ? "/sign-in" : "/setup";
+        const bool installed = store->installed();
+        const auto suffix = prefix == panel_setup_prefix ? setup_page(installed, session.has_value())
+                                                       : session ? "/" : installed ? "/sign-in" : "/setup";
+        const auto current = prefix + std::string(suffix);
         if (!session && !token.empty()) {
             set_cookie(res, secure, {});
         }
@@ -170,34 +284,43 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
         res.set_file_content(index, "text/html; charset=utf-8");
     };
-    for (const auto* route : {"/", "/index.html", "/setup", "/sign-in", "/panel"}) {
-        server.Get(route, page);
+    for (const auto route : page_routes) {
+        server.Get(panel_route(route), page);
     }
-    server.Get("/index.js", [file = (site_dir / "index.js").string()](const Request&, Response& res) {
-        res.set_file_content(file, "text/javascript; charset=utf-8");
-    });
-    server.Get("/index.wasm", [file = (site_dir / "index.wasm").string()](const Request&, Response& res) {
-        res.set_file_content(file, "application/wasm");
-    });
-    for (const auto* name : {"console.js", "terminal/xterm.js", "terminal/addon-fit.js"}) {
-        server.Get(std::string("/") + name, [file = (site_dir / name).string()](const Request&, Response& res) {
-            res.set_file_content(file, "text/javascript; charset=utf-8");
+    for (const auto& asset : site_assets) {
+        server.Get(panel_route(asset.path), [file = (site_dir / asset.path.substr(1)).string(),
+                                           type = std::string(asset.content_type)](const Request&, Response& res) {
+            res.set_file_content(file, type);
         });
     }
-    server.Get("/terminal/xterm.css",
-               [file = (site_dir / "terminal/xterm.css").string()](const Request&, Response& res) {
-                   res.set_file_content(file, "text/css; charset=utf-8");
-               });
-    for (const auto* name : {"wave.txt", "dear-imgui.txt", "poppins.txt", "nlohmann-json.txt",
-                             "nlohmann-json-third-party.txt", "implot.txt",
-                             "xterm.txt", "xterm-addon-fit.txt"}) {
-        server.Get(std::string("/licenses/") + name,
-                   [file = (site_dir / "licenses" / name).string()](const Request&, Response& res) {
-                       res.set_file_content(file, "text/plain; charset=utf-8");
-                   });
-    }
 
-    server.Post("/api/auth/setup", [store](const Request& req, Response& res) {
+    server.Post(std::string(panel_setup_prefix).append(base_path_route), [database, store](const Request& req,
+                                                                                         Response& res) {
+        if (store->installed() && !store->session(session_cookie(req))) {
+            res.status = 401;
+            return;
+        }
+        const auto input = Json::parse(req.body, nullptr, false);
+        const auto value = input.find(panel_base_path_key);
+        if (value == input.end() || !value->is_string() || !valid_panel_base_path(value->get_ref<const std::string&>())) {
+            res.status = 400;
+            return;
+        }
+        const auto& path = value->get_ref<const std::string&>();
+        try {
+            if (!database->save_panel_base_path(path)) {
+                not_found(res);
+                return;
+            }
+        } catch (const std::runtime_error&) {
+            res.status = 500;
+            return;
+        }
+        res.set_header("Location", path + '/');
+        res.status = 201;
+    });
+
+    server.Post(panel_route("/api/auth/setup"), [store](const Request& req, Response& res) {
         if (store->installed()) {
             res.status = 409;
             return;
@@ -225,7 +348,7 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
     });
 
-    server.Post("/api/auth/sign-in", [store, secure](const Request& req, Response& res) {
+    server.Post(panel_route(sign_in_route), [store, secure](const Request& req, Response& res) {
         const auto input = Json::parse(req.body, nullptr, false);
         const auto username = credential(input, "username");
         const auto password = credential(input, "password");
@@ -249,13 +372,13 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
     });
 
-    server.Post("/api/auth/sign-out", [store, secure](const Request& req, Response& res) {
+    server.Post(panel_route("/api/auth/sign-out"), [store, secure](const Request& req, Response& res) {
         store->sign_out(session_cookie(req));
         set_cookie(res, secure, {});
         res.status = 204;
     });
 
-    server.Post("/api/auth/admin", [store, secure](const Request& req, Response& res) {
+    server.Post(panel_route("/api/auth/admin"), [store, secure](const Request& req, Response& res) {
         const auto input = Json::parse(req.body, nullptr, false);
         const auto username = credential(input, "username");
         const auto current_password = credential(input, "current_password");
@@ -290,7 +413,7 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
     });
 
-    server.Get("/api/session", [store](const Request& req, Response& res) {
+    server.Get(panel_route("/api/session"), [store](const Request& req, Response& res) {
         if (const auto session = store->session(session_cookie(req))) {
             res.set_content(session_data(*session).dump(), "application/json");
         } else {
@@ -298,7 +421,7 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
     });
 
-    server.WebSocket(std::string(panel_socket), [store](const Request& req, httplib::ws::WebSocket& socket) {
+    server.WebSocket(panel_route(panel_socket), [store](const Request& req, httplib::ws::WebSocket& socket) {
         const auto token = session_cookie(req);
         const auto session = store->session(token);
         if (!session) {

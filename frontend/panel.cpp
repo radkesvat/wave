@@ -61,7 +61,7 @@ constexpr float server_min_work_height = 120;
 
 const char* entry_caption(EntryPage page)
 {
-    if (page == EntryPage::setup) {
+    if (page == EntryPage::setup || page == EntryPage::base_path) {
         return "Setup";
     }
     return page == EntryPage::sign_in ? "Welcome" : nullptr;
@@ -164,7 +164,9 @@ float draw_header(const PanelLayout& layout, ImVec2 viewport, bool in_workspace,
         return menu_x;
     }
     const auto core_state = reported_core_state(session);
-    const auto status = session.ready() && !core_state.empty()       ? std::format("WaterWall {}", core_state)
+    constexpr std::string_view status_prefix = "WaterWall ";
+    const bool has_status = session.ready() && !core_state.empty();
+    const auto status = has_status ? std::format("{}{}", status_prefix, core_state)
                         : session.status() == PreviewStatus::loading ? "Connecting to Wave…"
                                                                      : "Wave disconnected";
     const float status_size = theme::secondary_font_size;
@@ -175,8 +177,17 @@ float draw_header(const PanelLayout& layout, ImVec2 viewport, bool in_workspace,
     const float text_y = std::floor(center_y - status_size / 2);
     draw.AddCircleFilled(
         {status_x - 9, center_y}, 3,
-        packed(session.ready() && core_state == "running" ? Color::success : Color::warning));
-    draw.AddText({status_x, text_y}, packed(Color::secondary_text), status.c_str());
+        packed(has_status ? view::core_status_color(core_state, Color::warning) : Color::warning));
+    const auto state_color =
+        has_status ? view::core_status_color(core_state, Color::secondary_text) : Color::secondary_text;
+    if (state_color == Color::secondary_text) {
+        draw.AddText({status_x, text_y}, packed(Color::secondary_text), status.c_str());
+    } else {
+        const auto* suffix = status.data() + status_prefix.size();
+        draw.AddText({status_x, text_y}, packed(Color::secondary_text), status.data(), suffix);
+        const float state_x = status_x + ImGui::CalcTextSize(status.data(), suffix).x;
+        draw.AddText({state_x, text_y}, packed(state_color), suffix);
+    }
     ImGui::PopFont();
     return menu_x;
 }
@@ -575,28 +586,35 @@ void render_navigation(PanelState& state, const PanelLayout& layout, float canva
         ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
         // Selectable expands its hitbox by half the item spacing around the label area.
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {2 * nav_inset.x, 0});
-        navigation_link(state, static_cast<int>(navigation.front().page), navigation.front().label, 0,
-                        nav_inset.y, width, item_height, layout.narrow);
+        const auto origin = ImGui::GetWindowPos();
+        auto& draw = *ImGui::GetWindowDrawList();
+        const auto pinned_link = [&](const PanelNavigationItem& item, float left, float top,
+                                     float item_width) {
+            // Keep the highlight inside the border while preserving the full row hitbox.
+            constexpr float paint_inset = 3;
+            draw.PushClipRect({origin.x + paint_inset, origin.y},
+                              {origin.x + width - paint_inset, origin.y + height}, true);
+            navigation_link(state, static_cast<int>(item.page), item.label, left, top, item_width,
+                            item_height, layout.narrow);
+            draw.PopClipRect();
+        };
+        pinned_link(navigation.front(), 0, nav_inset.y, width);
         navigation_divider(width, nav_inset.y + row_height, 2 * theme::border_width);
 
         render_config_links(state, width, config_y, config_height, row_height, layout.narrow);
-        const auto origin = ImGui::GetWindowPos();
-        auto& draw = *ImGui::GetWindowDrawList();
         for (std::size_t row = 0; row < footer_item_count; ++row) {
             const auto& item = navigation[row + 1];
             if (layout.narrow) {
                 const float left = std::floor(row * width / footer_item_count);
                 const float right = std::floor((row + 1) * width / footer_item_count);
-                navigation_link(state, static_cast<int>(item.page), item.label, left, footer_y, right - left,
-                                item_height, true);
+                pinned_link(item, left, footer_y, right - left);
                 if (row != 0) {
                     draw.AddLineV(origin.x + left, origin.y + footer_y, origin.y + footer_y + item_height,
                                   packed(Color::divider), theme::border_width);
                 }
             } else {
                 const float y = footer_y + row * row_height;
-                navigation_link(state, static_cast<int>(item.page), item.label, 0, y, width, item_height,
-                                false);
+                pinned_link(item, 0, y, width);
                 if (row + 1 < footer_item_count) {
                     navigation_divider(width, y + item_height + 1);
                 }
@@ -621,7 +639,7 @@ const char* dialog_title(PanelDialog dialog)
     case PanelDialog::sign_out:
         return "Sign out of Wave";
     case PanelDialog::version:
-        return "Wave version";
+        return "Version";
     case PanelDialog::diagnostics:
         return "Connection diagnostics";
     case PanelDialog::input:
@@ -744,6 +762,7 @@ void render_dialogs(PanelState& state, PreviewSession& session)
         case PanelDialog::version: {
             const auto version = displayed_panel_version(session);
             ImGui::Text("Wave %.*s", static_cast<int>(version.size()), version.data());
+            view::wrapped(view::shared_version_help, Color::secondary_text);
             ImGui::TextWrapped("Dear ImGui %s / WebAssembly / WebGL 2", IMGUI_VERSION);
             ImGui::TextLinkOpenURL("Project releases", "https://github.com/radkesvat/wave/releases");
             break;

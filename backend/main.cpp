@@ -80,7 +80,7 @@ bool validate_site(const std::filesystem::path& site_dir, bool secure)
 void configure_workspace_routes(httplib::Server& server, const std::shared_ptr<wave::AuthStore>& store,
                                 const std::shared_ptr<wave::PanelDatabase>& database)
 {
-    server.WebSocket("/ws", [store](const httplib::Request& req, httplib::ws::WebSocket& socket) {
+    server.WebSocket(wave::panel_route("/ws"), [store](const httplib::Request& req, httplib::ws::WebSocket& socket) {
         using namespace std::chrono_literals;
         const auto session = wave::websocket_session(store, req);
         socket.set_read_timeout(1s);
@@ -145,7 +145,7 @@ int main(int argc, char* argv[])
             server = std::make_unique<httplib::Server>();
         }
         store = std::make_shared<wave::AuthStore>(database);
-        wave::configure_authenticated_routes(*server, options.site_dir, store, secure, authority);
+        wave::configure_authenticated_routes(*server, options.site_dir, store, database, secure, authority);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return EXIT_FAILURE;

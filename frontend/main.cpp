@@ -117,7 +117,9 @@ EM_JS(void, show_text_input, (bool active, float x, float y), { Module['setTextI
 EM_JS(void, copy_text, (const char* text), { Module['copyText'](UTF8ToString(text)); });
 
 EM_JS(bool, open_browser_link, (const char* url), {
-    window.open(UTF8ToString(url), '_blank', 'noopener,noreferrer');
+    const path = UTF8ToString(url);
+    const destination = path.startsWith('/') && !path.startsWith('//') ? Module['basePath'] + path : path;
+    window.open(destination, '_blank', 'noopener,noreferrer');
     return true;
 });
 
@@ -248,6 +250,8 @@ struct Application {
             panel.entry.page = wave::EntryPage::setup;
         } else if (panel.auth.page() == wave::AuthSession::Page::sign_in) {
             panel.entry.page = wave::EntryPage::sign_in;
+        } else if (panel.auth.page() == wave::AuthSession::Page::base_path) {
+            panel.entry.page = wave::EntryPage::base_path;
         }
         return true;
     }

@@ -98,7 +98,7 @@ InfoRows server_information(const Json& server, const StatusSamples& samples)
     const auto received = status_metric(field(server, "download_total"));
     return {{{"Host name", std::string(string_field(server, "name", unavailable))},
              {"Platform", std::string(string_field(server, "platform", unavailable))},
-             {"Panel version", std::string(string_field(server, "version", wave::version))},
+             {"Version", std::string(string_field(server, "version", wave::version))},
              {"Uptime", status_metric(field(server, "uptime_minutes"))
                             ? std::format("{}d {}h {}m", uptime / 1440, uptime / 60 % 24, uptime % 60)
                             : unavailable},

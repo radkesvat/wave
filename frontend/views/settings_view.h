@@ -17,6 +17,18 @@ struct SessionSettingsDraft {
     std::optional<std::uint64_t> request;
 };
 
+struct TlsSettingsDraft {
+    nlohmann::json source;
+    std::string domain;
+    std::string certificate_chain;
+    std::string private_key;
+    bool enabled = false;
+    bool dirty = false;
+    bool restart_required = false;
+    bool confirming = false;
+    std::optional<std::uint64_t> request;
+};
+
 struct SettingsViewState {
     enum class Tab {
         panel,
@@ -27,12 +39,7 @@ struct SettingsViewState {
     CanvasViewport scroll_bounds{};
     CoreSettingsDraft core;
     SessionSettingsDraft sessions;
-    nlohmann::json source;
-    std::array<char, 161> domain{};
-    std::array<char, 161> certificate_path{};
-    std::array<char, 161> private_key_path{};
-    bool dirty = false;
-    std::optional<std::uint64_t> apply_request;
+    TlsSettingsDraft tls;
     std::string administrator;
     std::array<char, 65> admin_username{};
     std::array<char, 257> current_password{};

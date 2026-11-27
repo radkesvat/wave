@@ -58,7 +58,8 @@ bool workspace_mutation(std::string_view action)
     constexpr std::string_view actions[] = {
         "install_core", "start_core", "stop_core", "restart_core", "update_panel",
         "create_core_config", "set_core_config_enabled", "remove_core_config", "restore_preview_backup",
-        "apply_settings", "apply_core_settings", "apply_session_settings", "apply_theme", "apply_donation",
+        "apply_settings", "apply_tls_settings", "apply_core_settings", "apply_session_settings",
+        "apply_theme", "apply_donation",
         "save_core_config",
         "create_config_user", "edit_config_user", "delete_config_user",
     };
@@ -208,6 +209,30 @@ bool update_tls_settings(const Json& input, Json& result)
            update_text(input, result, "private_key_path", 160);
 }
 
+Json panel_tls_settings(const Json& saved, const std::optional<TlsSettings>& active)
+{
+#ifdef WAVE_ENABLE_AUTH
+    constexpr bool supported = true;
+#else
+    constexpr bool supported = false;
+#endif
+    auto string_field = [&](const char* key) {
+        const auto field = saved.find(key);
+        return field != saved.end() && field->is_string() ? field->get<std::string>() : std::string{};
+    };
+    const auto flag = saved.find("enabled");
+    const bool enabled = flag != saved.end() && *flag == true;
+    const auto domain = string_field("domain");
+    const auto chain = string_field("certificate_chain");
+    const auto key = string_field("private_key");
+    const bool restart_required = enabled != active.has_value() ||
+                                  (enabled && (domain != active->domain ||
+                                               chain != active->certificate_chain.string() ||
+                                               key != active->private_key.string()));
+    return {{"enabled", enabled}, {"domain", domain}, {"certificate_chain", chain}, {"private_key", key},
+            {"supported", supported}, {"restart_required", restart_required}};
+}
+
 struct Reply {
     bool ok;
     std::string feedback;
@@ -225,6 +250,8 @@ class Preview {
     {
         data_["settings"]["session_expiry_days"] = database_->session_expiry_days();
         const auto& stored = database_->initial_contents();
+        data_["settings"]["tls"] = panel_tls_settings(stored.value("tls", Json::object()),
+                                                       database_->settings().tls);
         const auto saved_theme = stored.find("theme");
         const auto* key = saved_theme == stored.end() ? nullptr : saved_theme->get_ptr<const std::string*>();
         const auto preset = key ? theme::parse_preset(*key).value_or(theme::Preset::standard)
@@ -524,6 +551,41 @@ class Preview {
         }
         data_["settings"] = std::move(settings);
         return complete("Applied sample TLS settings.");
+    }
+
+    Reply apply_tls_settings(const Json& input)
+    {
+        const auto values = input.find("settings");
+        if (values == input.end() || !values->is_object()) {
+            return {false, "Choose whether to enable panel HTTPS."};
+        }
+        const auto enabled = values->find("enabled");
+        if (enabled == values->end() || !enabled->is_boolean()) {
+            return {false, "Choose whether to enable panel HTTPS."};
+        }
+
+        std::optional<TlsSettings> selected;
+        if (*enabled == true) {
+            const auto domain = values->find("domain");
+            const auto chain = values->find("certificate_chain");
+            const auto key = values->find("private_key");
+            if (domain == values->end() || !text_value(*domain, max_request_bytes, true) ||
+                chain == values->end() || !text_value(*chain, max_request_bytes, true) ||
+                key == values->end() || !text_value(*key, max_request_bytes, true)) {
+                return {false, "Enter the HTTPS hostname, certificate chain path, and private key path."};
+            }
+            selected = TlsSettings{domain->get<std::string>(), chain->get<std::string>(), key->get<std::string>()};
+        }
+
+        try {
+            const auto saved = database_->save_tls_settings(selected);
+            data_["settings"]["tls"] = panel_tls_settings(saved, database_->settings().tls);
+        } catch (const std::runtime_error& error) {
+            return {false, error.what()};
+        }
+        const bool restart = data_["settings"]["tls"]["restart_required"] == true;
+        return complete(restart ? "Saved panel TLS settings. Restart Wave to apply them."
+                                : "Saved panel TLS settings.");
     }
 
     Reply apply_session_settings(const Json& input)
@@ -1135,6 +1197,9 @@ class Preview {
         if (action == "apply_settings") {
             return apply_settings(input);
         }
+        if (action == "apply_tls_settings") {
+            return apply_tls_settings(input);
+        }
         if (action == "apply_session_settings") {
             return apply_session_settings(input);
         }
@@ -1186,7 +1251,7 @@ void configure_preview_routes(httplib::Server& server, std::shared_ptr<AuthStore
                               std::shared_ptr<PanelDatabase> database)
 {
     const auto preview = std::make_shared<Preview>(std::move(database));
-    server.WebSocket("/ws/overview",
+    server.WebSocket(panel_route("/ws/overview"),
                      [preview, store](const httplib::Request& req, httplib::ws::WebSocket& socket) {
                          if (!websocket_session(store, req)()) {
                              socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
@@ -1196,8 +1261,8 @@ void configure_preview_routes(httplib::Server& server, std::shared_ptr<AuthStore
                              socket.close();
                          }
                      });
-    server.WebSocket("/ws/preview", [preview, store = std::move(store)](const httplib::Request& req,
-                                                                        httplib::ws::WebSocket& socket) {
+    server.WebSocket(panel_route("/ws/workspace"), [preview, store = std::move(store)](const httplib::Request& req,
+                                                                                   httplib::ws::WebSocket& socket) {
         preview->serve(socket, websocket_session(store, req));
     });
 }

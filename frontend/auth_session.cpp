@@ -9,25 +9,40 @@ namespace {
 // clang-format off
 EM_JS(int, read_auth_page, (), {
     if (location.protocol !== 'http:' && location.protocol !== 'https:') return 0;
-    switch (location.pathname) {
+    switch (location.pathname.slice(Module['basePath'].length)) {
         case '/setup': return 1;
         case '/sign-in': return 2;
-        case '/panel': return 3;
+        case '/': return 3;
+        case '/base-path': return 4;
         default: return 0;
     }
 });
 
 EM_JS(void, send_auth_request, (AuthSession* session, const char* path_value, const char* json), {
     const path = UTF8ToString(path_value);
-    fetch(path, {
+    const basePath = Module['basePath'];
+    fetch(basePath + path, {
         method: 'POST', mode: 'same-origin', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
         headers: { 'Content-Type': 'application/json', 'X-Wave-CSRF': '1' },
         body: UTF8ToString(json), signal: AbortSignal.timeout(10000),
     }).then(response => {
-        const sessionEnded = (path === '/api/auth/admin' || path === '/api/auth/sign-out') &&
-            response.status === 401;
-        if (response.ok || sessionEnded || (path === '/api/auth/setup' && response.status === 409)) {
-            location.replace('/');
+        if (path === '/api/auth/base-path' && response.status === 201) {
+            const locationHeader = response.headers.get('Location');
+            if (locationHeader?.startsWith('/') && !locationHeader.startsWith('//')) {
+                const destination = new URL(locationHeader, location.origin);
+                if (destination.origin === location.origin) {
+                    location.replace(destination.href);
+                    return;
+                }
+            }
+            Module['_wave_auth_request_failed'](session, 0);
+            return;
+        }
+        const sessionEnded = response.status === 401 && (path === '/api/auth/admin' ||
+            path === '/api/auth/sign-out' || path === '/api/auth/base-path');
+        if ((response.ok && path !== '/api/auth/base-path') || sessionEnded ||
+            (path === '/api/auth/setup' && response.status === 409)) {
+            location.replace(basePath + '/');
         } else {
             Module['_wave_auth_request_failed'](session, response.status);
         }
@@ -40,8 +55,9 @@ EM_JS(void, monitor_session, (AuthSession* session), {
         if (event.persisted) location.reload();
     });
     const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const basePath = Module['basePath'];
     const connect = () => {
-        const socket = new WebSocket(protocol + location.host + '/ws/panel');
+        const socket = new WebSocket(protocol + location.host + basePath + '/ws/panel');
         socket.addEventListener('message', event => {
             const data = JSON.parse(event.data);
             if (data.type === 'session' && typeof data.username === 'string') {
@@ -53,16 +69,16 @@ EM_JS(void, monitor_session, (AuthSession* session), {
         socket.addEventListener('close', async event => {
             Module['_wave_auth_identity'](session, 0);
             if (event.code === 1008) {
-                location.replace('/');
+                location.replace(basePath + '/');
                 return;
             }
             // A failed upgrade has no HTTP status in the WebSocket API.
             try {
-                const response = await fetch('/api/session', {
+                const response = await fetch(basePath + '/api/session', {
                     credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(5000),
                 });
                 if (response.status === 401) {
-                    location.replace('/');
+                    location.replace(basePath + '/');
                     return;
                 }
             } catch {}
@@ -105,6 +121,9 @@ void AuthSession::submit(Action action, const nlohmann::json& input)
     case Action::update_administrator:
         path = "/api/auth/admin";
         break;
+    case Action::base_path:
+        path = "/api/auth/base-path";
+        break;
     }
     send_auth_request(this, path, input.dump().c_str());
 }
@@ -118,6 +137,8 @@ void AuthSession::request_failed(int status)
         error_ = "Choose a less predictable password. A longer password may help.";
     } else if (action_ == Action::setup && status == 400) {
         error_ = "Check the username and password requirements.";
+    } else if (action_ == Action::base_path && status == 400) {
+        error_ = "Enter a path such as /panel with a leading slash and no trailing slash.";
     } else if (action_ == Action::sign_in && status == 401) {
         error_ = "The username or password was rejected.";
     } else if (action_ == Action::update_administrator && status == 403) {

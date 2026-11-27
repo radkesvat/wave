@@ -162,6 +162,7 @@
     </main>
     <script>
       var Module = (() => {
+        const basePath = location.pathname.slice(0, location.pathname.lastIndexOf("/"));
         const canvas = document.getElementById("canvas");
         const startup = document.getElementById("startup");
         const controls = document.getElementById("panel-controls");
@@ -505,7 +506,7 @@
         window.addEventListener("error", showStartupError, true);
         window.addEventListener("unhandledrejection", showStartupError);
         return {
-          canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
+          basePath, canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
           updateConfigLinks, updateConfigTabs,
           panelFocus, setTextInput, installTextInput, copyText, applyAppearance, updateConsole,
           onAbort: showStartupError

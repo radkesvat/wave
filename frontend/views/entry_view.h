@@ -11,7 +11,8 @@ enum class EntryPage {
     checking,
     workspace,
     sign_in,
-    setup
+    setup,
+    base_path
 };
 
 struct EntryViewState {
@@ -19,6 +20,7 @@ struct EntryViewState {
     std::string message;
     std::array<char, 65> username{};
     std::array<char, 257> password{};
+    std::string base_path = "/panel";
 };
 
 void render_entry(EntryViewState& state, AuthSession& session, float entry_top);

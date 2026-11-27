@@ -15,13 +15,15 @@ class AuthSession {
         checking,
         setup,
         sign_in,
-        panel
+        panel,
+        base_path
     };
     enum class Action {
         setup,
         sign_in,
         sign_out,
-        update_administrator
+        update_administrator,
+        base_path
     };
 
     void start();

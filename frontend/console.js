@@ -164,7 +164,7 @@ export function createConsole(panel, copyText, appearance) {
     }
 
     function connect(connection) {
-        const url = new URL("/ws/console", window.location.href);
+        const url = new URL("./ws/console", import.meta.url);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
         try {
             connection.socket = new WebSocket(url);

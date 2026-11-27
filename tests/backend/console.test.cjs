@@ -7,7 +7,7 @@ const { request } = require('node:http');
 const { dirname, join } = require('node:path');
 const { test } = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
-const { authFixture, timeout } = require('./auth_fixture.cjs');
+const { authFixture, panelBasePath, timeout } = require('./auth_fixture.cjs');
 
 async function administrator(t) {
     const fixture = await authFixture(t, undefined, { encrypted: false });
@@ -16,7 +16,7 @@ async function administrator(t) {
     function post(action, data = {}, cookie) {
         const headers = { Origin: fixture.origin, 'Content-Type': 'application/json', 'X-Wave-CSRF': '1' };
         if (cookie) headers.Cookie = cookie;
-        return fetch(new URL(`/api/auth/${action}`, fixture.origin), {
+        return fetch(new URL(`${fixture.basePath}/api/auth/${action}`, fixture.origin), {
             method: 'POST', headers, body: JSON.stringify(data), signal: AbortSignal.timeout(timeout),
         });
     }
@@ -28,7 +28,7 @@ async function administrator(t) {
 
 function upgradeStatus(origin, headers) {
     return new Promise((resolve, reject) => {
-        const probe = request(new URL('/ws/console', origin), {
+        const probe = request(new URL(`${panelBasePath}/ws/console`, origin), {
             headers: {
                 Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13',
                 'Sec-WebSocket-Key': randomBytes(16).toString('base64'), ...headers,
@@ -65,8 +65,8 @@ async function until(check, failure) {
     assert.fail(failure());
 }
 
-async function consoleTerminal(t, { origin, cookie }, cols, rows) {
-    const endpoint = new URL('/ws/console', origin);
+async function consoleTerminal(t, { origin, basePath, cookie }, cols, rows) {
+    const endpoint = new URL(`${basePath}/ws/console`, origin);
     endpoint.protocol = 'ws:';
     const socket = new WebSocket(endpoint, { headers: { Cookie: cookie, Origin: origin } });
     socket.binaryType = 'arraybuffer';

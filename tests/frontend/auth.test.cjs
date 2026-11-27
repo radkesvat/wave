@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { readFile, writeFile } = require('node:fs/promises');
 const { test } = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
 const { chromium } = require('playwright-core');
@@ -134,6 +135,18 @@ async function submitCredentials(page, { username, password }, pastePassword = f
     await page.keyboard.press('Enter');
 }
 
+async function submitBasePath(page, value) {
+    const [field] = await visibleInputs(page, 110, viewport.height - 30);
+    assert.ok(field, 'The base path dialog has a visible field.');
+    if (value === undefined) {
+        await page.mouse.click(field.x, field.y, { delay: 40 });
+        await page.locator('#wave-text-input').waitFor({ state: 'visible', timeout });
+    } else {
+        await fillInput(page, field, value);
+    }
+    await page.keyboard.press('Enter');
+}
+
 async function waitForShellExit(pid) {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
@@ -148,15 +161,16 @@ async function waitForShellExit(pid) {
     assert.fail(`Console shell ${pid} is still running after sign-out.`);
 }
 
-test('authenticates an administrator and closes the terminal on sign-out', async t => {
+test('sets a panel base path, authenticates an administrator and closes the terminal on sign-out', async t => {
     assert.ok(process.env.WAVE_SITE_DIR, 'Set WAVE_SITE_DIR to a built Wave frontend.');
-    const fixture = await authFixture(t, process.env.WAVE_SITE_DIR, { encrypted: false });
+    const fixture = await authFixture(t, process.env.WAVE_SITE_DIR, { encrypted: false, basePath: null });
     await fixture.start();
     const browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader'] });
     t.after(() => browser.close());
     const context = await browser.newContext({ viewport });
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: fixture.origin });
     const page = await context.newPage();
+    const base = '/control-room/wave';
     const credentials = { username: 'fixture-browser', password: 'fake browser test passphrase 5Vx2m 🔒' };
     const sessionGate = Promise.withResolvers();
     await page.routeWebSocket('**/ws/panel', socket => {
@@ -166,10 +180,31 @@ test('authenticates an administrator and closes the terminal on sign-out', async
         });
     });
 
-    await page.goto(fixture.origin + '/panel');
+    await page.goto(fixture.origin + '/');
+    await waitForStatus(page, 'Panel base path. Setup.');
+    await expectEntryTitleStrip(page, 'Setup');
+    assert.equal(new URL(page.url()).pathname, '/_wave-setup/base-path');
+    const baseEndpoint = '**/_wave-setup/api/auth/base-path';
+    await page.route(baseEndpoint, route => route.fulfill({ status: 400 }), { times: 1 });
+    const defaultPath = page.waitForResponse(baseEndpoint, { timeout });
+    await submitBasePath(page);
+    const rejectedPath = await defaultPath;
+    assert.equal(rejectedPath.status(), 400);
+    assert.deepEqual(rejectedPath.request().postDataJSON(), { 'panel-base-path': '/panel' });
+    await waitForStatus(page, /^Panel base path\.(?! Operation in progress\.)/);
+    const chosenPath = page.waitForResponse(baseEndpoint, { timeout });
+    await submitBasePath(page, base);
+    assert.equal((await chosenPath).status(), 201);
     await waitForStatus(page, 'Set up administrator. Setup.');
     await expectEntryTitleStrip(page, 'Setup');
-    assert.equal((await context.request.get(fixture.origin + '/terminal/xterm.js')).status(), 401);
+    assert.equal(new URL(page.url()).pathname, base + '/setup');
+    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8'))['panel-base-path'], base);
+    assert.equal((await context.request.get(fixture.origin + base + '/terminal/xterm.js')).status(), 401);
+    for (const path of ['/', '/panel', '/api/session', '/_wave-setup/base-path', base + '-other/']) {
+        const outside = await context.request.get(fixture.origin + path);
+        assert.equal(outside.status(), 404, path);
+        assert.match(await outside.text(), /<h1>404 Not Found<\/h1>/);
+    }
     const setupEndpoint = '**/api/auth/setup';
     const initialSetupFrame = await entryDialogFrame(page);
     assert.equal(await entrySpinner(page, initialSetupFrame), false, 'The setup dialog starts idle.');
@@ -277,6 +312,23 @@ test('authenticates an administrator and closes the terminal on sign-out', async
     assert.equal((await signOut).status(), 204);
     await waitForStatus(page, 'Sign in to Wave. Welcome.');
     if (shellPid) await waitForShellExit(shellPid);
-    await page.goto(fixture.origin + '/panel');
+    await page.goto(fixture.origin + base + '/');
     await waitForStatus(page, 'Sign in to Wave. Welcome.');
+
+    await fixture.stop();
+    const state = JSON.parse(await readFile(fixture.database, 'utf8'));
+    delete state['panel-base-path'];
+    await writeFile(fixture.database, JSON.stringify(state));
+    await fixture.start();
+    await page.goto(fixture.origin + '/');
+    await waitForStatus(page, 'Sign in to Wave. Welcome.');
+    assert.equal(new URL(page.url()).pathname, '/_wave-setup/sign-in');
+    await submitCredentials(page, credentials);
+    await waitForStatus(page, 'Panel base path. Setup.');
+    const recovered = '/recovered/wave';
+    await submitBasePath(page, recovered);
+    await waitForStatus(page, workspace);
+    assert.equal(new URL(page.url()).pathname, recovered + '/');
+    assert.equal((await context.request.get(fixture.origin + base + '/')).status(), 404);
+    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8'))['panel-base-path'], recovered);
 });

@@ -1,25 +1,30 @@
 const assert = require('node:assert/strict');
 const { createHmac, randomBytes } = require('node:crypto');
 const { once } = require('node:events');
-const { readFile, writeFile } = require('node:fs/promises');
+const { readFile, unlink, writeFile } = require('node:fs/promises');
+const http = require('node:http');
 const https = require('node:https');
 const { join } = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
 const { test } = require('node:test');
 const { authFixture, timeout } = require('./auth_fixture.cjs');
+const { tlsFixture } = require('./tls_fixture.cjs');
 
 const cookiePrefix = '__Host-wave_session=';
 const secondsPerDay = 86400;
 const expirySeconds = 3 * secondsPerDay;
 
-function client(fixture) {
+function client(fixture, basePath = fixture.basePath ?? '') {
+    const origin = new URL(fixture.origin);
+    const transport = origin.protocol === 'https:' ? https : http;
+
     async function request(path, { method = 'GET', headers = {}, data, ca = fixture.ca,
-        hostname = fixture.hostname } = {}) {
+        hostname = origin.hostname } = {}) {
         const body = data === undefined ? undefined : JSON.stringify(data);
-        const url = new URL(path, fixture.origin);
+        const url = new URL(basePath + path, origin);
         url.hostname = hostname;
         return new Promise((resolve, reject) => {
-            const req = https.request(url, {
+            const req = transport.request(url, {
                 method, headers, ca, lookup: fixture.lookup, servername: hostname, agent: false,
                 signal: AbortSignal.timeout(timeout),
             }, async response => {
@@ -45,8 +50,8 @@ function client(fixture) {
 
     function upgrade(headers, path = '/ws/panel') {
         return new Promise((resolve, reject) => {
-            const req = https.request(fixture.origin + path, {
-                ca: fixture.ca, lookup: fixture.lookup, servername: fixture.hostname, agent: false,
+            const req = transport.request(new URL(basePath + path, origin), {
+                ca: fixture.ca, lookup: fixture.lookup, servername: origin.hostname, agent: false,
                 headers: {
                     Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13',
                     'Sec-WebSocket-Key': randomBytes(16).toString('base64'), ...headers,
@@ -94,10 +99,18 @@ function frameReader(socket, initial) {
 
 function clientFrame(opcode, data) {
     const payload = Buffer.from(data);
-    assert.ok(payload.length < 126);
+    assert.ok(payload.length <= 65535);
+    const header = Buffer.alloc(payload.length < 126 ? 2 : 4);
+    header[0] = 0x80 | opcode;
+    if (header.length === 2) {
+        header[1] = 0x80 | payload.length;
+    } else {
+        header[1] = 0x80 | 126;
+        header.writeUInt16BE(payload.length, 2);
+    }
     const mask = randomBytes(4);
     const maskedPayload = payload.map((byte, index) => byte ^ mask[index % mask.length]);
-    return Buffer.concat([Buffer.from([0x80 | opcode, 0x80 | payload.length]), mask, maskedPayload]);
+    return Buffer.concat([header, mask, maskedPayload]);
 }
 
 function assertTerminalStatus(frame, type) {
@@ -142,17 +155,17 @@ test('HTTPS verifies trust and enforces durable JWT sessions on HTTP and WebSock
     await assert.rejects(request('/setup', { ca: [] }), { code: 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY' });
     await assert.rejects(request('/setup', { hostname: 'nested.panel.example.test' }),
         { code: 'ERR_TLS_CERT_ALTNAME_INVALID' });
-    const entry = await request('/panel');
+    const entry = await request('/');
     assert.equal(entry.status, 303);
-    assert.equal(entry.headers.location, '/setup');
+    assert.equal(entry.headers.location, `${fixture.basePath}/setup`);
     assert.equal((await request('/', { headers: { Host: 'other.example.invalid' } })).status, 403);
     assert.equal((await request('/api/session')).status, 401);
-    assert.equal((await upgrade({ Origin: fixture.origin }, '/ws/preview')).status, 401);
+    assert.equal((await upgrade({ Origin: fixture.origin }, '/ws/workspace')).status, 401);
     assert.equal((await post('setup', credentials, { 'X-Wave-CSRF': '0' })).status, 403);
     assert.equal((await post('setup', credentials, { Origin: 'https://other.example.invalid' })).status, 403);
     const setup = await Promise.all([post('setup', credentials), post('setup', credentials)]);
     assert.deepEqual(setup.map(response => response.status).sort(), [201, 409]);
-    assert.equal((await request('/panel')).headers.location, '/sign-in');
+    assert.equal((await request('/')).headers.location, `${fixture.basePath}/sign-in`);
 
     const cookie = assertCookie(await post('sign-in', credentials), expirySeconds);
     const { auth } = JSON.parse(await readFile(fixture.database, 'utf8'));
@@ -248,7 +261,7 @@ test('saves the session expiry in days for new sign-ins and retains it after res
     await fixture.start();
     assert.equal((await post('setup', credentials)).status, 201);
     const existing = await signIn(3);
-    const ws = await upgrade(existing.headers, '/ws/preview');
+    const ws = await upgrade(existing.headers, '/ws/workspace');
     assert.equal(ws.status, 101);
     try {
         const first = await ws.frame();
@@ -290,6 +303,112 @@ test('saves the session expiry in days for new sign-ins and retains it after res
     await assertCurrentExpiry(existing);
     await assertCurrentExpiry(updated);
     await signIn(1);
+});
+
+test('saves validated panel TLS settings for restart and keeps preview backups separate', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    const { ca, chainPath, keyPath } = await tlsFixture(fixture.cwd);
+    const secure = { ...fixture, ca, origin: `https://${fixture.hostname}:${new URL(fixture.origin).port}` };
+    const credentials = { username: 'fixture-admin', password: 'fixture TLS switch passphrase 3Bm8Q' };
+    const savedFields = { domain: fixture.hostname, certificate_chain: chainPath, private_key: keyPath };
+    const emptyFields = { domain: '', certificate_chain: '', private_key: '' };
+    const tlsState = (enabled, restart_required, fields = savedFields) =>
+        ({ enabled, ...fields, supported: true, restart_required });
+    const readDatabase = () => readFile(fixture.database, 'utf8');
+    let id = 0;
+
+    async function withPreview(deployment, expected, usePreview) {
+        const { post, request, upgrade } = client(deployment);
+        const signIn = await post('sign-in', credentials);
+        assert.equal(signIn.status, 204);
+        const cookie = deployment === secure ? assertCookie(signIn, expirySeconds)
+            : signIn.headers['set-cookie'][0].split(';', 1)[0];
+        if (deployment === fixture) assert.match(cookie, /^wave_session=/);
+        const headers = { Cookie: cookie, Origin: deployment.origin };
+        const ws = await upgrade(headers, '/ws/workspace');
+        assert.equal(ws.status, 101);
+        try {
+            const first = await ws.frame();
+            assert.equal(first.opcode, 1);
+            assert.deepEqual(JSON.parse(first.payload).data.settings.tls, expected);
+            async function apply(action, body) {
+                const request_id = ++id;
+                ws.socket.write(clientFrame(1, JSON.stringify({ action, ...body, request_id })));
+                for (;;) {
+                    const frame = await ws.frame();
+                    assert.equal(frame.opcode, 1);
+                    const reply = JSON.parse(frame.payload);
+                    if (reply.request_id === request_id) return reply;
+                }
+            }
+            await usePreview(apply, async () => {
+                assert.equal((await request('/api/session', { headers })).status, 200);
+            });
+        } finally {
+            ws.socket.destroy();
+        }
+    }
+
+    await fixture.start();
+    const plain = client(fixture);
+    assert.equal((await plain.upgrade({ Origin: fixture.origin }, '/ws/workspace')).status, 401);
+    assert.equal((await plain.post('setup', credentials)).status, 201);
+    await withPreview(fixture, tlsState(false, false, emptyFields), async (apply, assertListener) => {
+        const save = settings => apply('apply_tls_settings', { settings });
+        const before = await readDatabase();
+        for (const invalid of [{ enabled: 'true' }, { enabled: true },
+            { enabled: true, ...savedFields, domain: 'nested.panel.example.test' },
+            { enabled: true, ...savedFields, private_key: join(fixture.cwd, 'missing.key') }]) {
+            const reply = await save(invalid);
+            assert.equal(reply.ok, false);
+            assert.equal(reply.feedback_in_logs_only, true);
+            assert.ok(reply.data.logs.some(row => row.level === 'error' && row.message === reply.feedback));
+            assert.deepEqual(reply.data.settings.tls, tlsState(false, false, emptyFields));
+        }
+        assert.equal(await readDatabase(), before);
+
+        const enabled = await save({ enabled: true, ...savedFields });
+        assert.equal(enabled.ok, true);
+        assert.deepEqual(enabled.data.settings.tls, tlsState(true, true));
+        assert.deepEqual(JSON.parse(await readDatabase()).tls, { enabled: true, ...savedFields });
+        const changedSample = await apply('apply_settings', { settings: { domain: 'sample.example.test' } });
+        assert.equal(changedSample.ok, true);
+        assert.equal(changedSample.data.settings.domain, 'sample.example.test');
+
+        const restored = await apply('restore_preview_backup', { backup: {
+            format: 'wave-preview-backup', version: 1, configs: [],
+            settings: { domain: 'backup.example.test', certificate_path: '', private_key_path: '',
+                tls: { enabled: false } },
+        } });
+        assert.equal(restored.ok, true);
+        assert.equal(restored.data.settings.domain, 'backup.example.test');
+        assert.deepEqual(restored.data.settings.tls, tlsState(true, true));
+        assert.deepEqual(JSON.parse(await readDatabase()).tls, { enabled: true, ...savedFields });
+        await assertListener();
+    });
+
+    await fixture.stop();
+    await fixture.start({}, { encrypted: true });
+    await withPreview(secure, tlsState(true, false), async (apply, assertListener) => {
+        const save = settings => apply('apply_tls_settings', { settings });
+        const alternate = { ...savedFields, domain: 'second.example.test' };
+        const changed = await save({ enabled: true, ...alternate });
+        assert.equal(changed.ok, true);
+        assert.deepEqual(changed.data.settings.tls, tlsState(true, true, alternate));
+        const reverted = await save({ enabled: true, ...savedFields });
+        assert.equal(reverted.ok, true);
+        assert.deepEqual(reverted.data.settings.tls, tlsState(true, false));
+        await unlink(keyPath);
+        const disabled = await save({ enabled: false });
+        assert.equal(disabled.ok, true);
+        assert.deepEqual(disabled.data.settings.tls, tlsState(false, true));
+        assert.deepEqual(JSON.parse(await readDatabase()).tls, { enabled: false, ...savedFields });
+        await assertListener();
+    });
+
+    await fixture.stop();
+    await fixture.start();
+    await withPreview(fixture, tlsState(false, false), async (_apply, assertListener) => assertListener());
 });
 
 test('closes the TLS terminal when the shell exits during a final keystroke',
@@ -345,7 +464,7 @@ test('administrator changes require the current password and revoke all sessions
     assert.equal((await post('admin', change)).status, 401);
     const first = { Cookie: assertCookie(await post('sign-in', original), expirySeconds), Origin: fixture.origin };
     const second = { Cookie: assertCookie(await post('sign-in', original), expirySeconds), Origin: fixture.origin };
-    const ws = await upgrade(second, '/ws/preview');
+    const ws = await upgrade(second, '/ws/workspace');
     assert.equal(ws.status, 101);
     try {
         assert.equal((await ws.frame()).opcode, 1);
@@ -383,7 +502,7 @@ test('checks administrator password format and strength on setup and replacement
         assert.equal((await post('setup', { ...credentials, password })).status, 400, reason);
     }
     assert.equal((await post('setup', { ...credentials, password: 'Password1' })).status, 422);
-    assert.equal((await request('/panel')).headers.location, '/setup');
+    assert.equal((await request('/')).headers.location, `${fixture.basePath}/setup`);
     assert.equal((await post('setup', credentials)).status, 201);
     const headers = { Cookie: assertCookie(await post('sign-in', credentials), expirySeconds), Origin: fixture.origin };
     const oldHash = JSON.parse(await readFile(fixture.database, 'utf8')).admin[0].password;

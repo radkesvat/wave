@@ -8,6 +8,8 @@ const { dirname, join, resolve } = require('node:path');
 const { createInterface } = require('node:readline');
 const { bindHost, copyBackend, hostname, timeout, tlsFixture, writeTlsConfig } = require('./tls_fixture.cjs');
 
+const panelBasePath = '/panel';
+
 async function loopbackPort() {
     const listener = createServer();
     listener.listen(0, bindHost);
@@ -78,7 +80,7 @@ async function seedCore(backend, { executable = false, logs = [], observeShutdow
         terminatedFile: join(directory, 'fixture-terminated') };
 }
 
-async function authFixture(t, webSite, { encrypted = true, prepareCore = true } = {}) {
+async function authFixture(t, webSite, { encrypted = true, prepareCore = true, basePath = panelBasePath } = {}) {
     assert.ok(process.env.WAVE_BACKEND, 'Set WAVE_BACKEND to a native Wave build.');
     const cwd = await mkdtemp(join(tmpdir(), 'wave-auth-test-'));
     let server;
@@ -118,10 +120,11 @@ async function authFixture(t, webSite, { encrypted = true, prepareCore = true } 
     const tls = encrypted ? await tlsFixture(cwd) : undefined;
     const installAttempted = prepareCore ? true : undefined;
     if (tls) {
-        await writeTlsConfig(database, tls, { listen, installAttempted });
+        await writeTlsConfig(database, tls, { listen, installAttempted, basePath });
     } else {
-        await writeFile(database, JSON.stringify({ listen, waterwall_install_attempted: installAttempted }),
-            { mode: 0o600 });
+        await writeFile(database, JSON.stringify({
+            listen, 'panel-base-path': basePath ?? undefined, waterwall_install_attempted: installAttempted,
+        }), { mode: 0o600 });
     }
     const origin = encrypted ? `https://${hostname}:${port}` : `http://${bindHost}:${port}`;
     const args = ['--site-dir', siteDir];
@@ -134,7 +137,7 @@ async function authFixture(t, webSite, { encrypted = true, prepareCore = true } 
         }
     }
 
-    async function start(overrides = {}) {
+    async function start(overrides = {}, { encrypted: useTls = encrypted } = {}) {
         // Give interactive shells a clean startup environment and private history.
         const env = {
             PATH: process.env.PATH,
@@ -152,15 +155,15 @@ async function authFixture(t, webSite, { encrypted = true, prepareCore = true } 
                 once(lines, 'line', { signal: AbortSignal.timeout(timeout) }),
                 closed.then(([code, signal]) => { throw new Error(`Fixture stopped (${signal ?? code}). ${errors}`); }),
             ]);
-            assert.equal(line, encrypted ? `Authenticated HTTPS listening on port ${port}`
-                : `Listening on ${origin}/`);
+            assert.equal(line, useTls ? `Authenticated HTTPS listening on port ${port}`
+                : `Listening on http://${bindHost}:${port}/`);
         } finally {
             lines.close();
         }
     }
 
-    return { cwd, backend, ca: tls?.ca, rootPath: tls?.rootPath, hostname, bindHost, lookup, origin,
+    return { cwd, backend, ca: tls?.ca, rootPath: tls?.rootPath, hostname, bindHost, lookup, origin, basePath,
         index, database, start, stop };
 }
 
-module.exports = { authFixture, rotatingLogPath, seedCore, timeout };
+module.exports = { authFixture, panelBasePath, rotatingLogPath, seedCore, timeout };

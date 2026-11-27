@@ -161,7 +161,8 @@ If an existing backend build directory was configured from `backend/`, add
 The executable is `build/backend-release/wave-backend` or
 `build/backend-debug/wave-backend`. After building the frontend with the
 `web-release` preset, start the backend from the Wave root and open
-[the local Wave preview](http://127.0.0.1:2045/).
+[the local setup URL](http://127.0.0.1:2045/) for the first visit. Use the
+saved base path for later visits. [Panel base path](authentication.md#set-the-panel-base-path)
 
 Wave creates `wave-db.json` beside its executable on first launch and fills
 in any missing listener settings. The default is `0.0.0.0:2045`, which binds
@@ -202,18 +203,19 @@ screen, tap the marker and tap outside the help to dismiss it.
 
 ### First-run setup
 
-An empty `admin` array in the database opens **Set up administrator**. Enter
-the username and password, then select **Create administrator**. Sign in
-with those credentials to open the workspace. A browser with a valid
-session opens the workspace directly.
+When the database lacks `panel-base-path`, Wave asks you to choose a base path,
+starting with `/panel`. An empty `admin` array then opens **Set up administrator**.
+Enter the username and password, then select **Create administrator**. Sign in
+with those credentials to open the workspace. A browser with a valid session
+opens the workspace directly.
 
 Use **Settings → Panel → Administrator** to change the username or password.
 Saving administrator credentials signs out every active session. In the
 **Panel** tab, **Session expiry (days)** controls how long new sign-ins last
-and defaults to 3 days. The **Preview TLS** box shows the sample domain,
-certificate chain path, and private key path.
-**Apply changes** keeps those sample values for the current preview process.
-Configure deployment TLS in `wave-db.json`. [Administrator setup](authentication.md#set-up-the-administrator)
+and defaults to 3 days. The **TLS** box enables or disables HTTPS and saves the
+domain, certificate chain path, and private key path. The fields are dimmed
+and locked when **Enable TLS** is off. Saved TLS changes apply after the Wave
+backend restarts. [TLS configuration](authentication.md#configure-tls)
 
 ### Preview controls and server options
 
@@ -259,10 +261,11 @@ and must contain `index.html`, `index.js`, and `index.wasm`. Set `listen.host`
 and `listen.port` in `wave-db.json` to choose the bind address and port. Use
 `127.0.0.1` for local-only access. For an HTTP listener, port `0` lets the
 operating system choose a free port. The backend prints its address and
-bound port at startup. The `/ws` endpoint echoes text messages over the same
-port after authentication. Panel assets are served with `Cache-Control: no-store`.
+bound port at startup. The `/panel/ws` endpoint echoes text messages over the
+same port after authentication. Route examples use the default `/panel` base
+path. Panel assets are served with `Cache-Control: no-store`.
 
-The signed-in workspace opens `/ws/preview` on the same host and port. A JSON
+The signed-in workspace opens `/panel/ws/workspace` on the same host and port. A JSON
 frame with `type` set to `snapshot` carries logs, server metrics, config names,
 and settings in `data`. Requests specify an `action` and its fields. The
 server replies with a snapshot and action feedback. Config contents and
@@ -275,8 +278,13 @@ when a reply arrives after the form has been closed or replaced. If the
 socket closes between render frames, the form can still read a reply it
 already received. A form still waiting for its reply reports the disconnect.
 
-Send one or more of `domain`, `certificate_path`, and `private_key_path`
-in the `settings` object of an `apply_settings` request.
+The snapshot's `settings.tls` object reports the saved `enabled`, `domain`,
+`certificate_chain`, and `private_key` values, along with `supported` and
+`restart_required`. Send `apply_tls_settings` with a `settings` object
+containing `enabled`. When enabling, include `domain`, `certificate_chain`,
+and `private_key` so the backend can validate them before saving. When
+disabling, the backend retains the saved paths. The legacy `apply_settings`
+action still updates the sample values used by preview backups.
 
 Wave samples Linux CPU, RAM, and network counters twice per second,
 including when browsers are disconnected. CPU shows aggregate busy time
@@ -293,14 +301,14 @@ Unavailable readings appear as gaps after a chart has data. The charts keep
 up to 19 samples in memory and draw the latest one at **Now**. Hover over
 a plot for its sample values. History starts fresh when Wave restarts.
 
-The authenticated `/ws/overview` endpoint sends one JSON text frame and closes
+The authenticated `/panel/ws/overview` endpoint sends one JSON text frame and closes
 the connection. It reports the same current `cpu_percent`, `memory_used_gib`,
 `memory_total_gib`, and `uptime_minutes` as the workspace. Its
 `download_mib_per_second` array contains up to 13 recent download samples,
 oldest first.
 
-With the default HTTP listener, open `http://<server-ip>:2045/` from another
-machine to reach the sign-in page. [HTTPS configuration](authentication.md#configure-tls)
+With the default HTTP listener and base path, open
+`http://<server-ip>:2045/panel/`. [HTTPS configuration](authentication.md#configure-tls)
 
 ### Console
 
@@ -329,7 +337,7 @@ On Linux 5.1 and later, Wave can forcibly stop foreground pipeline stages
 that ignore a terminal hangup. On older kernels, a foreground job that
 ignores both interrupts and hangups can continue after disconnecting.
 
-The terminal uses the authenticated, same-origin `/ws/console` WebSocket.
+The terminal uses the authenticated, same-origin `/panel/ws/console` WebSocket.
 Binary frames carry terminal bytes in both directions. A text frame such
 as `{"type":"resize","cols":100,"rows":30}` starts the shell on first receipt
 and resizes it thereafter. The server reports terminal status in text
@@ -350,7 +358,8 @@ that omits `input_window`, the browser limits the WebSocket's outgoing buffer.
 Each Wave panel release uses the same version number as the WaterWall core
 release it supports. Wave 1.6.0 installs WaterWall from the
 [v1.6.0 release](https://github.com/radkesvat/WaterWall/releases/tag/v1.6.0).
-The current build offers only version 1.6.0 in the panel version picker.
+Server Information shows the running Wave **Version**. The **Target version** picker
+in Panel Controls currently offers only 1.6.0.
 
 Wave creates two directories beside `wave-backend`:
 
@@ -525,7 +534,8 @@ the request. [WaterWall 1.6.0 APIServer](https://github.com/radkesvat/WaterWall/
 
 **Backup** in Panel Controls downloads `wave-preview-backup.json` with the
 sample TLS domain, PEM paths, and the inactive config list. The backup contains
-config names and enabled flags. **Restore** replaces the inactive config list
+config names and enabled flags. Live TLS settings are stored in `wave-db.json`.
+**Restore** replaces the inactive config list
 after confirmation, retains existing `config.json` files, and creates a
 skeleton for a restored name that lacks a folder. For deployment settings,
 see [Authentication and HTTPS](authentication.md).

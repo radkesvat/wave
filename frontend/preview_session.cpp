@@ -21,7 +21,7 @@ constexpr std::size_t max_snapshot_bytes = 16 * 1024 * 1024;
 EM_JS_DEPS(preview_url, "$stringToNewUTF8");
 EM_JS(char*, preview_url, (), {
     const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    return stringToNewUTF8(protocol + location.host + '/ws/preview');
+    return stringToNewUTF8(protocol + location.host + Module['basePath'] + '/ws/workspace');
 });
 // clang-format on
 

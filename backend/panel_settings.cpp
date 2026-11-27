@@ -1,7 +1,11 @@
 #include "panel_settings.h"
 
+#include "panel_base_path.h"
 #include "session_settings.h"
 
+#ifdef WAVE_ENABLE_AUTH
+#include <httplib.h>
+#endif
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -427,13 +431,19 @@ LoadedDatabase load_database(const DatabaseFile& file, bool protect_permissions)
 } // namespace
 
 struct PanelDatabase::Impl {
-    Impl(const char* executable, const fs::path& site_dir, bool check_only)
-        : directory(database_directory(executable, site_dir)), file(directory)
+    Impl(const char* executable, const fs::path& document_root, bool check_only)
+        : directory(database_directory(executable, document_root)), site_dir(document_root), file(directory)
     {
         if (!check_only) {
             file.lock();
         }
         auto loaded = load_database(file, !check_only);
+        if (const auto path = loaded.contents.find(panel_base_path_key); path != loaded.contents.end()) {
+            if (!path->is_string() || !valid_panel_base_path(path->get_ref<const std::string&>())) {
+                throw std::runtime_error("Invalid panel-base-path in wave-db.json.");
+            }
+            base_path = path->get<std::string>();
+        }
         if (loaded.changed && !check_only) {
             save(loaded.contents);
         }
@@ -472,10 +482,12 @@ struct PanelDatabase::Impl {
     }
 
     fs::path directory;
+    fs::path site_dir;
     DatabaseFile file;
     std::mutex write_mutex;
     Json contents;
     PanelSettings settings{};
+    std::string base_path;
     int session_expiry_days = default_session_expiry_days;
 };
 
@@ -499,6 +511,58 @@ const PanelSettings& PanelDatabase::settings() const
 const Json& PanelDatabase::initial_contents() const
 {
     return impl_->contents;
+}
+
+std::string PanelDatabase::panel_base_path() const
+{
+    std::lock_guard lock(impl_->write_mutex);
+    return impl_->base_path;
+}
+
+bool PanelDatabase::save_panel_base_path(std::string_view path)
+{
+    if (!valid_panel_base_path(path)) {
+        throw std::invalid_argument("Invalid panel base path.");
+    }
+    std::string next(path);
+    std::lock_guard lock(impl_->write_mutex);
+    if (!impl_->base_path.empty()) {
+        return false;
+    }
+    auto current = impl_->read_existing();
+    if (current.contains(panel_base_path_key)) {
+        return false;
+    }
+    current[panel_base_path_key] = next;
+    impl_->save(current);
+    impl_->base_path = std::move(next);
+    return true;
+}
+
+Json PanelDatabase::save_tls_settings(const std::optional<TlsSettings>& tls)
+{
+    if (tls) {
+#ifdef WAVE_ENABLE_AUTH
+        make_tls_server(*tls, impl_->site_dir, impl_->settings.listen_port);
+#else
+        throw std::runtime_error("This Wave build does not support HTTPS.");
+#endif
+    }
+
+    std::lock_guard lock(impl_->write_mutex);
+    auto current = impl_->read_existing();
+    auto& saved = current["tls"];
+    if (!saved.is_object()) {
+        saved = Json::object();
+    }
+    saved["enabled"] = tls.has_value();
+    if (tls) {
+        saved["domain"] = tls->domain;
+        saved["certificate_chain"] = tls->certificate_chain.string();
+        saved["private_key"] = tls->private_key.string();
+    }
+    impl_->save(current);
+    return std::move(saved);
 }
 
 int PanelDatabase::session_expiry_days() const

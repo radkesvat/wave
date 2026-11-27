@@ -16,6 +16,16 @@ namespace wave::view {
 
 using Json = nlohmann::json;
 
+inline constexpr char shared_version_help[] = "Wave and the WaterWall core use the same release version.";
+
+inline constexpr theme::Color core_status_color(std::string_view state, theme::Color fallback)
+{
+    if (state == "running") {
+        return theme::Color::success;
+    }
+    return state == "stopped" ? theme::Color::warning : fallback;
+}
+
 inline const Json& field(const Json& object, std::string_view key)
 {
     static const Json empty;
@@ -70,6 +80,34 @@ inline const Json& array_field(const Json& object, std::string_view key)
 inline float button_width(const char* label)
 {
     return ImGui::CalcTextSize(label, nullptr, true).x + 2 * ImGui::GetStyle().FramePadding.x;
+}
+
+inline bool toggle_switch(const char* id, ImVec2 hit_size, ImVec2 track_size, bool enabled)
+{
+    const bool pressed = ImGui::InvisibleButton(id, hit_size, ImGuiButtonFlags_EnableNav);
+    if (!ImGui::IsItemVisible()) {
+        return pressed;
+    }
+    const auto origin = ImGui::GetItemRectMin();
+    const ImVec2 min{origin.x + (hit_size.x - track_size.x) / 2, origin.y + (hit_size.y - track_size.y) / 2};
+    const ImVec2 max{min.x + track_size.x, min.y + track_size.y};
+    const float radius = track_size.y / 2;
+    const bool hovered = ImGui::IsItemHovered();
+    using theme::Color;
+    const auto track = enabled ? Color::accent : hovered ? Color::hover : Color::raised;
+    const auto thumb = enabled ? Color::canvas : Color::primary_text;
+    auto& draw = *ImGui::GetWindowDrawList();
+    draw.AddRectFilled(min, max, ImGui::GetColorU32(theme::packed(track)), radius);
+    if (!enabled) {
+        draw.AddRect(min, max, ImGui::GetColorU32(theme::packed(Color::control_border)), radius,
+                     theme::border_width);
+    }
+    draw.AddCircleFilled({enabled ? max.x - radius : min.x + radius, min.y + radius}, radius - 3,
+                         ImGui::GetColorU32(theme::packed(thumb)));
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    return pressed;
 }
 
 inline void text(std::string_view value)

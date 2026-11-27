@@ -11,6 +11,7 @@ const coreDesktop = { width: 1280, height: 1080 };
 const portrait = { width: 390, height: 844 };
 const donationSlotHeight = 63;
 const timeout = 10000;
+const basePath = '/fixture/wave';
 
 let url;
 let previewUrl;
@@ -24,7 +25,7 @@ before(async () => {
     assert.ok(siteDir, 'Run this test through a Wave frontend CTest preset.');
     const assets = new Map();
     for (const [path, filename, contentType] of [
-        ['/panel', 'index.html', 'text/html; charset=utf-8'],
+        ['/', 'index.html', 'text/html; charset=utf-8'],
         ['/index.js', 'index.js', 'text/javascript; charset=utf-8'],
         ['/index.wasm', 'index.wasm', 'application/wasm'],
         ['/console.js', 'console.js', 'text/javascript; charset=utf-8'],
@@ -32,7 +33,7 @@ before(async () => {
         ['/terminal/addon-fit.js', 'terminal/addon-fit.js', 'text/javascript; charset=utf-8'],
         ['/terminal/xterm.css', 'terminal/xterm.css', 'text/css; charset=utf-8'],
     ]) {
-        assets.set(path, { contentType, contents: await readFile(join(siteDir, filename)) });
+        assets.set(basePath + path, { contentType, contents: await readFile(join(siteDir, filename)) });
     }
     server = createServer((request, response) => {
         const asset = assets.get(request.url);
@@ -45,10 +46,10 @@ before(async () => {
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
     const host = `127.0.0.1:${server.address().port}`;
-    url = `http://${host}/panel`;
-    sessionUrl = `ws://${host}/ws/panel`;
-    previewUrl = `ws://${host}/ws/preview`;
-    consoleUrl = `ws://${host}/ws/console`;
+    url = `http://${host}${basePath}/`;
+    sessionUrl = `ws://${host}${basePath}/ws/panel`;
+    previewUrl = `ws://${host}${basePath}/ws/workspace`;
+    consoleUrl = `ws://${host}${basePath}/ws/console`;
     browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader'] });
 });
 
@@ -84,6 +85,17 @@ function fixture(coreState = 'running') {
             certificate_path: 'preview/server.crt', private_key_path: 'preview/server.key',
         },
         core_settings: { misc: { workers: 2 } },
+    };
+}
+
+function tlsFixture() {
+    return {
+        enabled: true,
+        domain: 'wave.example.invalid',
+        certificate_chain: '/etc/wave-fixture/fullchain.pem',
+        private_key: '/etc/wave-fixture/privkey.pem',
+        supported: true,
+        restart_required: false,
     };
 }
 
@@ -350,6 +362,16 @@ async function confirmDialog(page, activate, width = 380, scanTop = 114) {
     await activate(right - 42, bottom - 25);
 }
 
+function tlsInputRows(page) {
+    return verticalRuns(page, 220, 170, 374, [13, 11, 14], 20);
+}
+
+async function tlsApplyRow(page, afterFields) {
+    const [row] = await verticalRuns(page, 220, afterFields, 515, [69, 64, 79], 18);
+    assert.ok(row, 'Expected the TLS Apply changes button.');
+    return Math.floor((row[0] + row[1]) / 2);
+}
+
 async function saveGraphChanges(page) {
     await click(page, 224, 137);
 }
@@ -421,8 +443,19 @@ test('opens the authenticated workspace, updates host metrics, and navigates the
     const canvasColor = [8, 12, 16];
     const paneColor = [31, 27, 34];
     const badgeBorder = [138, 132, 149];
-    const serverRow = color => verticalRuns(page, 11, 68, 86, color);
+    const selectedColor = [243, 129, 74];
     const configRow = color => verticalRuns(page, 11, 110, 128, color);
+    const expectInsetLink = async top => {
+        const interior = [top + 5, top + 23];
+        for (const x of [11, 176]) {
+            assert.deepEqual(await verticalRuns(page, x, ...interior, paneColor), [interior],
+                'The selected sidebar row leaves the pane edges visible.');
+        }
+        assert.deepEqual(await verticalRuns(page, 13, ...interior, canvasColor), [interior]);
+        for (const x of [173, 174]) {
+            assert.deepEqual(await verticalRuns(page, x, top, top + 30, selectedColor), [[top, top + 30]]);
+        }
+    };
     try {
         assert.equal((await page.goto(url)).status(), 200);
         await status(page, /Wave Server Status.*Loading panel data/);
@@ -437,9 +470,8 @@ test('opens the authenticated workspace, updates host metrics, and navigates the
         for (const x of [11, 176]) {
             assert.deepEqual(await verticalRuns(page, x, 91, dividerScanEnd, [61, 58, 67]), dividers);
         }
-        assert.deepEqual(await serverRow(canvasColor), [[68, 86]]);
+        await expectInsetLink(63);
         assert.deepEqual(await configRow(paneColor), [[110, 128]]);
-        assert.deepEqual(await verticalRuns(page, 176, 60, 96, [243, 129, 74]), [[63, 93]]);
         await page.mouse.move(12, 115);
         await settleCanvas(page);
         for (const x of [11, 176]) {
@@ -478,9 +510,14 @@ test('opens the authenticated workspace, updates host metrics, and navigates the
         assertRequest(opened.request, { action: 'get_core_config', id: 1 });
         opened.reply({ result: { config: { name: 'Default', nodes: [] }, revision: 'saved', editable: false } });
         await status(page, /^Wave Config Default\..*0 nodes\./);
-        assert.deepEqual(await serverRow(paneColor), [[68, 86]]);
+        assert.deepEqual(await verticalRuns(page, 11, 68, 86, paneColor), [[68, 86]]);
         assert.deepEqual(await configRow(canvasColor), [[110, 128]]);
-        assert.deepEqual(await verticalRuns(page, 176, 110, 128, [243, 129, 74]), [[110, 128]]);
+        assert.deepEqual(await verticalRuns(page, 176, 110, 128, selectedColor), [[110, 128]]);
+        await page.mouse.move(11, 77);
+        await settleCanvas(page);
+        assert.deepEqual(await verticalRuns(page, 11, 68, 86, paneColor), [[68, 86]]);
+        assert.deepEqual(await verticalRuns(page, 13, 68, 86, [55, 49, 59]), [[68, 86]],
+            'Hovering over the sidebar edge still highlights the inset row.');
 
         await expectDonationBox(page, { left: 10, right: 178, top: 735, bottom: 786, stickerDiameter: 36 });
         assert.equal(await rectangleContainsColor(page, {
@@ -492,8 +529,10 @@ test('opens the authenticated workspace, updates host metrics, and navigates the
         await status(page, /^Wave About\./);
         await click(page, 80, desktop.height - 103 - donationSlotHeight);
         await status(page, /^Wave Console\./);
-        await click(page, 176, desktop.height - 35 - donationSlotHeight);
+        const aboutY = desktop.height - 35 - donationSlotHeight;
+        await click(page, 176, aboutY);
         await status(page, /^Wave About\./);
+        await expectInsetLink(aboutY - 14);
         await page.setViewportSize({ width: 1920, height: 958 });
         await page.mouse.move(0, 0);
         await settleCanvas(page);
@@ -955,7 +994,7 @@ test('scrolls stacked Server Status inside the desktop workspace and uses page s
         await page.setViewportSize(columns);
         await expectFullWidth(columns);
         await page.mouse.move(482, 445);
-        await status(page, /This selects a release of the Wave panel/);
+        await status(page, /Wave and the WaterWall core use the same release version\./);
         await page.mouse.move(0, 0);
         const stacked = { ...columns, width: 860 };
         await page.setViewportSize(stacked);
@@ -1060,13 +1099,25 @@ test('installs, retries, starts, restarts, and stops WaterWall from Server Statu
     const progress = /Operation in progress\./;
     const progressIndicator = page.getByRole('img', { name: progress });
     const spinnerColor = [81, 165, 246];
+    const runningColor = [163, 211, 83];
+    const stoppedColor = [255, 195, 106];
+    const expectCoreTextColor = async (state, controlsColor, headerColor = controlsColor) => {
+        const [title] = await controlsTitle();
+        assert.ok(title, 'Expected the Panel Controls title.');
+        assert.ok(await rectangleContainsColor(page, {
+            x: 477, y: title[1] + 6, width: 183, height: 22,
+        }, controlsColor), `The Panel Controls ${state} text has the expected color.`);
+        assert.ok(await rectangleContainsColor(page, {
+            x: coreDesktop.width - 112, y: 14, width: 88, height: 20,
+        }, headerColor), `The topbar ${state} text has the expected color.`);
+    };
     const modalSpinner = frame => rectangleContainsColor(page, {
         x: (coreDesktop.width - 380) / 2 + 10, y: frame.bottom - 42, width: 40, height: 34,
     }, spinnerColor);
     try {
         await page.goto(url);
         await openView(page, 'Server Status');
-        await status(page, /WaterWall core missing\. Panel version 1\.6\.0/);
+        await status(page, /WaterWall core missing\. Version 1\.6\.0\. Target version 1\.6\.0\./);
         const titleBeforeError = await controlsTitle();
         const coreSpinner = () => rectangleContainsColor(page, {
             x: 470, y: titleBeforeError[0][1] + 2, width: 54, height: 30,
@@ -1092,7 +1143,7 @@ test('installs, retries, starts, restarts, and stops WaterWall from Server Statu
         core.error = installationError + '\nCheck the installation logs.'.repeat(24);
         data.logs.push({ source: 'panel', ts: '09:41:04', level: 'error', message: core.error });
         await preview.broadcast();
-        await status(page, /WaterWall core missing\. Panel version/);
+        await status(page, /WaterWall core missing\. Version/);
         await expectLoggedOnce(page, installationError);
         await progressIndicator.waitFor({ state: 'hidden', timeout });
         assert.equal(await coreSpinner(), false, 'Core status returns to idle after installation ends.');
@@ -1105,6 +1156,7 @@ test('installs, retries, starts, restarts, and stops WaterWall from Server Statu
         core.state = 'stopped';
         retry.reply();
         await status(page, /WaterWall core stopped/);
+        await expectCoreTextColor('stopped', stoppedColor);
         await press('restart');
         assert.equal(await page.locator('#panel-controls').evaluate(controls => controls.inert), false);
         await press('start');
@@ -1114,10 +1166,12 @@ test('installs, retries, starts, restarts, and stops WaterWall from Server Statu
         core.state = 'starting';
         start.reply();
         await status(page, /WaterWall core starting.*Operation in progress\./);
+        await expectCoreTextColor('starting', [234, 235, 255], [181, 180, 197]);
         core.state = 'running';
         await preview.broadcast();
         await status(page, /WaterWall core running/);
         await progressIndicator.waitFor({ state: 'hidden', timeout });
+        await expectCoreTextColor('running', runningColor);
 
         await press('restart');
         await status(page, /Confirm restart\./);
@@ -1205,19 +1259,22 @@ test('installs, retries, starts, restarts, and stops WaterWall from Server Statu
 
 test('opens settings field help by mouse, keyboard, and touch without reflowing inputs', async () => {
     const page = await browser.newPage({ viewport: desktop, hasTouch: true });
-    const preview = await mockPreview(page, fixture());
-    const description = /Use a hostname such as panel\.example\.test\./;
+    const data = fixture();
+    data.settings.tls = tlsFixture();
+    const preview = await mockPreview(page, data);
+    const description = /Enter the lowercase DNS hostname that the certificate covers\./;
     const help = page.getByRole('img', { name: description });
-    const inputRows = () => verticalRuns(page, 220, 158, 304, [13, 11, 14], 20);
-    const marker = { x: 280, y: 148 };
+    const inputRows = () => tlsInputRows(page);
     try {
         await page.goto(url);
         await openView(page, 'Settings');
-        await status(page, /Panel tab\. Administrator settings/);
+        await status(page, /TLS settings\. Enable TLS on\./);
         await settleCanvas(page);
         assert.doesNotMatch(await page.locator('#canvas').getAttribute('aria-label'), description);
         const originalRows = await inputRows();
-        assert.equal(originalRows.length, 3, 'Expected the preview TLS input rows.');
+        assert.equal(originalRows.length, 3, 'Expected the TLS input rows.');
+        const [domainTop, domainBottom] = originalRows[0];
+        const marker = { x: 280, y: domainTop - 12 };
 
         await page.mouse.move(marker.x, marker.y);
         await help.waitFor({ timeout });
@@ -1225,7 +1282,7 @@ test('opens settings field help by mouse, keyboard, and touch without reflowing 
         await page.mouse.move(0, 0);
         await help.waitFor({ state: 'hidden', timeout });
 
-        await click(page, 325, 175);
+        await click(page, 325, Math.floor((domainTop + domainBottom) / 2));
         await page.locator('#wave-text-input').waitFor({ state: 'visible', timeout });
         await page.mouse.move(0, 0);
         await page.keyboard.press('Shift+Tab');
@@ -1251,6 +1308,7 @@ test('opens settings field help by mouse, keyboard, and touch without reflowing 
 test('validates and saves WaterWall form settings alongside a separate Panel TLS draft', async () => {
     const page = await browser.newPage({ viewport: desktop });
     const data = fixture();
+    data.settings.tls = tlsFixture();
     const preview = await mockPreview(page, data);
     const editWorkers = text => replaceText(page, 320, 228, text);
     const saveCore = () => click(page, 267, 557);
@@ -1269,7 +1327,7 @@ test('validates and saves WaterWall form settings alongside a separate Panel TLS
     try {
         await page.goto(url);
         await openView(page, 'Settings');
-        await status(page, /Panel tab\. Administrator settings/);
+        await status(page, /TLS settings\. Enable TLS on\./);
         const panelFrame = await tabBodyFrame();
         const cardTop = async (left, right) => {
             const edge = x => verticalRuns(page, x, 101, 410, [61, 58, 67], 80);
@@ -1280,11 +1338,15 @@ test('validates and saves WaterWall form settings alongside a separate Panel TLS
         };
         const tops = [await cardTop(205, 548), await cardTop(556, 899), await cardTop(907, 1250)];
         assert.deepEqual(tops, [106, 106, 106], 'All three compact Settings cards align at the top.');
-        const domainInput = x => verticalRuns(page, x, 160, 190, [13, 11, 14], 15);
+        const fields = await tlsInputRows(page);
+        assert.equal(fields.length, 3, 'Expected all enabled TLS fields.');
+        const [domainTop, domainBottom] = fields[0];
+        const domainInput = x => verticalRuns(page, x, domainTop, domainBottom, [13, 11, 14], 15);
         assert.deepEqual(await domainInput(212), [], 'The Domain input leaves room beside the card border.');
         assert.equal((await domainInput(220)).length, 1, 'The Domain input begins inside the card padding.');
-        const tls = { ...data.settings, domain: 'updated.example.invalid' };
-        await replaceText(page, 325, 175, tls.domain);
+        const tls = { enabled: true, domain: 'updated.example.invalid',
+            certificate_chain: data.settings.tls.certificate_chain, private_key: data.settings.tls.private_key };
+        await replaceText(page, 325, Math.floor((domainTop + domainBottom) / 2), tls.domain);
         await click(page, 281, 82);
         await status(page, /Core tab\. WaterWall core settings\. Runtime\. Version 1\.6\.0/);
         assert.deepEqual(await tabBodyFrame(), panelFrame, 'Core and Panel use the same outer frame bounds.');
@@ -1311,14 +1373,18 @@ test('validates and saves WaterWall form settings alongside a separate Panel TLS
         await replaceText(page, 840, 228, servers);
         const core = { misc: { workers: 4 }, dns: { servers } };
         await click(page, 223, 82);
-        await status(page, /Panel tab\. Administrator settings/);
-        await click(page, 245, 320);
+        await status(page, /TLS settings\. Enable TLS on\./);
+        await click(page, 245, await tlsApplyRow(page, fields.at(-1)[1]));
+        await status(page, /Apply TLS settings\./);
         await confirmDialog(page, (x, y) => click(page, x, y), 370);
         const panelSave = await preview.action(0);
-        assertRequest(panelSave.request, { action: 'apply_settings', settings: tls });
-        data.settings = tls;
-        panelSave.reply({ feedback: 'Applied sample TLS settings.', feedback_in_logs_only: true });
+        assertRequest(panelSave.request, { action: 'apply_tls_settings', settings: tls });
+        data.settings.tls = { ...tls, supported: true, restart_required: true };
+        const feedback = 'Saved panel TLS settings. Restart Wave to apply them.';
+        panelSave.reply({ feedback, feedback_in_logs_only: true });
         await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        await status(page, /Restart Wave to apply the saved TLS settings\./);
+        await expectLoggedOnce(page, feedback);
 
         await click(page, 281, 82);
         await status(page, /Core tab/);
@@ -1338,6 +1404,73 @@ test('validates and saves WaterWall form settings alongside a separate Panel TLS
         delete data.core_settings_notice;
         review.reply({ feedback: 'Saved core settings for the next launch.', feedback_in_logs_only: true });
         await status(page, /DNS\. Version 1\.6\.0\. 4 log entries\. Latest log: Saved core settings/);
+    } finally {
+        await page.close();
+    }
+});
+
+test('locks disabled TLS fields and saves the change after confirmation', async () => {
+    const page = await browser.newPage({ viewport: desktop });
+    const data = fixture();
+    data.settings.tls = tlsFixture();
+    const preview = await mockPreview(page, data);
+    const enabled = /TLS settings\. Enable TLS on\./;
+    const disabled = /TLS settings\. Enable TLS off\. Certificate fields locked\./;
+    const restart = /Restart Wave to apply the saved TLS settings\./;
+    const input = page.locator('#wave-text-input');
+    try {
+        await page.goto(url);
+        await openView(page, 'Settings');
+        await status(page, enabled);
+        const fields = await tlsInputRows(page);
+        assert.equal(fields.length, 3);
+        const [domainTop, domainBottom] = fields[0];
+        const domainY = Math.floor((domainTop + domainBottom) / 2);
+        const toggle = () => click(page, 226, domainTop - 40);
+        const applyY = () => tlsApplyRow(page, fields.at(-1)[1]);
+        const expectLockedFields = async () => {
+            await status(page, disabled);
+            assert.deepEqual(await tlsInputRows(page), [], 'Disabled TLS fields are dimmed.');
+            await click(page, 325, domainY);
+            assert.ok(await input.isHidden(), 'A disabled TLS field cannot take input.');
+        };
+        const confirmDisable = async index => {
+            await click(page, 245, await applyY());
+            await status(page, /Apply TLS settings\./);
+            assert.equal(preview.actions.length, index, 'Applying waits for confirmation.');
+            await confirmDialog(page, (x, y) => click(page, x, y), 370);
+            const changed = await preview.action(index);
+            assertRequest(changed.request, { action: 'apply_tls_settings', settings: { enabled: false } });
+            await status(page, /Apply TLS settings\..*Operation in progress\./);
+            return changed;
+        };
+
+        await toggle();
+        await expectLockedFields();
+        await click(page, 365, await applyY());
+        await status(page, enabled);
+        assert.deepEqual(await tlsInputRows(page), fields, 'Revert restores the enabled fields.');
+        await click(page, 325, domainY);
+        await input.waitFor({ state: 'visible', timeout });
+
+        await toggle();
+        const rejected = await confirmDisable(0);
+        const error = 'Cannot write wave-db.json.';
+        rejected.reply({ ok: false, feedback: error, feedback_in_logs_only: true });
+        await expectLoggedOnce(page, error);
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        assert.doesNotMatch(await page.locator('#canvas').getAttribute('aria-label'), restart);
+
+        const saved = await confirmDisable(1);
+        data.settings.tls = { ...data.settings.tls, enabled: false, restart_required: true };
+        saved.reply({ feedback: 'Saved panel TLS settings. Restart Wave to apply them.', feedback_in_logs_only: true });
+        await status(page, restart);
+        await page.reload();
+        await waitForServerStatus(page);
+        await openView(page, 'Settings');
+        await expectLockedFields();
+        await status(page, restart);
+        assert.equal(preview.actions.length, 2, 'Reloading restores the saved setting without resubmitting it.');
     } finally {
         await page.close();
     }
@@ -1664,8 +1797,11 @@ test('uses the sidebar and creates, toggles, and deletes a config on touch', asy
         const rightEdge = Math.floor(width) - 12;
         await tap(rightEdge, footerY);
         await status(page, /^Wave About\./);
-        assert.deepEqual(await verticalRuns(page, rightEdge, footerY - 9, footerY + 7, [243, 129, 74]),
-            [[footerY - 9, footerY + 7]]);
+        const aboutRow = [footerY - 9, footerY + 7];
+        assert.deepEqual(await verticalRuns(page, rightEdge, ...aboutRow, [31, 27, 34]), [aboutRow]);
+        for (const x of [rightEdge - 3, rightEdge - 2]) {
+            assert.deepEqual(await verticalRuns(page, x, ...aboutRow, [243, 129, 74]), [aboutRow]);
+        }
         await selectPanelTheme(page, 'Light', tap);
         await acknowledgeThemeSave(preview, data, nextAction++, 'light');
         await waitForTheme(page, 'f0f2f7');
@@ -1743,6 +1879,8 @@ test('uses the sidebar and creates, toggles, and deletes a config on touch', asy
 test('downloads a backup and restores it through the browser file picker', async () => {
     const page = await browser.newPage({ viewport: coreDesktop });
     const data = fixture();
+    const sampleSettings = { ...data.settings };
+    data.settings.tls = tlsFixture();
     data.server.core.configs.push({ id: 2, name: 'Standby', enabled: false, active: false });
     const preview = await mockPreview(page, data);
     try {
@@ -1761,7 +1899,7 @@ test('downloads a backup and restores it through the browser file picker', async
         const download = await downloading;
         const buffer = await readFile(await download.path());
         const backup = JSON.parse(buffer);
-        assert.deepEqual(backup.settings, data.settings);
+        assert.deepEqual(backup.settings, sampleSettings, 'The preview backup omits deployment TLS settings.');
         assert.deepEqual(backup.configs, [{ name: 'Standby', enabled: false }]);
 
         await click(page, restoreX, rowY);
