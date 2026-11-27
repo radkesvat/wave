@@ -762,7 +762,11 @@ void render_dialogs(PanelState& state, PreviewSession& session)
         case PanelDialog::version: {
             const auto version = displayed_panel_version(session);
             ImGui::Text("Wave %.*s", static_cast<int>(version.size()), version.data());
-            view::wrapped(view::shared_version_help, Color::secondary_text);
+            const auto core_version =
+                view::string_field(view::field(view::field(session.data(), "server"), "core"), "version");
+            if (!core_version.empty()) {
+                ImGui::Text("WaterWall %.*s", static_cast<int>(core_version.size()), core_version.data());
+            }
             ImGui::TextWrapped("Dear ImGui %s / WebAssembly / WebGL 2", IMGUI_VERSION);
             ImGui::TextLinkOpenURL("Project releases", "https://github.com/radkesvat/wave/releases");
             break;
@@ -991,6 +995,7 @@ void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_vie
         ImGui::EndChild();
         render_panel_control_dialog(state.panel_controls, session);
         render_dialogs(state, session);
+        render_panel_update_dialog(state.panel_controls.updates, session);
     }
     if (ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
         state.console = {};
@@ -1008,15 +1013,10 @@ void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_vie
     ImGui::End();
 }
 
-std::string describe_panel(const PanelState& state, const PreviewSession& session)
+namespace {
+
+std::string describe_workspace_page(const PanelState& state, const PreviewSession& session)
 {
-    if (state.entry.page != EntryPage::workspace) {
-        auto description = describe_entry(state.entry);
-        if (const auto* caption = entry_caption(state.entry.page)) {
-            description += std::format(" {}.", caption);
-        }
-        return description;
-    }
     if (state.page == PanelPage::console) {
         return "Wave Console. WaterWall terminal.";
     }
@@ -1063,6 +1063,24 @@ std::string describe_panel(const PanelState& state, const PreviewSession& sessio
         result += ' ' + describe_panel_controls(state.panel_controls, session, has_server);
     }
     return result;
+}
+
+} // namespace
+
+std::string describe_panel(const PanelState& state, const PreviewSession& session)
+{
+    if (state.entry.page != EntryPage::workspace) {
+        auto description = describe_entry(state.entry);
+        if (const auto* caption = entry_caption(state.entry.page)) {
+            description += std::format(" {}.", caption);
+        }
+        return description;
+    }
+    auto description = describe_workspace_page(state, session);
+    if (const auto updates = describe_panel_update_dialog(state.panel_controls.updates); !updates.empty()) {
+        description += ' ' + updates;
+    }
+    return description;
 }
 
 } // namespace wave

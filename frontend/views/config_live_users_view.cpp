@@ -1,6 +1,7 @@
 #include "config_live_users_view.h"
 
 #include "view_helpers.h"
+#include "waterwall_schematic.h"
 
 #include <charconv>
 #include <format>
@@ -201,7 +202,8 @@ void render_config_live_users(ConfigLiveUsersState& state, PreviewSession& sessi
 
 std::string describe_config_live_users(const ConfigLiveUsersState& state)
 {
-    std::string description = "AuthenticationServer live users.";
+    const auto& users = view::field(view::field(waterwall_schematic(), "ui"), "users");
+    std::string description(view::string_field(users, "live_description", "Live users."));
     if (!state.error.empty()) {
         description += ' ' + state.error;
     }

@@ -16,7 +16,6 @@ namespace wave::view {
 
 using Json = nlohmann::json;
 
-inline constexpr char shared_version_help[] = "Wave and the WaterWall core use the same release version.";
 
 inline constexpr theme::Color core_status_color(std::string_view state, theme::Color fallback)
 {

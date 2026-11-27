@@ -4,6 +4,7 @@
 #include "preview_session.h"
 #include "theme.h"
 #include "view_helpers.h"
+#include "waterwall_schematic.h"
 
 #include <format>
 #include <string_view>
@@ -13,33 +14,37 @@ namespace {
 
 using theme::Color;
 
-struct LogSource {
-    std::string_view key;
-    const char* label;
-};
-
-constexpr std::array sources{
-    LogSource{"panel", "Panel"},     LogSource{"core", "Core"},         LogSource{"dns", "DNS"},
-    LogSource{"network", "Network"}, LogSource{"internal", "Internal"},
-};
-
-std::size_t source_index(const view::Json& record)
+const view::Json& core_sources()
 {
-    const auto source = std::ranges::find(sources, view::string_field(record, "source"), &LogSource::key);
-    return source == sources.end() ? 0 : static_cast<std::size_t>(source - sources.begin());
+    return schematic_field(schematic_field(schematic_field(waterwall_schematic(), "runtime"), "logs"),
+                           "sources");
 }
 
-bool show_record(const LogsViewState& state, const view::Json& record, std::size_t source)
+std::string_view source_label(std::string_view key)
+{
+    if (key == "panel") {
+        return "Panel";
+    }
+    for (const auto& source : core_sources()) {
+        if (schematic_field(source, "name") == key) {
+            return schematic_text(schematic_field(source, "label"));
+        }
+    }
+    return key;
+}
+
+bool show_record(const LogsViewState& state, const view::Json& record)
 {
     const auto message = view::string_field(record, "message");
-    if (!state.visible_sources[source] || message.empty()) {
+    const auto source = view::string_field(record, "source");
+    if (state.hidden_sources.contains(source) || message.empty()) {
         return false;
     }
     if (!state.search.IsActive()) {
         return true;
     }
     const auto text =
-        std::format("{} {} {}", view::string_field(record, "ts"), sources[source].label, message);
+        std::format("{} {} {}", view::string_field(record, "ts"), source_label(source), message);
     return state.search.PassFilter(text.c_str());
 }
 
@@ -67,19 +72,30 @@ bool render_source_filters(LogsViewState& state)
     const float available = ImGui::GetContentRegionAvail().x;
     float used = ImGui::GetItemRectSize().x;
     bool changed = false;
-    for (std::size_t source = 0; source < sources.size(); ++source) {
-        const auto label = sources[source].label;
+    const auto draw = [&](std::string_view source, const char* label, float extra_spacing) {
         const float label_width = ImGui::CalcTextSize(label).x + style.ItemInnerSpacing.x;
         const float width = label_width + ImGui::GetFrameHeight();
-        const float spacing = style.ItemSpacing.x + (source == 0 ? style.FramePadding.x : 0.0f);
+        const float spacing = style.ItemSpacing.x + extra_spacing;
         if (used + spacing + width <= available) {
             ImGui::SameLine(0, spacing);
             used += spacing;
         } else {
             used = 0;
         }
-        changed |= source_checkbox(label, label_width, state.visible_sources[source]);
+        bool selected = !state.hidden_sources.contains(source);
+        if (source_checkbox(label, label_width, selected)) {
+            if (selected) {
+                state.hidden_sources.erase(std::string(source));
+            } else {
+                state.hidden_sources.emplace(source);
+            }
+            changed = true;
+        }
         used += width;
+    };
+    draw("panel", "Panel", style.FramePadding.x);
+    for (const auto& source : core_sources()) {
+        draw(schematic_text(source.at("name")), source.at("label").get_ref<const std::string&>().c_str(), 0);
     }
     return changed;
 }
@@ -192,14 +208,13 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
         ImGui::PushFont(nullptr, theme::secondary_font_size);
         const bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
         for (const auto& log : logs) {
-            const auto source = source_index(log);
-            if (!show_record(state, log, source)) {
+            if (!show_record(state, log)) {
                 continue;
             }
             const auto timestamp = view::string_field(log, "ts");
             const auto level = view::string_field(log, "level");
             const auto message = view::string_field(log, "message");
-            const auto label = sources[source].label;
+            const auto label = source_label(view::string_field(log, "source"));
             if (copy) {
                 copied += std::format("{} [{}] [{}] {}\n", timestamp, label, level, message);
             }
@@ -207,7 +222,8 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
             ImGui::TextColored(theme::rgba(Color::secondary_text), "%.*s", static_cast<int>(timestamp.size()),
                                timestamp.empty() ? "" : timestamp.data());
             ImGui::SameLine();
-            ImGui::TextColored(theme::rgba(Color::secondary_text), "%s", label);
+            ImGui::TextColored(theme::rgba(Color::secondary_text), "%.*s", static_cast<int>(label.size()),
+                               label.empty() ? "" : label.data());
             if (!level.empty()) {
                 ImGui::SameLine();
                 ImGui::TextColored(theme::rgba(level_color(level)), "%.*s", static_cast<int>(level.size()),
@@ -241,7 +257,7 @@ std::string describe_logs(const LogsViewState& state, const nlohmann::json& logs
     std::size_t visible = 0;
     std::string_view latest;
     for (const auto& log : logs) {
-        if (show_record(state, log, source_index(log))) {
+        if (show_record(state, log)) {
             ++visible;
             latest = view::string_field(log, "message");
         }

@@ -1,0 +1,7 @@
+#pragma once
+
+namespace wave {
+
+inline constexpr char bundled_waterwall_schematic_json[] = "@schematic_bytes@";
+
+} // namespace wave

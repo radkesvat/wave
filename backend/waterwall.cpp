@@ -2,6 +2,8 @@
 
 #include "child_process.h"
 #include "waterwall_install.h"
+#include "waterwall_schematic.h"
+#include "waterwall_schematic_file.h"
 
 #include <cerrno>
 #include <utility>
@@ -114,11 +116,13 @@ pid_t launch(const fs::path& executable, const fs::path& directory, int input)
 
 } // namespace
 
-WaterWall::WaterWall(const fs::path& directory)
-    : working_dir_(directory), bin_dir_(directory / "waterwall_bin"), executable_(bin_dir_ / "Waterwall")
+WaterWall::WaterWall(const fs::path& directory, std::string_view version)
+    : working_dir_(directory),
+      release_dir_(waterwall_release_directory(waterwall_bin_directory(directory), version)),
+      executable_(release_dir_ / "Waterwall")
 {
-    if (!prepare_directory(bin_dir_)) {
-        error_ = "Cannot create or use the waterwall_bin directory.";
+    if (!prepare_directory(release_dir_.parent_path()) || !prepare_directory(release_dir_)) {
+        error_ = "Cannot create or use the WaterWall release directory.";
     }
 }
 
@@ -158,32 +162,34 @@ pid_t WaterWall::running_pid() const
 bool WaterWall::installed() const
 {
     struct stat info{};
-    return trusted_directory(bin_dir_) && ::lstat(executable_.c_str(), &info) == 0 && S_ISREG(info.st_mode) &&
-           trusted(info) && !(info.st_mode & (S_ISUID | S_ISGID)) && ::access(executable_.c_str(), X_OK) == 0;
+    return trusted_directory(release_dir_.parent_path()) && trusted_directory(release_dir_) &&
+           ::lstat(executable_.c_str(), &info) == 0 && S_ISREG(info.st_mode) && trusted(info) &&
+           !(info.st_mode & (S_ISUID | S_ISGID)) && ::access(executable_.c_str(), X_OK) == 0;
 }
 
-void WaterWall::install_if_missing()
+void WaterWall::install_if_missing(const nlohmann::json& schematic)
 {
     if (state() == "missing") {
-        error_ = install();
+        error_ = install(schematic);
     }
 }
 
-std::string WaterWall::install()
+std::string WaterWall::install(const nlohmann::json& schematic)
 {
     if (state() != "missing") {
         return "WaterWall is already installed or an operation is in progress.";
     }
-    if (!prepare_directory(bin_dir_)) {
-        return "Cannot create or use the waterwall_bin directory.";
+    if (!prepare_directory(release_dir_.parent_path()) || !prepare_directory(release_dir_)) {
+        return "Cannot create or use the WaterWall release directory.";
     }
-    std::packaged_task<std::string(std::stop_token)> task([directory = bin_dir_](std::stop_token stop) {
-        try {
-            return install_waterwall(directory, stop);
-        } catch (const std::exception&) {
-            return std::string("WaterWall installation could not be completed.");
-        }
-    });
+    std::packaged_task<std::string(std::stop_token)> task(
+        [directory = release_dir_, schematic](std::stop_token stop) {
+            try {
+                return install_waterwall(directory, schematic, stop);
+            } catch (const std::exception&) {
+                return std::string("WaterWall installation could not be completed.");
+            }
+        });
     auto result = task.get_future();
     try {
         installer_ = std::jthread(std::move(task));

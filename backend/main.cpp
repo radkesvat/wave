@@ -3,6 +3,7 @@
 #include "console.h"
 #include "panel_settings.h"
 #include "preview.h"
+#include "waterwall_schematic_file.h"
 
 #include <httplib.h>
 
@@ -21,6 +22,7 @@ namespace {
 struct Options {
     std::filesystem::path site_dir = "build/web-release/site";
     bool check_tls = false;
+    std::filesystem::path check_schematic;
 };
 
 bool parse_options(int argc, char* argv[], Options& options)
@@ -31,7 +33,7 @@ bool parse_options(int argc, char* argv[], Options& options)
             options.check_tls = true;
             continue;
         }
-        if (option != "--site-dir") {
+        if (option != "--site-dir" && option != "--check-schematic") {
             if (option.starts_with("--")) {
                 std::cerr << "Unknown option: " << option.substr(0, option.find('=')) << '\n';
             } else {
@@ -46,7 +48,15 @@ bool parse_options(int argc, char* argv[], Options& options)
             return false;
         }
 
-        options.site_dir = value;
+        if (option == "--check-schematic") {
+            options.check_schematic = value;
+        } else {
+            options.site_dir = value;
+        }
+    }
+    if (options.check_tls && !options.check_schematic.empty()) {
+        std::cerr << "Choose either --check-tls or --check-schematic.\n";
+        return false;
     }
     return true;
 }
@@ -105,7 +115,7 @@ int main(int argc, char* argv[])
 {
     Options options;
     if (!parse_options(argc, argv, options)) {
-        std::cerr << "Usage: wave-backend [--site-dir PATH] [--check-tls]\n";
+        std::cerr << "Usage: wave-backend [--site-dir PATH] [--check-tls | --check-schematic PATH]\n";
         return EXIT_FAILURE;
     }
 
@@ -115,6 +125,11 @@ int main(int argc, char* argv[])
     std::shared_ptr<wave::AuthStore> store;
     std::unique_ptr<httplib::Server> server;
     try {
+        if (!options.check_schematic.empty()) {
+            wave::load_waterwall_schematic_file(options.check_schematic);
+            std::cout << "WaterWall schematic is valid.\n";
+            return EXIT_SUCCESS;
+        }
         database =
             std::make_shared<wave::PanelDatabase>(argv[0], options.site_dir, options.check_tls);
         settings = database->settings();
@@ -144,6 +159,7 @@ int main(int argc, char* argv[])
         } else {
             server = std::make_unique<httplib::Server>();
         }
+        wave::select_waterwall_schematic(database->directory(), database->initial_contents());
         store = std::make_shared<wave::AuthStore>(database);
         wave::configure_authenticated_routes(*server, options.site_dir, store, database, secure, authority);
     } catch (const std::exception& error) {

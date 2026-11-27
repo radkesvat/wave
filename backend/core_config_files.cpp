@@ -166,13 +166,11 @@ std::optional<std::string> CoreConfigFiles::save(std::string_view name, std::str
 }
 
 bool CoreConfigFiles::create(std::string_view name, bool reuse_existing, bool& created,
-                             const nlohmann::json& nodes) const
+                             const nlohmann::json& config) const
 {
     created = false;
     const auto directory = root_ / name;
     const auto path = directory / config_file;
-    const nlohmann::json config{
-        {"name", name}, {"config-version", 1}, {"core-minimum-version", 0}, {"nodes", nodes}};
     const auto contents = config.dump(2) + '\n';
     if (contents.size() > max_core_config_bytes || !prepare_root(root_)) {
         return false;

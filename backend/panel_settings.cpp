@@ -2,6 +2,7 @@
 
 #include "panel_base_path.h"
 #include "session_settings.h"
+#include "waterwall_schematic.h"
 
 #ifdef WAVE_ENABLE_AUTH
 #include <httplib.h>
@@ -603,6 +604,15 @@ bool PanelDatabase::claim_waterwall_install()
     current["waterwall_install_attempted"] = true;
     impl_->save(current);
     return true;
+}
+
+void PanelDatabase::save_waterwall_version(std::string_view version)
+{
+    if (!valid_waterwall_version(version)) {
+        throw std::invalid_argument("Invalid WaterWall version.");
+    }
+    const Json value = version;
+    impl_->save_fields({{"waterwall_version", value}});
 }
 
 void PanelDatabase::save_auth(const Json& admins, const Json& auth)

@@ -1,5 +1,7 @@
 #include "preview_session.h"
 
+#include "waterwall_schematic.h"
+
 #include <emscripten.h>
 
 #include <algorithm>
@@ -37,7 +39,10 @@ void PreviewSession::start(bool keep_snapshot)
 {
     stop();
     status_ = PreviewStatus::loading;
+    schematic_revision_ = 0;
     if (!keep_snapshot) {
+        clear_waterwall_schematic();
+        schematic_changed_ = false;
         data_.clear();
         update_logs();
     }
@@ -123,6 +128,9 @@ std::optional<std::uint64_t> PreviewSession::submit(Json request, double timeout
     const auto action_name = action->get<std::string>();
     const auto id = next_request_id_++;
     request["request_id"] = id;
+    if (schematic_revision_ != 0) {
+        request["schematic_revision"] = schematic_revision_;
+    }
     if (!ready() ||
         emscripten_websocket_send_utf8_text(socket_, request.dump().c_str()) != EMSCRIPTEN_RESULT_SUCCESS) {
         log_transport_failure(action_name, "The connection is unavailable.");
@@ -191,6 +199,11 @@ void PreviewSession::clear_local_logs()
     update_logs();
 }
 
+bool PreviewSession::take_schematic_change()
+{
+    return std::exchange(schematic_changed_, false);
+}
+
 void PreviewSession::update_logs()
 {
     const auto logs = data_.find("logs");
@@ -230,6 +243,24 @@ bool PreviewSession::receive(std::string_view payload)
         return false;
     }
 
+    if (const auto schematic = frame.find("schematic");
+        schematic != frame.end() && *schematic != waterwall_schematic()) {
+        const bool had_schematic = !waterwall_version().empty();
+        if (const auto error = set_waterwall_schematic(std::move(*schematic)); !error.empty()) {
+            add_local_log("error", "Invalid WaterWall schematic. " + error);
+            return false;
+        }
+        schematic_changed_ = had_schematic;
+    } else if (status_ == PreviewStatus::loading && !frame.contains("schematic") &&
+               !waterwall_version().empty()) {
+        clear_waterwall_schematic();
+        schematic_changed_ = true;
+    }
+
+    if (const auto revision = frame.find("schematic_revision");
+        revision != frame.end() && revision->is_number_unsigned()) {
+        schematic_revision_ = revision->get<std::uint64_t>();
+    }
     const auto action = frame.find("action");
     const auto feedback = frame.find("feedback");
     const auto ok = frame.find("ok");

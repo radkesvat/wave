@@ -67,9 +67,10 @@ if(UNIX)
 endif()
 
 add_executable(wave-backend
-    main.cpp panel_settings.cpp preview.cpp linux_metrics.cpp auth.cpp auth_store.cpp
+    main.cpp panel_settings.cpp panel_update.cpp preview.cpp linux_metrics.cpp auth.cpp auth_store.cpp
     waterwall.cpp waterwall_install.cpp waterwall_logs.cpp waterwall_users.cpp
     core_config_files.cpp core_config_graph.cpp core_config_users.cpp console.cpp
+    waterwall_schematic_file.cpp waterwall_schematic_catalog.cpp "${PROJECT_SOURCE_DIR}/common/waterwall_schematic.cpp"
 )
 set_target_properties(wave-backend PROPERTIES
     CXX_STANDARD 20
@@ -92,3 +93,11 @@ if(WAVE_ENABLE_AUTH)
     target_sources(wave-backend PRIVATE tls.cpp)
     target_compile_definitions(wave-backend PRIVATE WAVE_ENABLE_AUTH)
 endif()
+
+set(waterwall_schematic_source "${CMAKE_CURRENT_SOURCE_DIR}/schematics/waterwall-1.6.0.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${waterwall_schematic_source}")
+# Encode the source bytes so JSON text and line endings survive the C++ compiler verbatim.
+file(READ "${waterwall_schematic_source}" schematic_hex HEX)
+string(REGEX REPLACE "(..)" "\\\\x\\1" schematic_bytes "${schematic_hex}")
+configure_file(bundled_waterwall_schematic.h.in
+    "${PROJECT_BINARY_DIR}/generated/bundled_waterwall_schematic.h" @ONLY)

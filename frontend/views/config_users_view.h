@@ -40,10 +40,10 @@ struct ConfigUsersState {
     std::string name;
     std::string email;
     std::string notes;
-    std::string wireguard_ips;
+    std::string network;
     std::string password;
     std::string saved_password;
-    std::map<std::string_view, std::string> numbers;
+    std::map<std::string, std::string, std::less<>> numbers;
     std::string validation;
     std::string read_error;
     std::string user_id;

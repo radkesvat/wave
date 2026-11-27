@@ -69,6 +69,7 @@ configure_file(shell.html "${wave_shell}" @ONLY)
 configure_file(theme_swatches.h.in "${CMAKE_CURRENT_BINARY_DIR}/theme_swatches.h" @ONLY)
 
 add_executable(wave
+    "${PROJECT_SOURCE_DIR}/common/waterwall_schematic.cpp"
     auth_session.cpp
     browser_ui.cpp
     dialog.cpp
@@ -130,6 +131,7 @@ target_link_libraries(wave PRIVATE nlohmann_json::nlohmann_json)
 # The WebGL renderer needs 32-bit indices for large meshes in the ImPlot demo.
 target_compile_definitions(wave PRIVATE IMGUI_IMPL_OPENGL_ES3 IMGUI_USE_WCHAR32 "ImDrawIdx=unsigned int")
 target_compile_options(wave PRIVATE
+    -fexceptions
     -sUSE_SDL=2
     "$<$<CONFIG:Release>:-flto>"
 )
@@ -141,6 +143,7 @@ set(wave_donation_portrait "${CMAKE_CURRENT_SOURCE_DIR}/assets/gc2.bmp")
 set_property(TARGET wave APPEND PROPERTY LINK_DEPENDS
     "${wave_shell}" "${wave_font}" "${wave_donation_face}" "${wave_donation_portrait}")
 target_link_options(wave PRIVATE
+    -fexceptions
     -sUSE_SDL=2
     -sMIN_WEBGL_VERSION=2
     -sMAX_WEBGL_VERSION=2

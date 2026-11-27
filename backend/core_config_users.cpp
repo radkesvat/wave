@@ -1,6 +1,8 @@
 #include "core_config_users.h"
 
 #include "core_config_name.h"
+#include "schematic_users_ui.h"
+#include "waterwall_schematic.h"
 
 #include <openssl/rand.h>
 
@@ -216,6 +218,56 @@ constexpr Field user_fields[] = {{"id", Kind::uint64, "user-id", {}, false, Acce
                                  {"stats", Kind::object, {}, stats, false, Access::read_only}};
 constexpr auto& password_field = user_fields[1];
 
+const Field* canonical_field(std::span<const Field> fields, std::string_view key)
+{
+    const auto found = std::ranges::find(fields, key, &Field::key);
+    return found == fields.end() ? nullptr : &*found;
+}
+
+const Field* editable_number_field(std::string_view path)
+{
+    std::span<const Field> fields = user_fields;
+    while (path.starts_with('/')) {
+        path.remove_prefix(1);
+        const auto separator = path.find('/');
+        const auto* field = canonical_field(fields, path.substr(0, separator));
+        if (!field || field->access != Access::edit) {
+            return nullptr;
+        }
+        if (separator == path.npos) {
+            return field->kind == Kind::uint64 || field->kind == Kind::interval ? field : nullptr;
+        }
+        fields = field->children;
+        path.remove_prefix(separator);
+    }
+    return nullptr;
+}
+
+constexpr SchematicUserNumberBounds adapter_number_bounds(const Field& field)
+{
+    if (field.access == Access::create) {
+        return explicit_user_id_bounds;
+    }
+    return field.kind == Kind::interval ? user_stat_interval_bounds : SchematicUserNumberBounds{};
+}
+
+std::string validate_number_bounds(const Json& descriptor, const Field& field)
+{
+    const auto domain = adapter_number_bounds(field);
+    const auto bounds = schematic_user_number_bounds(descriptor, domain);
+    const auto& path = descriptor.at("path").get_ref<const std::string&>();
+    if (bounds.minimum < domain.minimum || bounds.maximum > domain.maximum || bounds.minimum > bounds.maximum) {
+        return "Invalid bounds for offline user number " + path + '.';
+    }
+    if (descriptor.value("gigabytes", false)) {
+        const auto megabytes = whole_megabyte_bounds(bounds);
+        if (megabytes.minimum > megabytes.maximum) {
+            return "The bounds for " + path + " contain no whole megabyte. Use a byte field or widen the range.";
+        }
+    }
+    return {};
+}
+
 const Json* select_field(const Json& object, const Field& field, bool from_disk)
 {
     const auto primary = object.find(field.key);
@@ -265,7 +317,7 @@ Json read_value(const Json& value, const Field& field, ReadMode mode, const std:
     case Kind::uint64:
     case Kind::interval:
         if (const auto number = unsigned_value(value, from_disk);
-            number && (field.kind == Kind::uint64 || *number <= std::numeric_limits<int>::max())) {
+            number && *number <= adapter_number_bounds(field).maximum) {
             return std::to_string(*number);
         }
         break;
@@ -622,6 +674,66 @@ Publication publish(int directory, const std::string& name, std::string_view dat
 CoreConfigUsers::CoreConfigUsers(const fs::path& executable_directory)
     : root_(executable_directory / "configs")
 {
+}
+
+std::string CoreConfigUsers::validate_schematic_editor(const Json& users)
+{
+    const auto& controls = users.at("fields");
+    constexpr struct {
+        const char* role;
+        const char* key;
+        Kind kind;
+        Access access = Access::edit;
+    } roles[] = {
+        {"id", "id", Kind::uint64, Access::create},
+        {"password", "password", Kind::password},
+        {"group", "gid", Kind::uint64},
+        {"name", "name", Kind::text},
+        {"email", "email", Kind::text},
+        {"notes", "notes", Kind::text},
+        {"network", "wireguard-allowed-ips", Kind::cidr},
+        {"enabled", "enabled", Kind::boolean},
+    };
+    for (const auto& role : roles) {
+        const auto control = controls.find(role.role);
+        if (control == controls.end()) {
+            continue;
+        }
+        const auto key = schematic_text(control->at("key"));
+        const auto* field = canonical_field(user_fields, key);
+        if (key != role.key || !field || field->kind != role.kind || field->access != role.access ||
+            (role.kind == Kind::uint64 &&
+             schematic_text(control->at("path")) != "/" + std::string(role.key))) {
+            return std::string("Invalid offline user editor mapping for role ") + role.role + '.';
+        }
+        if (field->kind == Kind::uint64) {
+            if (auto error = validate_number_bounds(*control, *field); !error.empty()) {
+                return error;
+            }
+        }
+    }
+    const auto validate_numbers = [](const Json& numbers) -> std::string {
+        for (const auto& descriptor : numbers) {
+            const auto path = schematic_text(descriptor.at("path"));
+            const auto* field = editable_number_field(path);
+            if (!field) {
+                return "Invalid editable offline user number path " + std::string(path) + '.';
+            }
+            if (auto error = validate_number_bounds(descriptor, *field); !error.empty()) {
+                return error;
+            }
+        }
+        return {};
+    };
+    if (auto error = validate_numbers(schematic_field(users, "access_fields")); !error.empty()) {
+        return error;
+    }
+    for (const auto& group : schematic_field(users, "limit_groups")) {
+        if (auto error = validate_numbers(group.at("fields")); !error.empty()) {
+            return error;
+        }
+    }
+    return {};
 }
 
 bool CoreConfigUsers::valid_filename(std::string_view db_name)

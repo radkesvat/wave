@@ -52,6 +52,7 @@ struct ConfigNodesState {
     bool load_requested = false;
     bool dirty = false;
     bool graph_editable = false;
+    bool schematic_unavailable = false;
     std::optional<PreviewReply> reply;
 
     Dialog dialog = Dialog::none;

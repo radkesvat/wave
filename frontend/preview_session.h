@@ -46,6 +46,7 @@ class PreviewSession {
     void abandon(std::optional<std::uint64_t>& request_id);
     void add_local_log(std::string_view level, std::string_view message);
     void clear_local_logs();
+    bool take_schematic_change();
 
     PreviewStatus status() const
     {
@@ -84,6 +85,8 @@ class PreviewSession {
 
     EMSCRIPTEN_WEBSOCKET_T socket_ = 0;
     double deadline_ = 0;
+    bool schematic_changed_ = false;
+    std::uint64_t schematic_revision_ = 0;
     PreviewStatus status_ = PreviewStatus::loading;
     nlohmann::json data_ = nlohmann::json::object();
     std::deque<LocalLog> local_logs_;

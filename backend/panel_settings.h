@@ -33,6 +33,7 @@ class PanelDatabase {
     void save_theme(theme::Preset preset);
     void save_donation(std::string_view answer, std::string_view answered_at);
     bool claim_waterwall_install();
+    void save_waterwall_version(std::string_view version);
     void save_auth(const nlohmann::json& admins, const nlohmann::json& auth);
     void save_core_settings(const nlohmann::json& settings);
     void save_core_configs(const nlohmann::json& configs);

@@ -4,9 +4,19 @@
 #include "preview_session.h"
 
 #include <array>
+#include <cstdint>
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace wave {
+
+struct PanelUpdateState {
+    std::optional<std::uint64_t> request_id;
+    std::optional<std::uint64_t> check_generation;
+    std::string available_version;
+    bool open_dialog = false;
+};
 
 struct PanelControlsState {
     enum class Dialog {
@@ -21,6 +31,7 @@ struct PanelControlsState {
 
     Dialog dialog = Dialog::none;
     bool open_dialog = false;
+    PanelUpdateState updates;
     std::string target_version;
     // Leave room for one extra UTF-8 character so validation can detect an overlong name.
     std::array<char, max_core_config_name_bytes + 5> config_name{};
@@ -44,6 +55,8 @@ bool config_action_pending(const PanelControlsState& state, int config_id);
 float panel_controls_height(const PreviewSession& session, float width, bool compact);
 void render_panel_controls(PanelControlsState& state, PreviewSession& session, float width, bool compact);
 void render_panel_control_dialog(PanelControlsState& state, PreviewSession& session);
+void render_panel_update_dialog(PanelUpdateState& state, PreviewSession& session);
+std::string describe_panel_update_dialog(const PanelUpdateState& state);
 std::string describe_panel_controls(const PanelControlsState& state, const PreviewSession& session,
                                     bool include_status);
 

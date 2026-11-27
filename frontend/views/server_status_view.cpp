@@ -7,8 +7,8 @@
 
 #include <array>
 #include <format>
+#include <optional>
 #include <string_view>
-#include <utility>
 
 namespace wave {
 namespace {
@@ -21,8 +21,30 @@ constexpr float gutter = 12;
 constexpr ImVec2 card_padding{10, 8};
 constexpr float minimum_plot_height = 134;
 constexpr char unavailable[] = "Unavailable";
+constexpr float update_dot_radius = 4.0f;
 
-using InfoRows = std::array<std::pair<const char*, std::string>, 8>;
+struct VersionStatus {
+    std::string_view current;
+    std::string_view latest;
+    bool update_available;
+
+    VersionStatus(std::string_view current, const Json& component)
+        : current(current), latest(string_field(component, "latest_version")),
+          update_available(!latest.empty() && bool_field(component, "update_available"))
+    {
+        if (latest.empty()) {
+            latest = unavailable;
+        }
+    }
+};
+
+struct InfoRow {
+    const char* label;
+    std::string value;
+    std::optional<bool> update_available = std::nullopt;
+};
+
+using InfoRows = std::array<InfoRow, 11>;
 
 struct StatusSamples {
     const Json& cpu;
@@ -93,12 +115,18 @@ std::string traffic_reading(std::string_view name, std::optional<double> value, 
 
 InfoRows server_information(const Json& server, const StatusSamples& samples)
 {
+    const auto& core = field(server, "core");
+    const VersionStatus panel(string_field(server, "version", wave::version), field(server, "panel"));
+    const VersionStatus waterwall(string_field(core, "version", unavailable), core);
     const int uptime = integer_field(server, "uptime_minutes");
     const auto sent = status_metric(field(server, "upload_total"));
     const auto received = status_metric(field(server, "download_total"));
     return {{{"Host name", std::string(string_field(server, "name", unavailable))},
              {"Platform", std::string(string_field(server, "platform", unavailable))},
-             {"Version", std::string(string_field(server, "version", wave::version))},
+             {"Panel version", std::string(panel.current)},
+             {"Latest panel", std::string(panel.latest), panel.update_available},
+             {"Core version", std::string(waterwall.current)},
+             {"Latest core", std::string(waterwall.latest), waterwall.update_available},
              {"Uptime", status_metric(field(server, "uptime_minutes"))
                             ? std::format("{}d {}h {}m", uptime / 1440, uptime / 60 % 24, uptime % 60)
                             : unavailable},
@@ -136,19 +164,25 @@ struct InformationLayout {
     InformationLayout(const InfoRows& info, float width)
     {
         float labels = 0;
-        for (const auto& [label, value] : info) {
-            labels = std::max(labels, text_width(label));
+        for (const auto& row : info) {
+            labels = std::max(labels, text_width(row.label));
         }
         label_width = std::max(1.0f, std::min(labels + 1, std::floor(width * 0.46f)));
         value_x = label_width + gutter;
         value_width = std::max(1.0f, width - value_x);
         for (std::size_t i = 0; i < info.size(); ++i) {
-            const auto& [label, value] = info[i];
-            rows[i] =
-                std::ceil(std::max(wrapped_height(label, label_width), wrapped_height(value, value_width))) +
-                6;
+            const auto& row = info[i];
+            rows[i] = std::ceil(std::max(wrapped_height(row.label, label_width),
+                                         wrapped_height(row.value, text_value_width(row)))) +
+                      6;
             height += rows[i];
         }
+    }
+
+    float text_value_width(const InfoRow& row) const
+    {
+        return row.update_available.has_value() ? std::max(1.0f, value_width - 2 * update_dot_radius - 5)
+                                                : value_width;
     }
 };
 
@@ -159,13 +193,19 @@ void draw_information(const InfoRows& info, const InformationLayout& layout)
     ImGui::Dummy({layout.value_x + layout.value_width, layout.height});
     float y = start.y;
     for (std::size_t i = 0; i < info.size(); ++i) {
-        const auto& [label, value] = info[i];
+        const auto& row = info[i];
         if (i != 0) {
             draw.AddLineH(start.x, start.x + layout.value_x + layout.value_width, y, packed(Color::divider),
                           theme::border_width);
         }
-        draw_text(draw, {start.x, y + 3}, Color::secondary_text, label, layout.label_width);
-        draw_text(draw, {start.x + layout.value_x, y + 3}, Color::primary_text, value, layout.value_width);
+        draw_text(draw, {start.x, y + 3}, Color::secondary_text, row.label, layout.label_width);
+        draw_text(draw, {start.x + layout.value_x, y + 3}, Color::primary_text, row.value,
+                  layout.text_value_width(row));
+        if (row.update_available.value_or(false)) {
+            draw.AddCircleFilled({start.x + layout.value_x + layout.value_width - update_dot_radius,
+                                  y + 3 + ImGui::GetFontSize() * 0.5f},
+                                 update_dot_radius, packed(Color::warning));
+        }
         y += layout.rows[i];
     }
 }
@@ -301,9 +341,17 @@ std::string describe_server_status(const Json& server)
 {
     const StatusSamples samples(server);
     const auto network_scale = traffic_scale(samples);
-    return std::format("CPU {}. Memory {}. Host network. {}. {}.", samples.cpu_value(),
-                       samples.memory_value(), traffic_reading("Upload", samples.upload_now, network_scale),
-                       traffic_reading("Download", samples.download_now, network_scale));
+    const auto& core = field(server, "core");
+    const VersionStatus panel(string_field(server, "version", wave::version), field(server, "panel"));
+    const VersionStatus waterwall(string_field(core, "version", unavailable), core);
+    return std::format("CPU {}. Memory {}. Host network. {}. {}. Server Information. "
+                       "Panel version {}. Latest panel {}.{} Core version {}. Latest core {}.{}",
+                       samples.cpu_value(), samples.memory_value(),
+                       traffic_reading("Upload", samples.upload_now, network_scale),
+                       traffic_reading("Download", samples.download_now, network_scale), panel.current,
+                       panel.latest, panel.update_available ? " Panel update available." : "",
+                       waterwall.current, waterwall.latest,
+                       waterwall.update_available ? " Core update available." : "");
 }
 
 } // namespace wave

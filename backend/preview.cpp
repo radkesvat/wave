@@ -8,10 +8,14 @@
 #include "core_settings.h"
 #include "linux_metrics.h"
 #include "panel_settings.h"
+#include "panel_update.h"
 #include "preview_backup.h"
 #include "session_settings.h"
 #include "waterwall.h"
 #include "waterwall_logs.h"
+#include "waterwall_schematic.h"
+#include "waterwall_schematic_catalog.h"
+#include "waterwall_schematic_file.h"
 #include "waterwall_users.h"
 #include "wave_version.h"
 
@@ -23,6 +27,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
+#include <future>
 #include <limits>
 #include <map>
 #include <memory>
@@ -43,6 +48,7 @@ using UtcTime = std::chrono::sys_seconds;
 using namespace std::chrono_literals;
 
 constexpr auto host_sample_interval = 500ms;
+constexpr auto core_update_check_interval = 24h;
 constexpr std::size_t max_request_bytes = 8192;
 constexpr std::size_t max_user_request_bytes = 32 * 1024;
 constexpr auto max_frame_bytes = max_core_config_bytes + 1024;
@@ -56,25 +62,70 @@ bool core_in_use(std::string_view state)
 bool workspace_mutation(std::string_view action)
 {
     constexpr std::string_view actions[] = {
-        "install_core", "start_core", "stop_core", "restart_core", "update_panel",
-        "create_core_config", "set_core_config_enabled", "remove_core_config", "restore_preview_backup",
-        "apply_settings", "apply_tls_settings", "apply_core_settings", "apply_session_settings",
-        "apply_theme", "apply_donation",
+        "install_core",        "start_core",
+        "stop_core",           "restart_core",
+        "update_core",         "check_core_updates",
+        "check_panel_updates", "check_updates",
+        "create_core_config",  "set_core_config_enabled",
+        "remove_core_config",  "restore_preview_backup",
+        "apply_settings",      "apply_tls_settings",
+        "apply_core_settings", "apply_session_settings",
+        "apply_theme",         "apply_donation",
+        "save_core_config",    "create_config_user",
+        "edit_config_user",    "delete_config_user",
+    };
+    return std::ranges::find(actions, action) != std::end(actions);
+}
+
+bool uses_core_schematic(std::string_view action)
+{
+    constexpr std::string_view actions[] = {
+        "start_core",
+        "restart_core",
+        "install_core",
+        "update_core",
+        "apply_core_settings",
+        "create_core_config",
+        "get_core_config",
         "save_core_config",
-        "create_config_user", "edit_config_user", "delete_config_user",
+        "get_config_users",
+        "get_live_config_users",
+        "get_config_user_password",
+        "create_config_user",
+        "edit_config_user",
+        "delete_config_user",
     };
     return std::ranges::find(actions, action) != std::end(actions);
 }
 
 Json make_core()
 {
-    return {{"capabilities", {{"lifecycle", true}, {"configs", true}}}, {"configs", Json::array()}};
+    return {{"version", waterwall_version()},
+            {"available_versions", Json::array({waterwall_version()})},
+            {"checking_updates", false},
+            {"capabilities", {{"lifecycle", true}, {"configs", true}}},
+            {"configs", Json::array()}};
 }
 
 Json make_server()
 {
-    return {
-        {"version", version}, {"available_panel_versions", Json::array({version})}, {"core", make_core()}};
+    return {{"version", version},
+            {"checking_updates", false},
+            {"panel", {{"checking_updates", false}, {"update_check_generation", 0u}, {"update_available", false}}},
+            {"core", make_core()}};
+}
+
+void sync_core_available_version(Json& core)
+{
+    const auto& available = core.at("available_versions");
+    if (available.empty()) {
+        core.erase("latest_version");
+        core["update_available"] = false;
+        return;
+    }
+    const auto latest = schematic_text(available.front());
+    core["update_available"] = is_newer_waterwall_version(latest, waterwall_version());
+    core["latest_version"] = latest;
 }
 
 Json make_settings()
@@ -241,12 +292,24 @@ struct Reply {
     bool feedback_in_logs_only = false;
 };
 
+struct CoreCatalogResult {
+    std::vector<std::string> versions;
+    std::string error;
+};
+
+struct CoreUpdate {
+    std::shared_ptr<const WaterWallSchematic> schematic;
+    std::unique_ptr<WaterWall> candidate;
+};
+
 class Preview {
   public:
     explicit Preview(std::shared_ptr<PanelDatabase> database)
         : database_(std::move(database)), config_files_(database_->directory()),
-          config_users_(database_->directory()), core_(database_->directory()),
-          core_logs_(database_->directory())
+          config_users_(database_->directory()),
+          core_(std::make_unique<WaterWall>(database_->directory(), waterwall_version())),
+          core_logs_(database_->directory()),
+          waterwall_bin_(waterwall_bin_directory(database_->directory()))
     {
         data_["settings"]["session_expiry_days"] = database_->session_expiry_days();
         const auto& stored = database_->initial_contents();
@@ -260,9 +323,14 @@ class Preview {
         if (const auto donation = stored.find("donation"); donation != stored.end()) {
             donation_ = read_donation(*donation);
         }
-        load_core_settings();
+        saved_core_settings_ = stored.value("core_settings", Json::object());
+        reload_core_settings();
+        load_core_configs(stored.value("core_configs", Json::array()));
+        auto& core = data_["server"]["core"];
+        core["available_versions"] = cached_waterwall_versions(waterwall_bin_);
+        sync_core_available_version(core);
         if (database_->claim_waterwall_install()) {
-            core_.install_if_missing();
+            core_->install_if_missing(waterwall_schematic());
         }
         host_.sample(data_["server"]);
         sync_core();
@@ -278,6 +346,10 @@ class Preview {
                 sampled_at = std::chrono::steady_clock::now();
                 host_.sample(data_["server"]);
                 update_core();
+                finish_panel_update_check();
+                if (!panel_update_result_.valid() && !catalog_result_.valid() && !queued_catalog_check_) {
+                    data_["server"]["checking_updates"] = false;
+                }
                 ++revision_;
             }
         });
@@ -303,7 +375,8 @@ class Preview {
         // publish shared state changes while the current browser is idle.
         socket.set_read_timeout(100ms);
         std::uint64_t sent_revision = 0;
-        if (!session() || !socket.send(changed_snapshot(sent_revision))) {
+        std::uint64_t sent_schematic = 0;
+        if (!session() || !socket.send(changed_snapshot(sent_revision, sent_schematic))) {
             return;
         }
         std::string message;
@@ -313,10 +386,10 @@ class Preview {
                 return;
             }
             const auto frame = result == httplib::ws::Timeout
-                                   ? changed_snapshot(sent_revision)
+                                   ? changed_snapshot(sent_revision, sent_schematic)
                                    : handle_message(result == httplib::ws::Text ? std::string_view(message)
                                                                                 : std::string_view{},
-                                                    sent_revision);
+                                                    sent_revision, sent_schematic);
             if (!frame.empty()) {
                 if (!session()) {
                     socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
@@ -330,18 +403,20 @@ class Preview {
     }
 
   private:
-    void load_core_settings()
+    void reload_core_settings()
     {
-        const auto& stored = database_->initial_contents();
-        auto normalized = core_settings::normalize(stored.value("core_settings", Json::object()));
+        auto normalized = core_settings::normalize(saved_core_settings_);
+        data_.erase("core_settings_notice");
         if (!normalized.issue.empty()) {
             data_["core_settings_notice"] =
                 "Review the settings shown here before saving. Saving replaces the previous core settings. " +
                 normalized.issue;
         }
         data_["core_settings"] = std::move(normalized.settings);
+    }
 
-        const auto saved_configs = stored.value("core_configs", Json::array());
+    void load_core_configs(const Json& saved_configs)
+    {
         if (!saved_configs.is_array() || saved_configs.size() > max_core_configs) {
             throw std::runtime_error("core_configs in wave-db.json must be an array of up to 64 configs.");
         }
@@ -389,18 +464,29 @@ class Preview {
         return snapshot;
     }
 
-    std::string changed_snapshot(std::uint64_t& sent_revision)
+    void attach_schematic(Json& frame, std::uint64_t& sent_schematic) const
+    {
+        frame["schematic_revision"] = schematic_revision_;
+        if (sent_schematic != schematic_revision_) {
+            frame["schematic"] = waterwall_schematic();
+            sent_schematic = schematic_revision_;
+        }
+    }
+
+    std::string changed_snapshot(std::uint64_t& sent_revision, std::uint64_t& sent_schematic)
     {
         std::lock_guard lock(mutex_);
         if (revision_ == sent_revision) {
             return {};
         }
-        auto frame = snapshot().dump(-1, ' ', false, Json::error_handler_t::replace);
+        auto frame = snapshot();
+        attach_schematic(frame, sent_schematic);
         sent_revision = revision_;
-        return frame;
+        return frame.dump(-1, ' ', false, Json::error_handler_t::replace);
     }
 
-    std::string handle_message(std::string_view message, std::uint64_t& sent_revision)
+    std::string handle_message(std::string_view message, std::uint64_t& sent_revision,
+                               std::uint64_t& sent_schematic)
     {
         const bool invalid_frame =
             message.size() > max_frame_bytes || message.find('\0') != std::string_view::npos;
@@ -430,8 +516,16 @@ class Preview {
                bytes <= max_user_request_bytes));
 
         std::unique_lock lock(mutex_);
-        auto reply = action.empty()                      ? Reply{false, "Send a JSON panel action."}
-                     : too_large                         ? Reply{false, "That panel request is too large."}
+        const auto revision = request.find("schematic_revision");
+        const bool allow_missing_revision =
+            schematic_revision_ == 1 && waterwall_version() == bundled_waterwall_version;
+        const bool stale = uses_core_schematic(action) &&
+                           (revision == request.end()
+                                ? !allow_missing_revision
+                                : !revision->is_number_unsigned() || *revision != schematic_revision_);
+        auto reply = action.empty() ? Reply{false, "Send a JSON panel action."}
+                     : too_large    ? Reply{false, "That panel request is too large."}
+                     : stale        ? Reply{false, "WaterWall changed version. Reload the form and retry."}
                      : action == "get_live_config_users" ? get_live_config_users(request, lock)
                                                          : dispatch(action, request);
         if (!reply.ok && !reply.feedback.empty() && workspace_mutation(action)) {
@@ -444,6 +538,7 @@ class Preview {
             ++revision_;
         }
         auto frame = snapshot();
+        attach_schematic(frame, sent_schematic);
         frame["action"] = action;
         frame["ok"] = reply.ok;
         frame["feedback"] = reply.feedback;
@@ -493,11 +588,11 @@ class Preview {
 
     void update_core()
     {
-        core_.update();
+        core_->update();
         for (const auto& entry : core_logs_.read()) {
             add_log(entry.source, entry.timestamp.substr(11, 8), entry.level, entry.message);
         }
-        if (restart_pending_ && !core_in_use(core_.state())) {
+        if (restart_pending_ && !core_in_use(core_->state())) {
             restart_pending_ = false;
             const auto reply = start_core();
             if (!reply.ok) {
@@ -505,12 +600,14 @@ class Preview {
             }
         }
         sync_core();
+        update_release_installation();
+        update_catalog();
     }
 
     void sync_core()
     {
         auto& core = data_["server"]["core"];
-        const auto state = core_.state();
+        const auto state = core_->state();
         if (!core_in_use(state)) {
             core_logs_.stop();
             live_configs_.clear();
@@ -523,6 +620,7 @@ class Preview {
             if (const auto previous = core.find("state"); previous != core.end()) {
                 if (*previous == "installing" && state == "stopped") {
                     log("success", "WaterWall installed.");
+                    next_catalog_check_ = {};
                 } else if (*previous == "starting" && state == "running") {
                     log("success", "WaterWall started.");
                 } else if (*previous == "stopping" && state == "stopped") {
@@ -539,7 +637,7 @@ class Preview {
 
     const std::string& core_error() const
     {
-        return restart_error_.empty() ? core_.error() : restart_error_;
+        return restart_error_.empty() ? core_->error() : restart_error_;
     }
 
     Reply apply_settings(const Json& input)
@@ -665,6 +763,7 @@ class Preview {
         } catch (const std::runtime_error&) {
             return {false, "Could not save core settings in wave-db.json."};
         }
+        saved_core_settings_ = normalized.settings;
         data_["core_settings"] = std::move(normalized.settings);
         data_.erase("core_settings_notice");
         return complete("Saved core settings for the next launch.");
@@ -727,7 +826,7 @@ class Preview {
             }
             const auto& name = config["name"].get_ref<const std::string&>();
             bool new_file;
-            if (!config_files_.create(name, true, new_file)) {
+            if (!config_files_.create(name, true, new_file, make_empty_core_config(name))) {
                 error = "Could not prepare the files for the restored configs.";
                 break;
             }
@@ -754,8 +853,14 @@ class Preview {
 
     Reply change_core_state(std::string_view action)
     {
+        if (core_update_) {
+            return {false, "Wait for the WaterWall update to finish."};
+        }
         if (action == "install_core") {
-            auto error = core_.install();
+            if (catalog_result_.valid()) {
+                return {false, "Wait for the core update check to finish."};
+            }
+            auto error = core_->install(waterwall_schematic());
             if (!error.empty()) {
                 return {false, std::move(error)};
             }
@@ -767,14 +872,14 @@ class Preview {
         }
         const bool restart = action == "restart_core";
         if (restart) {
-            if (core_.state() != "running") {
+            if (core_->state() != "running") {
                 return {false, "WaterWall must be running before it can be restarted."};
             }
-            if (!core_.installed()) {
+            if (!core_->installed()) {
                 return {false, "The WaterWall executable must be installed before it can be restarted."};
             }
         }
-        if (auto error = core_.stop(); !error.empty()) {
+        if (auto error = core_->stop(); !error.empty()) {
             return {false, std::move(error)};
         }
         restart_pending_ = restart;
@@ -783,7 +888,7 @@ class Preview {
 
     Reply start_core()
     {
-        if (core_.state() != "stopped") {
+        if (core_->state() != "stopped") {
             return {false, "WaterWall must be installed and stopped before it can be started."};
         }
         if (data_.contains("core_settings_notice")) {
@@ -802,8 +907,7 @@ class Preview {
                 if (const auto nodes = file.config.find("nodes");
                     nodes != file.config.end() && nodes->is_array()) {
                     for (const auto& node : *nodes) {
-                        if (const auto type = node.find("type");
-                            type != node.end() && *type == "AuthenticationServer") {
+                        if (uses_auth_database(node)) {
                             const auto db = auth_database_name(node, name, database_->directory());
                             bool created;
                             if (!db.empty()) {
@@ -822,8 +926,9 @@ class Preview {
             return {false, "Enable at least one config before starting WaterWall."};
         }
         auto settings = data_["core_settings"];
-        settings["configs"] = std::move(paths);
-        if (auto error = core_.start(settings.dump()); !error.empty()) {
+        settings[schematic_text(waterwall_schematic().at("core_settings").at("config_list_key"))] =
+            std::move(paths);
+        if (auto error = core_->start(settings.dump()); !error.empty()) {
             return {false, std::move(error)};
         }
         restart_error_.clear();
@@ -836,18 +941,262 @@ class Preview {
         return complete("Starting WaterWall.", "info");
     }
 
-    Reply update_panel(const Json& input)
+    bool installing_core() const
     {
-        const auto target = input.find("version");
-        return {false, target != input.end() && *target == version ? "That Wave version is already active."
-                                                                   : "That Wave version is unavailable."};
+        return core_update_.has_value() || core_->state() == "installing";
+    }
+
+    std::string check_catalog(bool manual)
+    {
+        std::packaged_task<CoreCatalogResult(std::stop_token)> task(
+            [directory = waterwall_bin_, selected = std::string(waterwall_version()),
+             packages = waterwall_schematic().at("packages")](std::stop_token stop) {
+                try {
+                    auto error = fetch_waterwall_schematics(directory, selected, packages, stop);
+                    return CoreCatalogResult{cached_waterwall_versions(directory), std::move(error)};
+                } catch (const std::exception&) {
+                    return CoreCatalogResult{{}, "Could not read the WaterWall schematic catalog."};
+                }
+            });
+        next_catalog_check_ = std::chrono::steady_clock::now() + core_update_check_interval;
+        auto result = task.get_future();
+        try {
+            catalog_worker_ = std::jthread(std::move(task));
+        } catch (const std::system_error&) {
+            return "Could not start the WaterWall update check.";
+        }
+        catalog_result_ = std::move(result);
+        manual_catalog_check_ = manual;
+        auto& status = data_["server"]["core"];
+        status["checking_updates"] = true;
+        status.erase("update_check_error");
+        return {};
+    }
+
+    Reply check_core_updates(bool queue_during_install = false)
+    {
+        if (data_["server"]["checking_updates"] == true) {
+            return {true, "Wave is already checking for updates."};
+        }
+        if (catalog_result_.valid()) {
+            manual_catalog_check_ = true;
+            return {true, "Wave is already checking for core updates."};
+        }
+        if (installing_core()) {
+            if (!queue_during_install) {
+                return {false, "Wait for WaterWall installation to finish before checking for updates."};
+            }
+            queued_catalog_check_ = true;
+            auto& status = data_["server"]["core"];
+            status["checking_updates"] = true;
+            status.erase("update_check_error");
+            return {true, "WaterWall update check queued until installation finishes.", true};
+        }
+        auto error = check_catalog(true);
+        return error.empty() ? Reply{true, "Checking for core updates.", true}
+                             : Reply{false, std::move(error)};
+    }
+
+    void update_catalog()
+    {
+        auto& status = data_["server"]["core"];
+        if (catalog_result_.valid() && catalog_result_.wait_for(0s) == std::future_status::ready) {
+            auto result = catalog_result_.get();
+            status["checking_updates"] = false;
+            if (!result.versions.empty()) {
+                status["available_versions"] = std::move(result.versions);
+                sync_core_available_version(status);
+            }
+            if (!result.error.empty()) {
+                status["update_check_error"] = result.error;
+                log("error", result.error);
+            } else if (manual_catalog_check_) {
+                log("success", "WaterWall update check completed.");
+            }
+        }
+        if (!catalog_result_.valid() && !installing_core() &&
+            (queued_catalog_check_ || std::chrono::steady_clock::now() >= next_catalog_check_)) {
+            const bool manual = std::exchange(queued_catalog_check_, false);
+            if (auto error = check_catalog(manual); !error.empty()) {
+                status["checking_updates"] = false;
+                status["update_check_error"] = error;
+                log("error", error);
+            }
+        }
+    }
+
+    Reply check_panel_updates()
+    {
+        if (panel_update_result_.valid() || data_["server"]["checking_updates"] == true) {
+            return {true, "Wave is already checking for panel updates."};
+        }
+        std::packaged_task<PanelUpdateCheck(std::stop_token)> task([](std::stop_token stop) {
+            try {
+                return check_panel_update(release_version, stop);
+            } catch (const std::exception&) {
+                return PanelUpdateCheck{.error = "Could not check for Wave panel updates."};
+            }
+        });
+        auto result = task.get_future();
+        try {
+            panel_update_worker_ = std::jthread(std::move(task));
+        } catch (const std::system_error&) {
+            return {false, "Could not start the Wave panel update check."};
+        }
+        panel_update_result_ = std::move(result);
+        auto& status = data_["server"]["panel"];
+        status["checking_updates"] = true;
+        status.erase("update_check_error");
+        return {true, "Checking for panel updates.", true};
+    }
+
+    Reply check_updates()
+    {
+        auto& checking = data_["server"]["checking_updates"];
+        if (checking == true) {
+            return {true, "Wave is already checking for updates."};
+        }
+        const auto core = check_core_updates(true);
+        auto panel = check_panel_updates();
+        checking = core.ok || panel.ok;
+        if (!core.ok) {
+            data_["server"]["core"]["update_check_error"] = core.feedback;
+            log("error", core.feedback);
+        }
+        return panel.ok ? Reply{true, "Checking for updates.", true} : std::move(panel);
+    }
+
+    void finish_panel_update_check()
+    {
+        if (!panel_update_result_.valid() || panel_update_result_.wait_for(0s) != std::future_status::ready) {
+            return;
+        }
+        const auto result = panel_update_result_.get();
+        auto& status = data_["server"]["panel"];
+        status["checking_updates"] = false;
+        status["update_check_generation"] = status["update_check_generation"].get<std::uint64_t>() + 1;
+        if (!result.error.empty()) {
+            status["update_check_error"] = result.error;
+            log("error", result.error);
+            return;
+        }
+        status["update_available"] = result.update_available;
+        if (result.latest_version.empty()) {
+            status.erase("latest_version");
+            log("info", "Wave has no version tags on GitHub yet.");
+            return;
+        }
+        status["latest_version"] = result.latest_version;
+        if (result.update_available) {
+            log("info", "Wave " + result.latest_version + " is available.");
+        } else {
+            log("info", "No newer Wave panel version is available.");
+        }
+    }
+
+    Reply update_core_release(const Json& input)
+    {
+        if (core_in_use(core_->state()) || restart_pending_) {
+            return {false, "Stop WaterWall before changing its version."};
+        }
+        if (installing_core() || catalog_result_.valid()) {
+            return {false, "Wait for the current WaterWall operation to finish."};
+        }
+        const auto target = schematic_text(schematic_field(input, "version"));
+        if (!valid_waterwall_version(target)) {
+            return {false, "Choose an available WaterWall version."};
+        }
+        if (target == waterwall_version()) {
+            return {false, "That WaterWall version is already active."};
+        }
+        auto& status = data_["server"]["core"];
+        const auto& available = status["available_versions"];
+        if (std::ranges::find(available, target) == available.end()) {
+            return {false, "That WaterWall version is unavailable."};
+        }
+        status.erase("update_error");
+        try {
+            auto schematic = prepare_waterwall_release_schematic(waterwall_bin_, target);
+            auto candidate = std::make_unique<WaterWall>(database_->directory(), target);
+            if (candidate->installed()) {
+                if (auto error = activate_release({std::move(schematic), std::move(candidate)});
+                    !error.empty()) {
+                    return {false, std::move(error)};
+                }
+                return {true, "Selected WaterWall " + std::string(target) + '.', true, {}, true};
+            }
+            if (auto error = candidate->install(waterwall_schematic(*schematic)); !error.empty()) {
+                return {false, std::move(error)};
+            }
+            core_update_ = CoreUpdate{std::move(schematic), std::move(candidate)};
+            status["update_target"] = target;
+            return complete("Installing WaterWall " + std::string(target) + '.', "info");
+        } catch (const std::exception& error) {
+            return {false, error.what()};
+        }
+    }
+
+    std::string activate_release(CoreUpdate next)
+    {
+        const auto target = schematic_text(waterwall_schematic(*next.schematic).at("version"));
+        try {
+            database_->save_waterwall_version(target);
+        } catch (const std::runtime_error&) {
+            return "Could not save the selected WaterWall version in wave-db.json.";
+        }
+        activate_waterwall_schematic(std::move(next.schematic));
+        core_ = std::move(next.candidate);
+        core_logs_.stop();
+        restart_error_.clear();
+        ++schematic_revision_;
+        ++live_run_;
+        reload_core_settings();
+        auto& status = data_["server"]["core"];
+        status["version"] = waterwall_version();
+        sync_core_available_version(status);
+        for (auto& config : status["configs"]) {
+            const auto& name = config["name"].get_ref<const std::string&>();
+            update_config_tabs(config, config_files_.read(name).config);
+        }
+        log("success", "Selected WaterWall " + std::string(waterwall_version()) + '.');
+        next_catalog_check_ = {};
+        sync_core();
+        return {};
+    }
+
+    void update_release_installation()
+    {
+        if (!core_update_) {
+            return;
+        }
+        core_update_->candidate->update();
+        if (core_update_->candidate->state() == "installing") {
+            return;
+        }
+        auto next = std::move(*core_update_);
+        core_update_.reset();
+        auto& status = data_["server"]["core"];
+        status.erase("update_target");
+        std::string error;
+        if (next.candidate->installed()) {
+            error = activate_release(std::move(next));
+        } else {
+            error = next.candidate->error();
+            if (error.empty()) {
+                error = "The target binary is missing or unsafe.";
+            }
+        }
+        if (!error.empty()) {
+            status["update_error"] = "Could not update WaterWall. " + error;
+            log("error", status["update_error"].get_ref<const std::string&>());
+        }
     }
 
     std::string prepare_auth_databases(std::string_view name, const Json& config,
                                        std::vector<std::string>& created)
     {
         for (const auto& node : config["nodes"]) {
-            if (node["type"] != "AuthenticationServer") {
+            if (!uses_auth_database(node)) {
                 continue;
             }
             const auto& db = node["panel-settings"]["auth-db"].get_ref<const std::string&>();
@@ -892,8 +1241,11 @@ class Preview {
         }
         auto changed = configs;
         changed.push_back({{"id", next_config_id_}, {"name", name}, {"enabled", false}, {"active", false}});
-        Json config = {{"nodes", Json::array()}};
+        Json config;
         if (add_auth_nodes != input.end() && *add_auth_nodes == true) {
+            if (!schematic_field(waterwall_schematic().at("config"), "users_starter").is_object()) {
+                return {false, "This WaterWall schematic does not define user starter nodes."};
+            }
             std::vector<Json> existing;
             existing.reserve(configs.size() + live_configs_.size());
             for (const auto& row : configs) {
@@ -921,9 +1273,11 @@ class Preview {
                 return {false, std::move(error)};
             }
             update_config_tabs(changed.back(), config);
+        } else {
+            config = make_empty_core_config(name);
         }
         bool created;
-        if (!config_files_.create(name, false, created, config["nodes"])) {
+        if (!config_files_.create(name, false, created, config)) {
             return {false, "Could not create the config folder and file."};
         }
         std::vector<std::string> created_databases;
@@ -1013,7 +1367,7 @@ class Preview {
         const auto target = input.find("node");
         if (id == input.end() || !integer_value(*id, 1, std::numeric_limits<int>::max()) ||
             target == input.end() || !text_value(*target, 128, true)) {
-            return {false, "Choose a config and AuthenticationServer node."};
+            return {false, "Choose a config and user database node."};
         }
         std::string_view cursor;
         if (const auto supplied = input.find("cursor"); supplied != input.end()) {
@@ -1029,35 +1383,35 @@ class Preview {
                          {{"available", false}, {"users", Json::array()}, {"total", 0}, {"next_cursor", nullptr}}};
         };
         const auto config = live_configs_.find(id->get<int>());
-        if (core_.state() != "running" || config == live_configs_.end() ||
+        if (core_->state() != "running" || config == live_configs_.end() ||
             !has_waterwall_users_api(config->second)) {
             return unavailable();
         }
         const auto names = config_auth_nodes(config->second);
         if (std::ranges::find(names, *target) == names.end()) {
-            return {false, "That AuthenticationServer node is unavailable."};
+            return {false, "That user database node is unavailable."};
         }
         const auto& node = target->get_ref<const std::string&>();
         auto endpoint = waterwall_users_endpoint(config->second, node);
         if (!endpoint) {
-            return {false,
-                    "Configure a local TcpListener and an APIServer client with list-users permission for this node."};
+            return {false, std::string(schematic_text(
+                               waterwall_schematic().at("ui").at("users").at("live_setup_help")))};
         }
         std::size_t bindings = 0;
         for (const auto& [_, launch_config] : live_configs_) {
             bindings += waterwall_tcp_bindings(launch_config, *endpoint);
         }
         if (bindings != 1) {
-            return {false, "Use a dedicated TcpListener port for the WaterWall API."};
+            return {false, "Use a dedicated listener port for the WaterWall API."};
         }
 
         const auto run = live_run_;
-        const auto pid = core_.running_pid();
+        const auto pid = core_->running_pid();
         // Keep lifecycle actions and host sampling independent of the API's network deadline.
         lock.unlock();
         auto page = list_waterwall_users(pid, *endpoint, node, cursor);
         lock.lock();
-        if (live_run_ != run || core_.state() != "running") {
+        if (live_run_ != run || core_->state() != "running") {
             return unavailable();
         }
         return {page.error.empty(), std::move(page.error), false, std::move(page.result)};
@@ -1077,7 +1431,7 @@ class Preview {
         const auto& name = (*row)["name"].get_ref<const std::string&>();
         const bool active = (*row)["active"] == true;
         const bool graph_action = action == "get_core_config" || action == "save_core_config";
-        if (!graph_action && core_in_use(core_.state())) {
+        if (!graph_action && core_in_use(core_->state())) {
             return {false, "Stop WaterWall to use the offline users editor."};
         }
         auto document = config_files_.read(name);
@@ -1144,14 +1498,14 @@ class Preview {
         const auto nodes = config.find("nodes");
         if (target == input.end() || !text_value(*target, 128, true) || nodes == config.end() ||
             !nodes->is_array()) {
-            return {false, "Choose an AuthenticationServer node."};
+            return {false, "Choose a user database node."};
         }
         const auto node = std::ranges::find_if(*nodes, [&](const Json& candidate) {
             return candidate.is_object() && candidate.value("name", Json{}) == *target &&
-                   candidate.value("type", Json{}) == "AuthenticationServer";
+                   uses_auth_database(candidate);
         });
         if (node == nodes->end()) {
-            return {false, "That AuthenticationServer node is unavailable."};
+            return {false, "That user database node is unavailable."};
         }
         const auto db = auth_database_name(*node, name, database_->directory());
         if (db.empty()) {
@@ -1175,8 +1529,17 @@ class Preview {
             action == "restart_core") {
             return change_core_state(action);
         }
-        if (action == "update_panel") {
-            return update_panel(input);
+        if (action == "check_core_updates") {
+            return check_core_updates();
+        }
+        if (action == "check_panel_updates") {
+            return check_panel_updates();
+        }
+        if (action == "check_updates") {
+            return check_updates();
+        }
+        if (action == "update_core") {
+            return update_core_release(input);
         }
         if (action == "create_core_config") {
             return create_core_config(input);
@@ -1216,7 +1579,7 @@ class Preview {
             return restore_backup(input);
         }
         if (action == "diagnostics") {
-            auto feedback = "WaterWall is " + std::string(core_.state()) + '.';
+            auto feedback = "WaterWall is " + std::string(core_->state()) + '.';
             const auto& error = core_error();
             if (!error.empty()) {
                 feedback += ' ' + error;
@@ -1232,16 +1595,27 @@ class Preview {
     std::shared_ptr<PanelDatabase> database_;
     CoreConfigFiles config_files_;
     CoreConfigUsers config_users_;
-    WaterWall core_;
+    std::unique_ptr<WaterWall> core_;
     WaterWallLogs core_logs_;
+    std::filesystem::path waterwall_bin_;
+    std::optional<CoreUpdate> core_update_;
+    std::chrono::steady_clock::time_point next_catalog_check_{};
+    std::future<CoreCatalogResult> catalog_result_;
+    std::jthread catalog_worker_;
+    bool manual_catalog_check_ = false;
+    bool queued_catalog_check_ = false;
     bool restart_pending_ = false;
     std::string restart_error_;
     std::map<int, Json> live_configs_;
     std::uint64_t live_run_ = 0;
     Json data_ = make_data();
+    Json saved_core_settings_;
     std::optional<Donation> donation_;
     int next_config_id_ = 1;
     std::uint64_t revision_ = 1;
+    std::uint64_t schematic_revision_ = 1;
+    std::future<PanelUpdateCheck> panel_update_result_;
+    std::jthread panel_update_worker_;
     std::jthread sampler_;
 };
 

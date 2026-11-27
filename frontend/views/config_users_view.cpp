@@ -1,15 +1,17 @@
 #include "config_users_view.h"
 
 #include "dialog.h"
+#include "schematic_users_ui.h"
 #include "view_helpers.h"
+#include "waterwall_schematic.h"
 
 #include <misc/cpp/imgui_stdlib.h>
 
 #include <algorithm>
 #include <charconv>
 #include <format>
-#include <limits>
-#include <span>
+#include <utility>
+#include <vector>
 
 namespace wave {
 namespace {
@@ -21,7 +23,6 @@ using theme::Color;
 using view::Json;
 
 constexpr char offline_only[] = "Stop WaterWall to access this users database.";
-constexpr std::uint64_t bytes_per_megabyte = 1'000'000;
 constexpr std::uint64_t megabytes_per_gigabyte = 1'000;
 
 struct NumberField {
@@ -29,62 +30,65 @@ struct NumberField {
     const char* label;
     const char* hint;
     std::string_view help;
-    std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
-    std::uint64_t minimum = 0;
+    SchematicUserNumberBounds bounds;
     bool gigabytes = false;
 };
 
-constexpr NumberField account_id{
-    "/id",
-    "User ID",
-    "Automatically assigned",
-    "WaterWall uses this unique, nonzero ID to track the account. Leave blank to let Wave assign one.",
-    std::numeric_limits<std::uint64_t>::max(),
-    1};
-constexpr NumberField group_id{"/gid", "Group ID", "Default group",
-                               "WaterWall's numeric group identifier. Blank uses group 0."};
-constexpr NumberField access_fields[] = {
-    {"/record-stat-interval-ms", "Record stats interval (ms)", "WaterWall default",
-     "Interval in milliseconds for recording stats. Blank uses WaterWall's default of two minutes.",
-     std::numeric_limits<int>::max()},
-    {"/time/expire-at-ms", "Expires at (Unix ms)", "No deadline",
-     "An absolute Unix epoch timestamp in milliseconds. Blank or 0 leaves this deadline unset."},
-    {"/time/expire-after-first-usage-ms", "Expires after first use (ms)", "No duration limit",
-     "A duration measured from the account's first use. Enter 86400000 for 24 hours. Blank or 0 leaves it "
-     "unset."},
-};
-constexpr NumberField traffic_fields[] = {
-    {.path = "/limit/traffic/up",
-     .label = "Upload traffic (GB)",
-     .hint = "Unlimited",
-     .help = "Enter a quota in GB with up to three decimal places. 0.001 GB is 1 MB.",
-     .gigabytes = true},
-    {.path = "/limit/traffic/down",
-     .label = "Download traffic (GB)",
-     .hint = "Unlimited",
-     .help = "Enter a quota in GB with up to three decimal places. 0.001 GB is 1 MB.",
-     .gigabytes = true},
-    {.path = "/limit/traffic/total",
-     .label = "Total traffic (GB)",
-     .hint = "Unlimited",
-     .help = "Caps combined upload and download traffic in GB with up to three decimal places.",
-     .gigabytes = true},
-};
-constexpr NumberField bandwidth_fields[] = {
-    {"/limit/bandwidth/up", "Upload bandwidth (bytes/s)", "Unlimited",
-     "Bandwidth limits are rates for each direction. Enter 1048576 for 1 MiB/s."},
-    {"/limit/bandwidth/down", "Download bandwidth (bytes/s)", "Unlimited", {}},
-};
-constexpr NumberField connection_fields[] = {
-    {"/limit/ips", "IP addresses", "Unlimited",
-     "Maximum number of distinct IP addresses in use at the same time for this account."},
-    {"/limit/devices", "Devices", "Unlimited", {}},
-    {"/limit/connections-in", "Incoming connections", "Unlimited", {}},
-    {"/limit/connections-out", "Outgoing connections", "Unlimited", {}},
-};
-constexpr std::span<const NumberField> number_groups[] = {
-    {&account_id, 1}, {&group_id, 1}, access_fields, traffic_fields, bandwidth_fields, connection_fields,
-};
+const Json& user_ui()
+{
+    return view::field(view::field(waterwall_schematic(), "ui"), "users");
+}
+
+const Json& user_field(std::string_view role)
+{
+    return view::field(view::field(user_ui(), "fields"), role);
+}
+
+std::string_view user_key(std::string_view role)
+{
+    return view::string_field(user_field(role), "key");
+}
+
+NumberField number_field(const Json& descriptor)
+{
+    const auto path = view::string_field(descriptor, "path");
+    const auto defaults = path == "/id"                        ? explicit_user_id_bounds
+                          : path == "/record-stat-interval-ms" ? user_stat_interval_bounds
+                                                               : SchematicUserNumberBounds{};
+    const auto bounds = schematic_user_number_bounds(descriptor, defaults);
+    const bool gigabytes = view::bool_field(descriptor, "gigabytes");
+    return {
+        .path = path.data(),
+        .label = view::string_field(descriptor, "label").data(),
+        .hint = view::string_field(descriptor, "hint").data(),
+        .help = view::string_field(descriptor, "help"),
+        .bounds = gigabytes ? whole_megabyte_bounds(bounds) : bounds,
+        .gigabytes = gigabytes,
+    };
+}
+
+std::vector<NumberField> editable_numbers(bool creating)
+{
+    std::vector<NumberField> result;
+    const auto add = [&](const Json& descriptor) {
+        if (descriptor.is_object() && !view::string_field(descriptor, "path").empty()) {
+            result.push_back(number_field(descriptor));
+        }
+    };
+    if (creating) {
+        add(user_field("id"));
+    }
+    add(user_field("group"));
+    for (const auto& field : view::array_field(user_ui(), "access_fields")) {
+        add(field);
+    }
+    for (const auto& group : view::array_field(user_ui(), "limit_groups")) {
+        for (const auto& field : view::array_field(group, "fields")) {
+            add(field);
+        }
+    }
+    return result;
+}
 
 std::string number_text(const Json& user, const char* path)
 {
@@ -104,9 +108,8 @@ std::optional<std::uint64_t> parse_unsigned(std::string_view text)
     return parsed.ec == std::errc{} && parsed.ptr == end ? std::optional(value) : std::nullopt;
 }
 
-std::string gigabytes_text(std::uint64_t bytes)
+std::string gigabytes_from_megabytes(std::uint64_t megabytes)
 {
-    const auto megabytes = bytes / bytes_per_megabyte;
     return std::format("{}.{:03}", megabytes / megabytes_per_gigabyte, megabytes % megabytes_per_gigabyte);
 }
 
@@ -115,13 +118,13 @@ std::string display_number(const Json& user, const NumberField& field)
     auto text = number_text(user, field.path);
     if (field.gigabytes) {
         if (const auto bytes = parse_unsigned(text)) {
-            return gigabytes_text(*bytes);
+            return gigabytes_from_megabytes(*bytes / bytes_per_megabyte);
         }
     }
     return text;
 }
 
-std::optional<std::uint64_t> parse_gigabytes(std::string_view text)
+std::optional<std::uint64_t> parse_gigabytes_as_megabytes(std::string_view text)
 {
     // Shift the decimal point to get an integer count of MB without losing precision.
     std::string megabytes(text);
@@ -134,11 +137,7 @@ std::optional<std::uint64_t> parse_gigabytes(std::string_view text)
         megabytes.erase(point, 1);
     }
     megabytes.append(3 - fractional_digits, '0');
-    const auto value = parse_unsigned(megabytes);
-    if (!value || *value > std::numeric_limits<std::uint64_t>::max() / bytes_per_megabyte) {
-        return std::nullopt;
-    }
-    return *value * bytes_per_megabyte;
+    return parse_unsigned(megabytes);
 }
 
 void clear_password(std::string& password)
@@ -153,18 +152,18 @@ void select_user(ConfigUsersState& state, Editor editor, const Json& user = {})
     state.section = Section::account;
     state.open_account = editor == Editor::add || editor == Editor::edit;
     state.selected_user = user;
-    state.user_id = view::string_field(user, "id");
-    state.name = view::string_field(user, "name");
-    state.email = view::string_field(user, "email");
-    state.notes = view::string_field(user, "notes");
-    state.wireguard_ips = view::string_field(user, "wireguard-allowed-ips");
+    state.user_id = view::string_field(user, user_key("id"));
+    state.name = view::string_field(user, user_key("name"));
+    state.email = view::string_field(user, user_key("email"));
+    state.notes = view::string_field(user, user_key("notes"));
+    state.network = view::string_field(user, user_key("network"));
     clear_password(state.password);
     clear_password(state.saved_password);
     state.password_unavailable = false;
-    state.enabled = view::bool_field(user, "enabled", true);
+    state.enabled = view::bool_field(user, user_key("enabled"), true);
     state.numbers.clear();
-    for (const auto fields : number_groups) {
-        for (const auto& field : fields) {
+    if (editor == Editor::add || editor == Editor::edit) {
+        for (const auto& field : editable_numbers(editor == Editor::add)) {
             state.numbers.emplace(field.path, display_number(user, field));
         }
     }
@@ -265,58 +264,57 @@ struct UserPatch {
 UserPatch pending_patch(const ConfigUsersState& state, bool creating)
 {
     UserPatch patch;
-    const auto set_text = [&](const char* key, const std::string& value) {
-        if (value != view::string_field(state.selected_user, key)) {
-            patch.fields[key] = value;
+    const auto set_text = [&](std::string_view role, const std::string& value) {
+        const auto key = user_key(role);
+        if (!key.empty() && value != view::string_field(state.selected_user, key)) {
+            patch.fields[std::string(key)] = value;
         }
     };
     set_text("name", state.name);
     set_text("email", state.email);
     set_text("notes", state.notes);
-    set_text("wireguard-allowed-ips", state.wireguard_ips);
-    if (creating || state.enabled != view::bool_field(state.selected_user, "enabled", true)) {
-        patch.fields["enabled"] = state.enabled;
+    set_text("network", state.network);
+    const auto enabled_key = user_key("enabled");
+    if (!enabled_key.empty() &&
+        (creating || state.enabled != view::bool_field(state.selected_user, enabled_key, true))) {
+        patch.fields[std::string(enabled_key)] = state.enabled;
     }
-    for (const auto fields : number_groups) {
-        for (const auto& field : fields) {
-            if (!creating && &field == &account_id) {
-                continue;
+    for (const auto& field : editable_numbers(creating)) {
+        const auto input = state.numbers.find(field.path);
+        if (input == state.numbers.end() || input->second == display_number(state.selected_user, field)) {
+            continue;
+        }
+        const auto& text = input->second;
+        const auto original = number_text(state.selected_user, field.path);
+        const Json::json_pointer key(field.path);
+        if (text.empty()) {
+            if (!creating && !original.empty()) {
+                patch.fields[key] = nullptr;
             }
-            const auto& text = state.numbers.at(field.path);
-            if (text == display_number(state.selected_user, field)) {
-                continue;
-            }
-            const auto original = number_text(state.selected_user, field.path);
-            const Json::json_pointer key(field.path);
-            if (text.empty()) {
-                if (!creating && !original.empty()) {
-                    patch.fields[key] = nullptr;
-                }
-                continue;
-            }
-            const auto value = field.gigabytes ? parse_gigabytes(text) : parse_unsigned(text);
-            if (!value || *value < field.minimum || *value > field.maximum) {
-                patch.issue =
-                    field.gigabytes
-                        ? std::format("{} must be between 0 and {}, with up to three decimal places.",
-                                      field.label, gigabytes_text(field.maximum))
-                        : std::format("{} requires a whole number from {} to {}.", field.label, field.minimum,
-                                      field.maximum);
-                return patch;
-            }
-            const auto canonical = std::to_string(*value);
-            if (canonical != original) {
-                patch.fields[key] = canonical;
-            }
+            continue;
+        }
+        const auto value = field.gigabytes ? parse_gigabytes_as_megabytes(text) : parse_unsigned(text);
+        if (!value || *value < field.bounds.minimum || *value > field.bounds.maximum) {
+            patch.issue = field.gigabytes
+                              ? std::format("{} must be between {} and {}, with up to three decimal places.",
+                                            field.label, gigabytes_from_megabytes(field.bounds.minimum),
+                                            gigabytes_from_megabytes(field.bounds.maximum))
+                              : std::format("{} requires a whole number from {} to {}.", field.label,
+                                            field.bounds.minimum, field.bounds.maximum);
+            return patch;
+        }
+        const auto canonical = std::to_string(field.gigabytes ? *value * bytes_per_megabyte : *value);
+        if (canonical != original) {
+            patch.fields[key] = canonical;
         }
     }
     return patch;
 }
 
-void edit_text(const char* label, std::string& text, const char* hint, std::string_view help = {},
+void edit_text(const char* id, const char* label, std::string& text, const char* hint, std::string_view help,
                ImGuiInputTextFlags flags = 0)
 {
-    ImGui::PushID(label);
+    ImGui::PushID(id);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
     if (!help.empty()) {
@@ -340,7 +338,11 @@ void edit_number(ConfigUsersState& state, const NumberField& field)
             help = saved_quota_help;
         }
     }
-    edit_text(field.label, state.numbers.at(field.path), field.hint, help, ImGuiInputTextFlags_CharsDecimal);
+    auto [input, inserted] = state.numbers.try_emplace(field.path);
+    if (inserted) {
+        input->second = display_number(state.selected_user, field);
+    }
+    edit_text(field.path, field.label, input->second, field.hint, help, ImGuiInputTextFlags_CharsDecimal);
 }
 
 bool begin_fields(const char* id, bool narrow)
@@ -353,45 +355,58 @@ bool begin_fields(const char* id, bool narrow)
 void render_account(ConfigUsersState& state, bool creating, bool narrow)
 {
     if (begin_fields("Account fields", narrow)) {
-        ImGui::TableNextColumn();
-        edit_text("Name", state.name, "Optional", "An operator label. Enter a unique name if you use one.");
-        ImGui::TableNextColumn();
-        edit_text("Email", state.email, "Optional");
-        ImGui::TableNextColumn();
-        edit_text("Password", state.password, creating ? "Required" : "Keep current password",
-                  "Use the credential expected by the WaterWall node. SOCKS5 username and password "
-                  "authentication uses the combined username:password string.",
-                  creating ? ImGuiInputTextFlags_Password : ImGuiInputTextFlags_None);
-        ImGui::TableNextColumn();
-        if (creating) {
-            edit_number(state, account_id);
-        } else {
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("User ID");
-            view::help_marker(
-                "WaterWall uses this unique, nonzero ID to track the account across database updates.");
-            view::wrapped(state.user_id, Color::secondary_text);
+        const std::pair<const char*, std::string*> entries[] = {
+            {"name", &state.name}, {"email", &state.email}, {"password", &state.password}};
+        for (const auto& [role, input] : entries) {
+            const auto& field = user_field(role);
+            if (!field.is_object()) {
+                continue;
+            }
+            ImGui::TableNextColumn();
+            const bool secret = std::string_view(role) == "password";
+            edit_text(role, view::string_field(field, "label").data(), *input,
+                      view::string_field(field, secret && !creating ? "edit_hint" : "hint").data(),
+                      view::string_field(field, "help"),
+                      secret && creating ? ImGuiInputTextFlags_Password : ImGuiInputTextFlags_None);
+        }
+        if (const auto& id = user_field("id"); id.is_object()) {
+            ImGui::TableNextColumn();
+            if (creating) {
+                edit_number(state, number_field(id));
+            } else {
+                ImGui::AlignTextToFramePadding();
+                view::text(view::string_field(id, "label"));
+                view::help_marker(view::string_field(id, "edit_help"));
+                view::wrapped(state.user_id, Color::secondary_text);
+            }
         }
         ImGui::EndTable();
     }
-    ImGui::TextUnformatted("Notes");
-    ImGui::InputTextMultiline("##user-notes", &state.notes, {-1, 84});
+    if (const auto& notes = user_field("notes"); notes.is_object()) {
+        view::text(view::string_field(notes, "label"));
+        ImGui::InputTextMultiline("##user-notes", &state.notes, {-1, 84});
+    }
 }
 
 void render_access(ConfigUsersState& state, bool narrow)
 {
-    ImGui::Checkbox("Enabled", &state.enabled);
-    view::help_marker("Controls whether WaterWall accepts this tunnel user's credentials.");
+    if (const auto& enabled = user_field("enabled"); enabled.is_object()) {
+        ImGui::Checkbox(view::string_field(enabled, "label").data(), &state.enabled);
+        view::help_marker(view::string_field(enabled, "help"));
+    }
     if (begin_fields("Access fields", narrow)) {
-        ImGui::TableNextColumn();
-        edit_number(state, group_id);
-        ImGui::TableNextColumn();
-        edit_text("WireGuard allowed IPs", state.wireguard_ips, "One IPv4 or IPv6 CIDR",
-                  "Enter one IPv4 or IPv6 network with a prefix, such as 192.0.2.15/32 or 2001:db8::15/128. "
-                  "User ranges must be disjoint. Leave this field blank to clear it.");
-        for (const auto& field : access_fields) {
+        if (const auto& group = user_field("group"); group.is_object()) {
             ImGui::TableNextColumn();
-            edit_number(state, field);
+            edit_number(state, number_field(group));
+        }
+        if (const auto& network = user_field("network"); network.is_object()) {
+            ImGui::TableNextColumn();
+            edit_text("network", view::string_field(network, "label").data(), state.network,
+                      view::string_field(network, "hint").data(), view::string_field(network, "help"));
+        }
+        for (const auto& descriptor : view::array_field(user_ui(), "access_fields")) {
+            ImGui::TableNextColumn();
+            edit_number(state, number_field(descriptor));
         }
         ImGui::EndTable();
     }
@@ -399,62 +414,44 @@ void render_access(ConfigUsersState& state, bool narrow)
 
 void render_limits(ConfigUsersState& state, bool narrow)
 {
-    view::wrapped("Blank or zero leaves a limit unlimited.", Color::secondary_text);
-    const auto group = [&](const char* label, std::span<const NumberField> fields) {
-        ImGui::SeparatorText(label);
-        if (begin_fields(label, narrow)) {
-            for (const auto& field : fields) {
+    view::wrapped(view::string_field(user_ui(), "limits_help"), Color::secondary_text);
+    for (const auto& group : view::array_field(user_ui(), "limit_groups")) {
+        const auto label = view::string_field(group, "label");
+        ImGui::SeparatorText(label.data());
+        if (begin_fields(label.data(), narrow)) {
+            for (const auto& descriptor : view::array_field(group, "fields")) {
                 ImGui::TableNextColumn();
-                edit_number(state, field);
+                edit_number(state, number_field(descriptor));
             }
             ImGui::EndTable();
         }
-    };
-    group("Traffic", traffic_fields);
-    group("Bandwidth", bandwidth_fields);
-    group("Concurrent use", connection_fields);
+    }
 }
 
 void render_activity(const Json& user)
 {
-    struct Reading {
-        const char* label;
-        const char* path;
-        bool gigabytes = false;
-    };
-    constexpr Reading timestamps[] = {{"Created (Unix ms)", "/time/created-at-ms"},
-                                      {"First used (Unix ms)", "/time/first-usage-at-ms"}};
-    constexpr Reading account_stats[] = {
-        {"Uploaded (GB)", "/stats/traffic/up", true},
-        {"Downloaded (GB)", "/stats/traffic/down", true},
-        {"Upload speed (bytes/s)", "/stats/speed/up"},
-        {"Download speed (bytes/s)", "/stats/speed/down"},
-        {"IP addresses", "/stats/ips"},
-        {"Devices", "/stats/devices"},
-        {"Incoming connections", "/stats/connections-in"},
-        {"Outgoing connections", "/stats/connections-out"},
-    };
-    const auto group = [&](const char* label, std::span<const Reading> readings) {
-        ImGui::SeparatorText(label);
-        if (!ImGui::BeginTable(label, 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchSame)) {
-            return;
+    for (const auto& group : view::array_field(user_ui(), "activity_groups")) {
+        const auto label = view::string_field(group, "label");
+        ImGui::SeparatorText(label.data());
+        if (!ImGui::BeginTable(label.data(), 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchSame)) {
+            continue;
         }
-        for (const auto& reading : readings) {
+        for (const auto& descriptor : view::array_field(group, "fields")) {
+            const auto reading = number_field(descriptor);
             ImGui::TableNextColumn();
             view::wrapped(reading.label);
             ImGui::TableNextColumn();
             auto value = number_text(user, reading.path);
             if (reading.gigabytes) {
                 if (const auto bytes = parse_unsigned(value)) {
-                    value = *bytes > 0 && *bytes < bytes_per_megabyte ? "<0.001" : gigabytes_text(*bytes);
+                    const auto megabytes = *bytes / bytes_per_megabyte;
+                    value = *bytes > 0 && megabytes == 0 ? "<0.001" : gigabytes_from_megabytes(megabytes);
                 }
             }
             view::wrapped(value.empty() ? "Not recorded" : std::string_view(value), Color::secondary_text);
         }
         ImGui::EndTable();
-    };
-    group("Recorded times", timestamps);
-    group("Recorded usage", account_stats);
+    }
 }
 
 void capture_scroll_bounds(ConfigUsersState& state)
@@ -531,10 +528,12 @@ void render_editor(ConfigUsersState& state, PreviewSession& session, int config_
 
     auto patch = removing ? UserPatch{} : pending_patch(state, creating);
     state.validation = std::move(patch.issue);
-    const bool password_changed =
-        !state.password.empty() && (creating || state.password != state.saved_password);
+    const auto password_key = user_key("password");
+    const bool password_changed = !password_key.empty() && !state.password.empty() &&
+                                  (creating || state.password != state.saved_password);
     const bool changed = !patch.fields.empty() || password_changed;
-    ImGui::BeginDisabled(!writable || !state.validation.empty() || (creating && !password_changed) ||
+    ImGui::BeginDisabled(!writable || !state.validation.empty() ||
+                         (creating && !password_key.empty() && !password_changed) ||
                          (!creating && !removing && !changed));
     if (theme::button(removing ? "Delete user" : creating ? "Create user" : "Save user")) {
         Json request{{"config_id", config_id}, {"node", node}, {"page", state.page}};
@@ -546,7 +545,7 @@ void render_editor(ConfigUsersState& state, PreviewSession& session, int config_
         }
         if (!removing) {
             if (password_changed) {
-                patch.fields["password"] = state.password;
+                patch.fields[std::string(password_key)] = state.password;
             }
             request["user"] = std::move(patch.fields);
         }
@@ -578,7 +577,7 @@ void render_users(ConfigUsersState& state, PreviewSession& session, int config_i
     constexpr char default_group[] = "Default";
     constexpr char enabled_label[] = "Enabled";
     constexpr char disabled_label[] = "Disabled";
-    if (!ImGui::BeginTable("AuthenticationServer users", narrow ? 2 : 4,
+    if (!ImGui::BeginTable("Offline users", narrow ? 2 : 4,
                            ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
         return;
     }
@@ -604,9 +603,9 @@ void render_users(ConfigUsersState& state, PreviewSession& session, int config_i
         ImGui::PopStyleColor();
     };
     for (const auto& user : state.users) {
-        const auto id = view::string_field(user, "id");
-        const auto name = view::string_field(user, "name");
-        const auto email = view::string_field(user, "email");
+        const auto id = view::string_field(user, user_key("id"));
+        const auto name = view::string_field(user, user_key("name"));
+        const auto email = view::string_field(user, user_key("email"));
         const auto group = view::string_field(user, "gid");
         const bool enabled = view::bool_field(user, "enabled");
         const auto status = enabled ? enabled_label : disabled_label;
@@ -752,7 +751,7 @@ void render_config_users(ConfigUsersState& state, PreviewSession& session, int c
 
 std::string describe_config_users(const ConfigUsersState& state)
 {
-    std::string description = "AuthenticationServer users.";
+    std::string description(view::string_field(user_ui(), "offline_description", "Offline users."));
     if (state.blocked) {
         return description + ' ' + offline_only;
     }

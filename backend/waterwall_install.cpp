@@ -1,8 +1,11 @@
 #include "waterwall_install.h"
 
-#include "wave_version.h"
+#include "waterwall_schematic.h"
+#include "waterwall_tool.h"
 
-#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+#if defined(__linux__)
+
+#include "private_temp_directory.h"
 
 #include <openssl/evp.h>
 
@@ -17,7 +20,6 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
-#include <cstdlib>
 #include <fstream>
 #include <memory>
 #include <string_view>
@@ -32,15 +34,12 @@ namespace {
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
-constexpr std::string_view pinned_release = "1.6.0";
 #if defined(__x86_64__)
-constexpr std::string_view package = "Waterwall-linux-gcc-x64-old-cpu.zip";
-constexpr std::string_view expected_sha256 =
-    "0121139392483e7308c8521ce37c4393afd28a394473fec22ebab776f720bab3";
+constexpr std::string_view platform = "linux-x86_64";
+#elif defined(__aarch64__)
+constexpr std::string_view platform = "linux-aarch64";
 #else
-constexpr std::string_view package = "Waterwall-linux-gcc-arm64-old-cpu.zip";
-constexpr std::string_view expected_sha256 =
-    "a51324868bb69f4a89add08e55fd63ef78ef346f85225c5c88637a0e05b598d7";
+constexpr std::string_view platform;
 #endif
 constexpr std::size_t max_archive_size = 64 * 1024 * 1024;
 constexpr std::size_t max_binary_size = 128 * 1024 * 1024;
@@ -72,34 +71,6 @@ class File {
 
   private:
     int fd_;
-};
-
-class Staging {
-  public:
-    explicit Staging(const fs::path& directory) : name_((directory / ".waterwall-install-XXXXXX").string())
-    {
-        if (!mkdtemp(name_.data())) {
-            name_.clear();
-        }
-    }
-
-    Staging(const Staging&) = delete;
-    Staging& operator=(const Staging&) = delete;
-    ~Staging()
-    {
-        if (!name_.empty()) {
-            std::error_code ignored;
-            fs::remove_all(name_, ignored);
-        }
-    }
-
-    const std::string& name() const
-    {
-        return name_;
-    }
-
-  private:
-    std::string name_;
 };
 
 class Child {
@@ -171,7 +142,7 @@ bool write_bytes(int fd, std::string_view data)
 }
 
 std::string run_to_file(std::vector<std::string> command, const fs::path& target, std::size_t limit,
-                        std::chrono::seconds timeout, std::stop_token stop)
+                        std::chrono::milliseconds timeout, std::stop_token stop)
 {
     if (stop.stop_requested()) {
         return cancelled;
@@ -253,7 +224,7 @@ std::string run_to_file(std::vector<std::string> command, const fs::path& target
     return "WaterWall installer command '" + tool + "' timed out.";
 }
 
-bool verify_sha256(const fs::path& archive, std::stop_token stop)
+bool verify_sha256(const fs::path& archive, std::string_view expected_sha256, std::stop_token stop)
 {
     std::ifstream input(archive, std::ios::binary);
     std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
@@ -286,26 +257,38 @@ bool verify_sha256(const fs::path& archive, std::stop_token stop)
 
 } // namespace
 
-std::string install_waterwall(const fs::path& directory, std::stop_token stop)
+std::string run_waterwall_tool(std::vector<std::string> command, const fs::path& target, std::size_t limit,
+                               std::chrono::milliseconds timeout, std::stop_token stop)
 {
+    return run_to_file(std::move(command), target, limit, timeout, stop);
+}
+
+std::string install_waterwall(const fs::path& directory, const nlohmann::json& schematic,
+                              std::stop_token stop)
+{
+    if (platform.empty()) {
+        return "Automatic WaterWall installation requires x86-64 or ARM64 Linux.";
+    }
     if (stop.stop_requested()) {
         return cancelled;
     }
-    if (std::string_view(version) != pinned_release) {
-        return "This Wave version has no verified WaterWall release archive.";
+    const auto& package = schematic_field(schematic_field(schematic, "packages"), platform);
+    if (package.is_null()) {
+        return "The selected WaterWall release has no verified archive for this platform.";
     }
     std::error_code error;
     const auto destination = fs::absolute(directory, error);
     if (error) {
         return "Cannot locate the WaterWall binary directory.";
     }
-    const Staging staging(destination);
-    if (staging.name().empty()) {
+    const PrivateTempDirectory staging(destination, ".waterwall-install-");
+    if (staging.path().empty()) {
         return "Cannot create a private staging directory for WaterWall.";
     }
-    const fs::path archive = fs::path(staging.name()) / "Waterwall.zip";
-    const auto url = std::string("https://github.com/radkesvat/WaterWall/releases/download/v") + version +
-                     '/' + std::string(package);
+    const auto archive = staging.path() / "Waterwall.zip";
+    const auto url = std::string("https://github.com/radkesvat/WaterWall/releases/download/v") +
+                     std::string(schematic_text(schematic.at("version"))) + '/' +
+                     package.at("archive").get<std::string>();
     if (const auto failure =
             run_to_file({"curl", "-q", "--fail", "--silent", "--show-error", "--location", "--proto",
                          "=https", "--proto-redir", "=https", "--max-redirs", "5", "--connect-timeout", "10",
@@ -314,10 +297,10 @@ std::string install_waterwall(const fs::path& directory, std::stop_token stop)
         !failure.empty()) {
         return failure;
     }
-    if (!verify_sha256(archive, stop)) {
+    if (!verify_sha256(archive, schematic_text(package.at("sha256")), stop)) {
         return stop.stop_requested() ? cancelled : "The WaterWall archive failed its SHA-256 check.";
     }
-    const fs::path binary = fs::path(staging.name()) / "Waterwall";
+    const auto binary = staging.path() / "Waterwall";
     if (const auto failure =
             run_to_file({"unzip", "-p", archive.string(), "Waterwall"}, binary, max_binary_size, 30s, stop);
         !failure.empty()) {
@@ -340,7 +323,13 @@ std::string install_waterwall(const fs::path& directory, std::stop_token stop)
 
 namespace wave {
 
-std::string install_waterwall(const std::filesystem::path&, std::stop_token)
+std::string run_waterwall_tool(std::vector<std::string>, const std::filesystem::path&, std::size_t,
+                               std::chrono::milliseconds, std::stop_token)
+{
+    return "WaterWall update downloads require Linux.";
+}
+
+std::string install_waterwall(const std::filesystem::path&, const nlohmann::json&, std::stop_token)
 {
     return "Automatic WaterWall installation requires x86-64 or ARM64 Linux.";
 }

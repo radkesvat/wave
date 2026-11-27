@@ -10,13 +10,7 @@
 namespace wave {
 
 struct CoreSettingsDraft {
-    enum class Section {
-        runtime,
-        logging,
-        dns
-    };
-
-    Section section = Section::runtime;
+    std::string section;
     nlohmann::json source;
     nlohmann::json settings;
     std::map<std::string, std::string> inputs;

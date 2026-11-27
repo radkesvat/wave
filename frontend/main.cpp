@@ -328,6 +328,8 @@ struct Application {
                 panel.workspaces.clear();
                 session.abandon(panel.about.donation_request);
                 panel.about = {};
+                session.abandon(panel.panel_controls.updates.request_id);
+                panel.panel_controls.updates = {};
                 panel.settings = {};
                 theme_choice.reset();
                 session.abandon(theme_request);
@@ -335,6 +337,18 @@ struct Application {
             }
         }
         session.update();
+        if (session.take_schematic_change()) {
+            for (auto& [_, workspace] : panel.workspaces) {
+                wave::abandon_config_workspace(workspace, session);
+            }
+            wave::close_config_json_editor();
+            panel.workspaces.clear();
+            session.abandon(panel.settings.core.request);
+            panel.settings.core = {};
+            panel.logs.hidden_sources.clear();
+            session.add_local_log("info",
+                                  "WaterWall schematic changed. Reloaded saved configuration settings.");
+        }
     }
 
     void update_theme_preference()

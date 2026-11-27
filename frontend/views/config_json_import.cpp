@@ -1,6 +1,7 @@
 #include "config_json_import.h"
 
 #include "core_config_json.h"
+#include "waterwall_schematic.h"
 
 #include <map>
 #include <utility>
@@ -66,13 +67,12 @@ std::size_t object_end(std::string_view text, std::size_t start)
     return text.npos;
 }
 
-bool is_variables_key(std::string_view token)
+bool is_variables_key(std::string_view token, std::string_view key)
 {
-    return token == "\"variables\"" ||
-           (token.find('\\') != token.npos && Json::parse(token, nullptr, false) == "variables");
+    return token.substr(1, token.size() - 2) == key || Json::parse(token, nullptr, false) == key;
 }
 
-std::string_view variable_declaration(std::string_view source, std::string& error)
+std::string_view variable_declaration(std::string_view source, std::string_view key, std::string& error)
 {
     constexpr std::string_view bom = "\xef\xbb\xbf";
     const auto root = source.find_first_not_of(json_whitespace, source.starts_with(bom) ? bom.size() : 0);
@@ -86,7 +86,7 @@ std::string_view variable_declaration(std::string_view source, std::string& erro
             if (depth == 1 && end != source.npos) {
                 const auto colon = source.find_first_not_of(json_whitespace, end);
                 if (colon != source.npos && source[colon] == ':' &&
-                    is_variables_key(source.substr(i, end - i))) {
+                    is_variables_key(source.substr(i, end - i), key)) {
                     const auto start = source.find_first_not_of(json_whitespace, colon + 1);
                     if (start == source.npos || source[start] != '{') {
                         error = "The top-level variables block must be a JSON object.";
@@ -181,12 +181,20 @@ ConfigJsonImport parse_config_json_import(std::string_view text)
         return result;
     }
 
+    const auto& spec = schematic_field(schematic_field(waterwall_schematic(), "config"), "import");
+    const auto variables_key = schematic_text(schematic_field(spec, "variables_key"));
+    const auto commit_key = schematic_text(schematic_field(spec, "commit_key"));
     bool removed_comments = false;
-    const auto source = strip_line_comments(text, removed_comments, result.error);
+    std::string uncommented;
+    if (schematic_field(spec, "line_comments") == true) {
+        uncommented = strip_line_comments(text, removed_comments, result.error);
+        text = uncommented;
+    }
     if (!result.error.empty()) {
         return result;
     }
-    const auto declaration = variable_declaration(source, result.error);
+    const auto declaration =
+        variables_key.empty() ? std::string_view{} : variable_declaration(text, variables_key, result.error);
     if (!result.error.empty()) {
         return result;
     }
@@ -198,18 +206,22 @@ ConfigJsonImport parse_config_json_import(std::string_view text)
             return result;
         }
     }
-    const auto expanded = substitute_variables(source, variables, result.error);
+    std::string expanded;
+    if (!variables_key.empty()) {
+        expanded = substitute_variables(text, variables, result.error);
+        text = expanded;
+    }
     if (!result.error.empty()) {
         return result;
     }
-    auto document = parse_plain_core_config_json(expanded, "Enter valid JSON.", result.error);
+    auto document = parse_plain_core_config_json(text, "Enter valid JSON.", result.error);
     if (!result.error.empty()) {
         return result;
     }
     result.needs_confirmation = removed_comments;
     if (document.is_object()) {
-        const bool removed_variables = document.erase("variables") != 0;
-        const bool removed_commits = document.erase("commits") != 0;
+        const bool removed_variables = !variables_key.empty() && document.erase(variables_key) != 0;
+        const bool removed_commits = !commit_key.empty() && document.erase(commit_key) != 0;
         result.needs_confirmation |= removed_variables || removed_commits;
     }
     result.document = std::move(document);

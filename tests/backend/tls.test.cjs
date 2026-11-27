@@ -5,7 +5,7 @@ const { tmpdir } = require('node:os');
 const { dirname, join, resolve } = require('node:path');
 const { test } = require('node:test');
 const { promisify } = require('node:util');
-const { copyBackend, hostname, timeout, tlsFixture, writeTlsConfig } = require('./tls_fixture.cjs');
+const { bundledSchematicFile, copyBackend, hostname, timeout, tlsFixture, writeTlsConfig } = require('./tls_fixture.cjs');
 
 const run = promisify(execFile);
 
@@ -57,6 +57,17 @@ test('checks TLS without a site and follows renewed PEM symlinks', async t => {
     }
     assert.match((await check()).stdout, /TLS configuration is valid/);
     assert.equal(await readFile(config, 'utf8'), contents);
+});
+
+test('checks TLS and schematics independently and rejects combining the modes', async t => {
+    const { execute, writeConfig } = await deployment(t);
+    await writeConfig();
+    const tls = ['--check-tls'];
+    const schematic = ['--check-schematic', bundledSchematicFile];
+    assert.match((await execute(...tls)).stdout, /TLS configuration is valid/);
+    assert.match((await execute(...schematic)).stdout, /WaterWall schematic is valid/);
+    await rejectStartup(execute(...tls, ...schematic), /Usage: wave-backend/);
+    await rejectStartup(execute(...schematic, ...tls), /Usage: wave-backend/);
 });
 
 test('rejects incomplete TLS settings and unsafe certificates before binding', async t => {

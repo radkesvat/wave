@@ -106,14 +106,22 @@ npm ci --prefix tests/frontend
 npm run --prefix tests/frontend install-browser
 ```
 
-After building a preset, use the matching CTest command. Each run serves its
-built site on a separate local port and supplies a WebSocket fixture for the
-workspace in Chromium. The smoke suite covers browser startup and the main
-workspace workflows.
+After building a preset, use the matching CTest command. The panel and
+updates, config and graph editing, and user management suites each serve
+the built site on a separate local port and supply a WebSocket fixture for
+the workspace in Chromium.
 
 ```sh
 ctest --preset web-debug
 ctest --preset web-release
+```
+
+To run the five-theme canvas and browser check on its own after a release
+build, use the same site and UI demo setting as the preset.
+
+```sh
+WAVE_SITE_DIR="$PWD/build/web-release/site" WAVE_EXPECT_UI_DEMOS=0 \
+  node --test --test-name-pattern='among all five themes' tests/frontend/workspace-panel.test.cjs
 ```
 
 The **Frontend** GitHub Actions workflow builds and tests both presets on
@@ -160,8 +168,14 @@ If an existing backend build directory was configured from `backend/`, add
 `--fresh` to the first configure command to reset its CMake cache.
 
 The executable is `build/backend-release/wave-backend` or
-`build/backend-debug/wave-backend`. After building the frontend with the
-`web-release` preset, start the backend from the Wave root and open
+`build/backend-debug/wave-backend`. With Ninja Multi-Config, each configuration
+builds the executable in its own directory, such as `Debug/` or `Release/`.
+The executable contains the default WaterWall 1.6.0 schematic. On first
+startup, Wave creates its `waterwall_bin/` cache and seeds the default
+release from that embedded copy. Rebuilding after a schematic edit updates
+the copy in the executable. Existing cached schematics take priority.
+After building the frontend with the `web-release` preset, start the backend
+from the Wave root and open
 [the local setup URL](http://127.0.0.1:2045/) for the first visit. Use the
 saved base path for later visits. [Panel base path](authentication.md#set-the-panel-base-path)
 
@@ -356,30 +370,80 @@ that omits `input_window`, the browser limits the WebSocket's outgoing buffer.
 
 ### Panel Controls and versioning
 
-Each Wave panel release uses the same version number as the WaterWall core
-release it supports. Wave 1.6.0 installs WaterWall from the
-[v1.6.0 release](https://github.com/radkesvat/WaterWall/releases/tag/v1.6.0).
-Server Information shows the running Wave **Version**. The **Target version** picker
-in Panel Controls currently offers only 1.6.0.
+Wave and WaterWall have independent versions. **Server Information** shows
+the running Wave version, the selected WaterWall version, and the latest known
+version of each. A warning-colored dot marks a newer version. The selected
+WaterWall version also appears in **Panel Controls**, **Settings → Core**, and
+**Version information**. The backend uses one active WaterWall schematic. The
+default selection is 1.6.0.
 
-Wave creates two directories beside `wave-backend`:
+Wave's panel version comes from `project(Wave VERSION ...)` in `CMakeLists.txt`.
+Set `WAVE_VERSION_CHANNEL` to `beta` for a beta build or leave it empty for a
+stable build.
 
-- `waterwall_bin/` holds the `Waterwall` executable. On first startup, Wave
-  downloads and extracts the matching release in the background if the binary
-  is missing. Automatic installation requires `curl` and `unzip` on `PATH`
-  and access to GitHub. Wave selects the Linux x86-64 or ARM64 archive built for
-  older CPUs and checks its pinned SHA-256 before extracting the executable.
+In **Panel Controls**, **Check for updates** checks both projects. Wave searches
+all pages of GitHub tags for the highest numeric version and refreshes the
+WaterWall schematic catalog. Wave accepts `MAJOR.MINOR.PATCH` tags with an
+optional `v` prefix and optional `-beta` suffix. It skips unrelated tags and
+prefers stable over beta at the same version. A newer Wave version opens a
+dialog with an **Open build guide** button that links to the
+[build and deployment guide](#native-backend). Check results and errors appear
+in **Logs**. If WaterWall is installing, catalog discovery waits for the
+installation to finish while the Wave tag lookup runs.
+
+Wave checks for compatible schematics on startup, every 24 hours, and after
+installing a release. The backend lists `backend/schematics/` on the Wave GitHub
+repository's `main` branch and fetches new or revised files by Git blob ID. It checks
+the bytes and validates the schematic before atomically replacing a cached
+file. Core update checks use `curl` on `PATH` and download schematic files only.
+If GitHub is unreachable or a file fails validation, Wave keeps its valid
+cached releases and writes the error to **Logs**.
+See the [schematic authoring guide](waterwall-schematics.md).
+
+Save open edits and stop WaterWall before switching. In **Panel Controls**,
+choose a **Target version**, click **Change core version**, and confirm. Wave reuses
+an installed binary or downloads the matching WaterWall archive and verifies
+its SHA-256 before selecting the release. If installation fails, Wave keeps
+the previous selection and writes the error to **Logs**. A successful switch
+saves `waterwall_version` in `wave-db.json`, keeps the previous executable
+available, and reloads open forms from saved settings and configs. The Wave
+backend continues running, and the newly selected WaterWall stays stopped
+until you start it.
+
+Wave uses the following directories beside `wave-backend`.
+
+- `waterwall_bin/<version>/` holds `Waterwall` and `waterwall-<version>.json`
+  for that release. A catalog entry can have a schematic before its binary
+  is installed. The installer uses the archive name and SHA-256 from the
+  schematic for the current Linux architecture. Automatic installation
+  requires `curl` and `unzip` on `PATH` and access to GitHub.
 - `configs/` starts empty. The **Create config** menu item creates
   `configs/<name>/config.json` with a WaterWall configuration skeleton.
   Select its name in the sidebar to add nodes. Wave stores config names
   and enabled flags in `wave-db.json` under `core_configs`.
 
-After a failed install or removal of the executable, **Install core** replaces
-the lifecycle buttons and can retry the download. Wave records the first
-install attempt in `wave-db.json` so later restarts leave retries to the
-administrator. The panel remains available during installation and reports
-any error. Precreate `waterwall_bin/` and place the matching executable there
-with execute permission to provision Wave offline.
+On startup, Wave creates the runtime release directories as needed. Existing
+version-folder schematics take priority. For missing schematics, Wave tries
+`waterwall_bin/schematics/`, then `schematics/` beside `wave-backend`.
+For 1.6.0, Wave also has the embedded schematic as a fallback.
+Wave validates each candidate before publishing it
+atomically. It also imports the legacy `waterwall_bin/Waterwall` executable
+into `waterwall_bin/1.6.0/` and preserves the legacy originals. If the legacy
+executable cannot be migrated, Wave reports a startup warning and continues
+with the selected release.
+
+On first startup, Wave installs the selected release in the background if
+its binary is missing. Wave records that attempt in `wave-db.json`. After
+an installation failure or removal of the currently selected executable, use
+**Install core**. The panel remains available during installation and reports
+any error. To provision WaterWall 1.6.0 offline, place its executable with
+execute permission in `waterwall_bin/1.6.0/`. For another release, place
+both its executable and its schematic in `waterwall_bin/<version>/`.
+A published correction with unchanged
+archive metadata becomes active on the next backend startup or after
+switching away from and back to that version. If the published archive
+metadata changes for a selected or installed release, Wave keeps its
+cached schematic and reports the conflict.
 
 In Panel Controls, **Start core** shares a row with **Stop core**, and **Backup**
 shares a row with **Restore**. The left button in each pair gets twice the width.
@@ -390,9 +454,9 @@ is running. Restart waits for the old process to exit, then uses the saved
 settings and enabled configs. If the executable is removed while WaterWall is
 running, stop it to reinstall. Wave starts WaterWall only when requested.
 
-Use **Settings → Core** to configure the WaterWall release that matches this
-version of Wave. **Runtime** covers workers, memory profiles, MTU, TCP tuning,
-library paths, and advanced userspace stack limits. **Logging** covers the log
+Use **Settings → Core** to configure the selected WaterWall release. In the
+bundled schematic, **Runtime** covers workers, memory profiles, MTU, TCP
+tuning, library paths, and advanced userspace stack limits. **Logging** covers the log
 directory and each of the four loggers. **DNS** covers address preference,
 servers, search domains, lookup order, and advanced resolver and failover
 options. Settings left at the core default are omitted so WaterWall can use
@@ -443,7 +507,8 @@ skips ports already assigned to conflicting listeners in saved configs.
 #### Nodes and AuthenticationServer users
 
 Select a config in the sidebar and open the **Nodes** tab. Use the graph's
-**Nodes** menu to add, edit, or delete WaterWall 1.6.0 nodes. The graph fills
+**Nodes** menu to add, edit, or delete nodes from the selected schematic.
+The graph fills
 the workspace below the toolbar and follows its rounded bottom corners.
 New nodes appear at the center of the visible graph at the current pan and
 zoom. Right-click the graph for **Add node**, **Save**, and **Fit graph**. Right-click a node
@@ -453,8 +518,8 @@ a node card to open its editor. The graph labels links
 defined in WaterWall settings, including split paths, pairs, fallbacks,
 authentication dependencies, and route targets.
 The node editor shows controls and value checks for the selected WaterWall
-1.6.0 node type. It includes named targets, Router rules, and SniffRouter
-routes. Changing a control updates **Settings JSON** and preserves other
+node type. The bundled 1.6.0 schematic includes named targets, Router rules,
+and SniffRouter routes. Changing a control updates **Settings JSON** and preserves other
 settings in the object. Typing in **Settings JSON** selects **Custom JSON**
 and disables the settings controls, including named-target selectors. Clear
 **Custom JSON** to resume editing the parsed object with those controls.
@@ -506,7 +571,10 @@ same folder.
 Use **Add user** or **Edit** to change the account, access, expiry, and limit
 settings. You can enter a unique nonzero user ID when adding an account or
 leave it blank to generate one. Existing IDs, creation and first-use times,
-and recorded statistics are shown for reference.
+and recorded statistics are shown for reference. The offline list shows
+account state and group assignments independently of which fields the selected
+release allows you to edit. The desktop list labels unassigned accounts
+**Default** in the **Group** column.
 
 The offline editor shows traffic quotas and recorded traffic in decimal GB.
 Enter up to three decimal places for quotas. `10.531` GB is 10 GB and 531 MB.
@@ -549,14 +617,35 @@ after confirmation, retains existing `config.json` files, and creates a
 skeleton for a restored name that lacks a folder. For deployment settings,
 see [Authentication and HTTPS](authentication.md).
 
-The workspace snapshot reports the build version in `server.version` and
-`server.available_panel_versions`. The `server.core` object reports `state`,
-any `error` from the installer or process, `configs`, and the `lifecycle`
-and `configs` capability flags. Requests use the existing `request_id` and
-snapshot reply. The install, start, stop, and restart replies confirm receipt and
-later snapshots report completion. Stop and restart dialogs keep the spinner
-visible while WaterWall is changing state. The Panel Controls card shows the
-current core state. Installation and process outcomes appear in **Logs**.
+The workspace snapshot reports the Wave build version in `server.version`.
+`server.checking_updates` stays true until both parts of a combined check finish.
+The `server.panel` object reports `checking_updates` and an
+`update_check_generation` that advances after each completed manual lookup.
+It reports the display version of the latest known Wave tag in `latest_version`
+and whether that tag is newer than the running version in `update_available`.
+A failed check adds `update_check_error` and keeps the last known version. A
+successful lookup with no tags removes `latest_version`.
+The `server.core` object reports the selected WaterWall `version`, `state`,
+`available_versions` from the local cache, its highest `latest_version`, and
+whether it is newer than the selected version in `update_available`.
+It also reports `checking_updates` and any `update_check_error`. While Wave
+installs another version, `update_target` identifies it. A failed update reports
+`update_error`. The object also reports
+any installer or process `error`, `configs`, and the `lifecycle` and `configs`
+capability flags.
+
+Workspace snapshots include a top-level `schematic_revision`. The first
+snapshot on a connection and the first snapshot after a switch also carry
+the decoded `schematic`. Requests that depend on the active WaterWall schematic
+must include its current `schematic_revision`, even if the connection has
+already received the schematic. Older clients can omit the revision while
+Wave is on its initial bundled 1.6.0 selection before the first switch.
+Selecting another release at startup also requires the revision. Requests
+use the existing `request_id` and snapshot reply.
+Checks, installs, and other operations that continue in the background
+acknowledge receipt and report completion in later snapshots. Stop and restart
+dialogs keep the spinner visible while WaterWall is changing state.
+Installation and process outcomes appear in **Logs**.
 
 When a reply includes `feedback_in_logs_only: true`, its message has been written
 to Logs. The reply still carries `feedback` and any `result` data. Workspace
@@ -566,8 +655,11 @@ connection closes, Server Status shows the last snapshot and offers to reconnect
 
 | Action | Additional request fields |
 | --- | --- |
+| `check_updates` | None. Starts or joins checks for both Wave and WaterWall. |
 | `install_core`, `start_core`, `stop_core`, `restart_core` | None |
-| `apply_core_settings` | WaterWall 1.6.0 `misc`, `log`, and `dns` overrides as `settings`, up to 16 KiB |
+| `check_panel_updates`, `check_core_updates` | None. Checks one project. |
+| `update_core` | Cached WaterWall `version` to select |
+| `apply_core_settings` | Overrides supported by the selected schematic as `settings`, up to 16 KiB |
 | `apply_theme` | `theme` set to `default`, `light`, `classic`, `dark`, or `darker` |
 | `apply_donation` | `answer` set to `no`, `below_5`, or `more_than_5`. The snapshot reports the saved answer, its UTC timestamp, and whether the reminder is due in `data.settings.donation`. |
 | `create_core_config` | `name`, optional boolean `add_auth_nodes` to provision the two starter chains |

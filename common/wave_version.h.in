@@ -2,6 +2,7 @@
 
 namespace wave {
 
-inline constexpr char version[] = "@PROJECT_VERSION@";
+inline constexpr char version[] = "@WAVE_DISPLAY_VERSION@";
+inline constexpr char release_version[] = "@WAVE_RELEASE_VERSION@";
 
 } // namespace wave

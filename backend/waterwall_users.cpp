@@ -1,5 +1,7 @@
 #include "waterwall_users.h"
 
+#include "waterwall_schematic.h"
+
 #include <openssl/rand.h>
 
 #include <arpa/inet.h>
@@ -43,15 +45,21 @@ std::string_view text(const Json& value)
     return string ? std::string_view(*string) : std::string_view{};
 }
 
+const Json& live_users_spec()
+{
+    return schematic_field(schematic_field(waterwall_schematic(), "config"), "live_users");
+}
+
 template <typename Match> bool for_each_api(const Json& config, Match match)
 {
     const auto& nodes = field(config, "nodes");
-    if (!nodes.is_array()) {
+    const auto& spec = live_users_spec();
+    if (!spec.is_object() || !nodes.is_array()) {
         return false;
     }
     std::map<std::string_view, const Json*> apis;
     for (const auto& node : nodes) {
-        if (field(node, "type") == "APIServer") {
+        if (field(node, "type") == spec.at("api_node")) {
             const auto name = text(field(node, "name"));
             if (!name.empty()) {
                 apis.emplace(name, &node);
@@ -59,7 +67,7 @@ template <typename Match> bool for_each_api(const Json& config, Match match)
         }
     }
     for (const auto& node : nodes) {
-        if (field(node, "type") == "TcpListener") {
+        if (field(node, "type") == spec.at("listener_node")) {
             const auto api = apis.find(text(field(node, "next")));
             if (api != apis.end() && match(field(node, "settings"), field(*api->second, "settings"))) {
                 return true;
@@ -362,9 +370,10 @@ std::size_t waterwall_tcp_bindings(const Json& config, const WaterWallUsersEndpo
     if (!nodes.is_array()) {
         return 0;
     }
+    const auto& listener_types = schematic_field(live_users_spec(), "tcp_listener_nodes");
     return static_cast<std::size_t>(std::ranges::count_if(nodes, [&](const Json& node) {
         const auto& type = field(node, "type");
-        return (type == "TcpListener" || type == "TcpUdpListener") &&
+        return std::ranges::find(listener_types, type) != listener_types.end() &&
                can_receive_at(field(node, "settings"), endpoint);
     }));
 }

@@ -22,7 +22,7 @@ class CoreConfigFiles {
     explicit CoreConfigFiles(const std::filesystem::path& directory);
 
     bool create(std::string_view name, bool reuse_existing, bool& created,
-                const nlohmann::json& nodes = nlohmann::json::array()) const;
+                const nlohmann::json& config) const;
     bool remove(std::string_view name) const;
     bool available(std::string_view name) const;
     CoreConfigDocument read(std::string_view name) const;

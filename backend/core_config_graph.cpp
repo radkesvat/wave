@@ -2,8 +2,8 @@
 
 #include "core_config_json.h"
 #include "core_config_users.h"
+#include "schematic_rules.h"
 #include "waterwall_node_links.h"
-#include "waterwall_nodes.h"
 
 #include <openssl/rand.h>
 
@@ -83,6 +83,11 @@ std::string new_db_name()
 
 } // namespace
 
+Json make_empty_core_config(std::string_view name)
+{
+    return {{"name", name}, {"config-version", 1}, {"core-minimum-version", 0}, {"nodes", Json::array()}};
+}
+
 Json make_users_starter_config(std::string_view name, std::uint16_t port)
 {
     const auto secret = random_hex<32>();
@@ -91,33 +96,28 @@ Json make_users_starter_config(std::string_view name, std::uint16_t port)
         return nullptr;
     }
 
-    constexpr char auth_client[] = "AuthenticationClient";
-    constexpr char auth_server[] = "AuthenticationServer";
-    constexpr char api_server[] = "UsersApi";
-    const Json auth_credential{{"name", "wave-auth"}, {"secret", secret}};
-    auto auth_permission = auth_credential;
-    auth_permission["allow-user-pull"] = true;
-    auth_permission["allow-stats-push"] = true;
-    const Json api_permission{
-        {"config", name}, {"node", auth_server}, {"operations", Json::array({"list-users"})}};
-    const Json api_credential{
-        {"name", "wave-users"}, {"token", token}, {"allow", Json::array({api_permission})}};
+    const auto& starter = schematic_field(schematic_field(waterwall_schematic(), "config"), "users_starter");
+    if (!starter.is_object()) {
+        return nullptr;
+    }
+    // Bind generated values as JSON nodes so config names and ports keep their types.
+    auto config = make_empty_core_config(name);
+    config.update(starter.at("template"));
+    const auto& slots = starter.at("slots");
+    for (const auto& [slot, value] : std::array<std::pair<const char*, Json>, 4>{
+             {{"name", name}, {"secret", secret}, {"token", token}, {"port", port}}}) {
+        for (const auto& pointer : slots.at(slot)) {
+            config.at(Json::json_pointer(pointer.get<std::string>())) = value;
+        }
+    }
+    config["name"] = name;
+    return config;
+}
 
-    const Json client{{"name", auth_client},
-                      {"type", auth_client},
-                      {"next", auth_server},
-                      {"settings", auth_credential}};
-    const Json server{{"name", auth_server},
-                      {"type", auth_server},
-                      {"settings", {{"auth-clients", Json::array({auth_permission})}}}};
-    const Json listener{{"name", "ApiListener"},
-                        {"type", "TcpListener"},
-                        {"next", api_server},
-                        {"settings", {{"address", "127.0.0.1"}, {"port", port}}}};
-    const Json api{{"name", api_server},
-                   {"type", "APIServer"},
-                   {"settings", {{"clients", Json::array({api_credential})}}}};
-    return {{"name", name}, {"nodes", Json::array({client, server, listener, api})}};
+bool uses_auth_database(const Json& node)
+{
+    const auto& definition = waterwall_node(text(field(node, "type")));
+    return schematic_field(definition, "user_database") == true;
 }
 
 Json config_auth_nodes(const Json& config)
@@ -128,8 +128,7 @@ Json config_auth_nodes(const Json& config)
     if (nodes.is_array()) {
         for (const auto& node : nodes) {
             const auto& name = field(node, "name");
-            if (field(node, "type") == "AuthenticationServer" && valid_name(name) &&
-                seen.insert(text(name)).second) {
+            if (uses_auth_database(node) && valid_name(name) && seen.insert(text(name)).second) {
                 names.push_back(name);
             }
         }
@@ -140,7 +139,9 @@ Json config_auth_nodes(const Json& config)
 std::string auth_database_name(const Json& node, std::string_view config_name,
                                const fs::path& executable_directory)
 {
-    const auto configured = text(field(field(node, "settings"), "db-path"));
+    const auto& definition = waterwall_node(text(field(node, "type")));
+    const auto key = schematic_text(schematic_field(definition, "database_key"));
+    const auto configured = text(schematic_field(field(node, "settings"), key));
     if (configured.empty() || configured.find('\0') != std::string_view::npos) {
         return {};
     }
@@ -164,7 +165,9 @@ std::string validate_config_graph(const Json& config, const Json& previous)
     if (contains_nul(config)) {
         return "Config strings cannot contain a NUL character.";
     }
-    for (const char* key : {"config-version", "core-minimum-version"}) {
+    for (const auto& version_key :
+         schematic_field(schematic_field(waterwall_schematic(), "config"), "version_keys")) {
+        const auto key = schematic_text(version_key);
         if (config.contains(key) && !valid_version(config[key])) {
             return std::string(key) + " must be a nonnegative integer.";
         }
@@ -180,11 +183,12 @@ std::string validate_config_graph(const Json& config, const Json& previous)
         if (!named.emplace(text(name), &node).second) {
             return "Duplicate node name: " + name.get<std::string>();
         }
-        if (!std::ranges::binary_search(waterwall_node_types, text(type)) &&
+        if (!waterwall_node(text(type)).is_object() &&
             !std::ranges::any_of(field(previous, "nodes"), [&](const Json& existing) {
                 return field(existing, "name") == name && field(existing, "type") == type;
             })) {
-            return "WaterWall 1.6.0 does not include node type " + type.get<std::string>() + '.';
+            return "WaterWall " + std::string(waterwall_version()) + " does not include node type " +
+                   type.get<std::string>() + '.';
         }
         if ((node.contains("settings") && !node["settings"].is_object()) ||
             (node.contains("version") && !valid_version(node["version"]))) {
@@ -213,16 +217,17 @@ std::string validate_config_graph(const Json& config, const Json& previous)
             return target != named.end() && target->first != name ? target->second : nullptr;
         };
         if (const auto next = node->find("next"); next != node->end()) {
-            if (type == "AuthenticationServer" || !allows_node_next(type, settings) || !find_target(*next)) {
+            const auto* target = find_target(*next);
+            if (!allows_node_next(type, settings) || !target ||
+                !allows_node_previous(text(field(*target, "type")))) {
                 return "Invalid next node on " + std::string(name) + '.';
             }
             next_nodes.emplace(name, text(*next));
         }
-        if (type == "Router" || type == "SniffRouter") {
-            const auto routes = settings.find(type == "SniffRouter" ? "routes" : "rules");
-            if (routes != settings.end() && (!routes->is_array() || routes->empty())) {
-                return "Invalid route target on " + std::string(name) + '.';
-            }
+        if (auto issue =
+                schematic_rules::validate(schematic_field(waterwall_node(type), "graph_rules"), settings);
+            !issue.empty()) {
+            return std::string(name) + ": " + issue;
         }
         std::string error;
         visit_node_links(*node, [&](const Json& container, const NodeLinkField& link, const char* key) {
@@ -241,10 +246,6 @@ std::string validate_config_graph(const Json& config, const Json& previous)
         });
         if (!error.empty()) {
             return error;
-        }
-        if (type == "PacketSplitStream" && settings.contains("up") &&
-            field(settings, "up") == field(settings, "down")) {
-            return "PacketSplitStream up and down must point to different nodes on " + std::string(name) + '.';
         }
     }
     std::set<std::string_view> visited;
@@ -272,7 +273,7 @@ std::string configure_auth_databases(Json& config, const Json& previous, std::st
     std::map<std::string_view, std::string> existing;
     std::set<std::string> known;
     for (const auto& node : field(previous, "nodes")) {
-        if (field(node, "type") == "AuthenticationServer") {
+        if (uses_auth_database(node)) {
             auto filename = auth_database_name(node, config_name, executable_directory);
             if (!filename.empty()) {
                 known.insert(filename);
@@ -282,10 +283,12 @@ std::string configure_auth_databases(Json& config, const Json& previous, std::st
     }
     std::set<std::string> assigned;
     for (auto& node : config["nodes"]) {
-        if (node["type"] != "AuthenticationServer") {
+        if (!uses_auth_database(node)) {
             continue;
         }
         const auto name = text(node["name"]);
+        const auto& definition = waterwall_node(text(node["type"]));
+        const auto database_key = schematic_text(definition.at("database_key"));
         auto& metadata = node["panel-settings"];
         auto& settings = node["settings"];
         const auto stored_name = text(field(metadata, "auth-db"));
@@ -298,23 +301,25 @@ std::string configure_auth_databases(Json& config, const Json& previous, std::st
         } else if (const auto original = existing.find(name); original != existing.end()) {
             filename = original->second;
         }
-        if (filename.empty() && settings.contains("db-path")) {
+        if (filename.empty() && settings.contains(database_key)) {
             return "The existing database for " + std::string(name) +
                    " must be inside its config folder and referenced by the saved config.";
         }
         if (filename.empty()) {
             filename = new_db_name();
             if (filename.empty()) {
-                return "Could not allocate an AuthenticationServer database name.";
+                return "Could not allocate a user database name.";
             }
         }
         if (!assigned.insert(filename).second) {
-            return "Each AuthenticationServer needs its own database file.";
+            return "Each user database node needs its own database file.";
         }
         metadata["auth-db"] = filename;
-        settings["db-path"] = CoreConfigUsers::relative_path(config_name, filename).generic_string();
-        if (!settings.contains("file-save-rate-ms")) {
-            settings["file-save-rate-ms"] = 10000;
+        settings[database_key] = CoreConfigUsers::relative_path(config_name, filename).generic_string();
+        for (const auto& [key, value] : schematic_field(definition, "database_defaults").items()) {
+            if (!settings.contains(key)) {
+                settings[key] = value;
+            }
         }
     }
     return {};

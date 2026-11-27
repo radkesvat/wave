@@ -1,5 +1,8 @@
 #include "waterwall_logs.h"
 
+#include "core_settings.h"
+#include "waterwall_schematic.h"
+
 #include <nlohmann/json.hpp>
 
 #include <fcntl.h>
@@ -14,7 +17,6 @@
 namespace wave {
 namespace {
 
-constexpr std::array sources{"core", "dns", "network", "internal"};
 constexpr off_t max_read_bytes = 32 * 1024;
 constexpr std::size_t max_line_bytes = 2048;
 
@@ -32,21 +34,32 @@ std::tm local_date()
     return date;
 }
 
-std::filesystem::path log_base(const std::filesystem::path& directory, const nlohmann::json& settings,
-                               const char* source)
+const nlohmann::json& log_spec()
 {
-    const auto log = settings.value("log", nlohmann::json::object());
-    const auto logger = log.value(source, nlohmann::json::object());
-    auto base = log.value("path", std::string("log/")) + logger.value("file", std::string(source) + ".log");
-    // WaterWall joins the strings directly and treats a final slash as a disabled file sink.
+    return waterwall_schematic().at("runtime").at("logs");
+}
+
+std::string_view log_setting(const nlohmann::json& settings, const std::string& path)
+{
+    const nlohmann::json::json_pointer pointer(path);
+    if (settings.contains(pointer)) {
+        return schematic_text(settings.at(pointer));
+    }
+    const auto& descriptor = core_settings::field_at(core_settings::specification(), pointer);
+    return schematic_text(schematic_field(descriptor, "default"));
+}
+
+std::filesystem::path log_base(const std::filesystem::path& directory, std::string base)
+{
+    // The dated-files protocol joins the configured strings and treats a final slash as disabled.
     if (base.empty() || base.back() == '/') {
         return {};
     }
     if (base.ends_with(".log")) {
         base.resize(base.size() - 4);
     }
-    // WaterWall's rotated file path must fit in its 256-byte buffer.
-    if (base.empty() || base.size() + std::string_view(".YYYYMMDD.log").size() >= 256) {
+    if (base.empty() || base.size() + std::string_view(".YYYYMMDD.log").size() >=
+                            log_spec().at("max_path_bytes").get<std::size_t>()) {
         return {};
     }
     return directory / base;
@@ -54,23 +67,16 @@ std::filesystem::path log_base(const std::filesystem::path& directory, const nlo
 
 WaterWallLog make_record(std::string_view source, std::string line, std::string_view now)
 {
-    // WaterWall 1.6.0 uses YYYY-MM-DD HH:MM:SS.mmm followed by a space and the level.
+    // The dated-files protocol puts the level after a millisecond timestamp.
     std::string timestamp(now);
     std::string_view level = "info";
     if (line.size() > 24 && line[4] == '-' && line[7] == '-' && line[10] == ' ' && line[13] == ':' &&
         line[16] == ':' && line[19] == '.' && line[23] == ' ') {
         const auto separator = line.find(' ', 24);
         const auto token = std::string_view(line).substr(24, separator - 24);
-        if (token == "WARN") {
-            level = "warning";
-        } else if (token == "ERROR") {
-            level = "error";
-        } else if (token == "FATAL") {
-            level = "fatal";
-        } else if (token == "DEBUG") {
-            level = "debug";
-        } else if (token == "VERBO") {
-            level = "verbose";
+        if (const auto value = schematic_text(schematic_field(log_spec().at("levels"), token));
+            !value.empty()) {
+            level = value;
         }
         timestamp = line.substr(0, 23);
         line.erase(0, line.find_first_not_of(' ', separator));
@@ -92,8 +98,12 @@ void WaterWallLogs::start(const nlohmann::json& settings)
 {
     stop();
     active_ = true;
-    for (std::size_t i = 0; i < sources.size(); ++i) {
-        loggers_[i].base = log_base(directory_, settings, sources[i]);
+    const auto path = log_setting(settings, log_spec().at("directory_path").get_ref<const std::string&>());
+    for (const auto& source : log_spec().at("sources")) {
+        const auto file = log_setting(settings, source.at("file_path").get_ref<const std::string&>());
+        loggers_.push_back({schematic_text(source.at("name")),
+                            log_base(directory_, std::string(path) + std::string(file)),
+                            {}});
     }
     // A shared file has no information identifying which logger wrote a line.
     const auto with_paths = loggers_;
@@ -116,7 +126,7 @@ void WaterWallLogs::start(const nlohmann::json& settings)
 void WaterWallLogs::stop()
 {
     active_ = false;
-    loggers_ = {};
+    loggers_.clear();
     dates_ = {};
 }
 
@@ -205,9 +215,9 @@ std::vector<WaterWallLog> WaterWallLogs::read()
     const auto date = local_date();
     const auto now = print_time(date, "%Y-%m-%d %H:%M:%S");
     update_files(date);
-    for (std::size_t i = 0; i < loggers_.size(); ++i) {
+    for (auto& logger : loggers_) {
         std::deque<WaterWallLog> recent;
-        for (auto& file : loggers_[i].files) {
+        for (auto& file : logger.files) {
             const auto bytes = read_file(file);
             std::string_view pending(bytes);
             while (!pending.empty()) {
@@ -222,7 +232,7 @@ std::vector<WaterWallLog> WaterWallLogs::read()
                     break;
                 }
                 if (!file.partial.empty()) {
-                    auto entry = make_record(sources[i], std::move(file.partial), now);
+                    auto entry = make_record(logger.source, std::move(file.partial), now);
                     if (!entry.message.empty()) {
                         if (file.truncated) {
                             entry.message += "…";

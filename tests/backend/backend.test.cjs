@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
 const { execFile, spawn } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const { once } = require('node:events');
-const { appendFile, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, unlink, writeFile } =
+const { appendFile, chmod, chown, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } =
     require('node:fs/promises');
 const { request: httpRequest } = require('node:http');
 const { createServer } = require('node:net');
@@ -11,11 +12,13 @@ const { createInterface } = require('node:readline');
 const { after, before, test } = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
 const { isDeepStrictEqual, promisify } = require('node:util');
-const { authFixture, panelBasePath, rotatingLogPath, seedCore } = require('./auth_fixture.cjs');
+const { authFixture, emptyCatalogPath, panelBasePath, rotatingLogPath, seedCore } = require('./auth_fixture.cjs');
+const { bundledSchematicFile, copyBackend, coreReleaseDir, schematicFile } = require('./tls_fixture.cjs');
 
 const sourceBackend = process.env.WAVE_BACKEND;
 const run = promisify(execFile);
 const timeout = 5000;
+const panelVersion = '0.0.1 beta';
 const historyLimit = 19;
 const metricHistories = [
     ['cpu_percent', 'cpu_history', 100],
@@ -39,6 +42,12 @@ let cookie;
 let countersAtStartup;
 let coreFixture;
 
+function parseSchematic(source) {
+    return JSON.parse(source, (_key, value, context) =>
+        typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value)
+            ? JSON.rawJSON(context.source) : value);
+}
+
 async function readNetworkCounters() {
     const rows = await readFile('/proc/net/dev', 'utf8');
     const metrics = new Map();
@@ -55,9 +64,7 @@ async function readNetworkCounters() {
 before(async () => {
     assert.ok(sourceBackend, 'Run this test through a Wave backend CTest preset.');
     cwd = await mkdtemp(join(tmpdir(), 'wave-backend-'));
-    backend = join(cwd, 'bin with spaces', basename(sourceBackend));
-    await mkdir(dirname(backend));
-    await copyFile(sourceBackend, backend);
+    backend = await copyBackend(sourceBackend, cwd, 'bin with spaces');
     coreFixture = await seedCore(backend, { executable: process.platform === 'linux' });
     database = join(dirname(backend), 'wave-db.json');
     await writeFile(database, JSON.stringify({
@@ -71,6 +78,7 @@ before(async () => {
     if (process.platform === 'linux') countersAtStartup = await readNetworkCounters();
     server = spawn(backend, ['--site-dir', siteDir], {
         cwd,
+        env: { ...process.env, PATH: await emptyCatalogPath(cwd) },
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stderr = '';
@@ -104,10 +112,8 @@ after(async () => {
 });
 
 test('initializes a private database beside the executable and preserves existing listener settings', async () => {
-    const fresh = join(cwd, 'fresh', basename(backend));
+    const fresh = await copyBackend(backend, cwd, 'fresh');
     const db = join(dirname(fresh), 'wave-db.json');
-    await mkdir(dirname(fresh));
-    await copyFile(backend, fresh);
     // Validate startup settings without binding the default public port.
     const missingSite = () => expectStartupFailure([], /Cannot access site directory/, fresh);
     await missingSite();
@@ -296,7 +302,19 @@ test('serves uncached entry assets and protects HTTP data with an administrator 
     const request = (path, options) => web.request(panelBasePath + path, options);
     const post = (action, origin = url.origin) =>
         web.post(`${panelBasePath}/api/auth/${action}`, credentials, { Origin: origin });
-    const files = (await readdir(cwd, { recursive: true })).sort();
+    const catalogStaging = join(dirname(backend), 'waterwall_bin', '.waterwall-catalog-');
+    async function persistentFiles(directory) {
+        const files = [];
+        for (const entry of await readdir(directory, { withFileTypes: true })) {
+            const path = join(directory, entry.name);
+            // The background catalog check creates and removes private staging directories.
+            if (entry.isDirectory() && path.startsWith(catalogStaging)) continue;
+            files.push(path);
+            if (entry.isDirectory()) files.push(...await persistentFiles(path));
+        }
+        return files.sort();
+    }
+    const files = await persistentFiles(cwd);
     assert.equal((await request('/')).headers.get('location'), `${panelBasePath}/setup`);
     for (const [path, asset] of [['/setup', 'index.html'], ['/index.js', 'index.js'], ['/index.wasm', 'index.wasm']]) {
         const response = await request(path);
@@ -327,7 +345,7 @@ test('serves uncached entry assets and protects HTTP data with an administrator 
     assert.match(admin[0].password, /^\$argon2id\$/);
     assert.ok(!contents.includes(credentials.password));
     assert.equal(auth.sessions.length, 1);
-    assert.deepEqual((await readdir(cwd, { recursive: true })).sort(), files);
+    assert.deepEqual(await persistentFiles(cwd), files);
 });
 
 function connectSocket(path, base = url, sessionCookie = cookie, basePath = panelBasePath) {
@@ -370,6 +388,8 @@ async function readOverview(t) {
     return JSON.parse(frames[0]);
 }
 
+const schematicRevisions = new WeakMap();
+
 async function nextPreviewSnapshot(socket, matches = () => true, wait = timeout) {
     const signal = AbortSignal.timeout(wait);
     for (;;) {
@@ -377,6 +397,7 @@ async function nextPreviewSnapshot(socket, matches = () => true, wait = timeout)
         assert.equal(typeof message.data, 'string');
         const frame = JSON.parse(message.data);
         assert.equal(frame.type, 'snapshot');
+        schematicRevisions.set(socket, frame.schematic_revision);
         if (matches(frame)) return frame;
     }
 }
@@ -384,7 +405,8 @@ async function nextPreviewSnapshot(socket, matches = () => true, wait = timeout)
 async function connectPreview(t, base, sessionCookie, basePath) {
     const socket = connectSocket('/ws/workspace', base, sessionCookie, basePath);
     t.after(() => socket.close());
-    return { socket, initial: (await nextPreviewSnapshot(socket)).data };
+    const { data: initial, schematic, schematic_revision } = await nextPreviewSnapshot(socket);
+    return { socket, initial, schematic, schematicRevision: schematic_revision };
 }
 
 async function fixtureSession(fixture) {
@@ -405,7 +427,9 @@ let requestId = 0;
 function requestPreview(socket, action, fields = {}) {
     const id = ++requestId;
     const reply = nextPreviewSnapshot(socket, frame => frame.request_id === id);
-    socket.send(JSON.stringify({ action, request_id: id, ...fields }));
+    socket.send(JSON.stringify({
+        action, request_id: id, schematic_revision: schematicRevisions.get(socket), ...fields,
+    }));
     return reply.then(frame => {
         assert.equal(frame.action, action);
         assert.equal(typeof frame.ok, 'boolean');
@@ -521,8 +545,8 @@ test('starts, restarts, and reaps WaterWall with the selected configs supplied t
     { skip: process.platform !== 'linux' }, async t => {
         const { socket, initial } = await connectPreview(t);
         const observer = await connectPreview(t);
-        assert.equal(initial.server.version, '1.6.0');
-        assert.deepEqual(initial.server.available_panel_versions, ['1.6.0']);
+        assert.equal(initial.server.version, panelVersion);
+        assert.deepEqual(initial.server.core.available_versions, ['1.6.0']);
         const rejectedStart = nextPreviewSnapshot(observer.socket, frame =>
             panelLogs(frame, 'error', 'Enable at least one config before starting WaterWall.').length > 0);
         const empty = await requestPreview(socket, 'start_core');
@@ -686,18 +710,649 @@ test('starts, restarts, and reaps WaterWall with the selected configs supplied t
     });
 
 const supportedInstaller = process.platform === 'linux' && ['x64', 'arm64'].includes(process.arch);
+
+test('checks Wave and WaterWall together and retains the latest known versions on failure',
+    { skip: !supportedInstaller }, async t => {
+        const fixture = await authFixture(t, undefined, { encrypted: false });
+        const tools = join(fixture.cwd, 'panel update tools');
+        const temporary = join(fixture.cwd, 'temporary');
+        const tags = join(fixture.cwd, 'tags response');
+        const calls = join(fixture.cwd, 'tag requests');
+        const catalogCalls = join(fixture.cwd, 'schematic requests');
+        const release = join(fixture.cwd, 'release tag response');
+        const catalogRelease = join(fixture.cwd, 'release schematic response');
+        const endpoint = 'https://api.github.com/repos/radkesvat/wave/tags?per_page=100&page=';
+        const catalogEndpoint = 'https://api.github.com/repos/radkesvat/wave/contents/backend/schematics?ref=main';
+        await Promise.all([mkdir(tools), mkdir(temporary)]);
+        await writeFile(join(tools, 'curl'), [
+            '#!/bin/sh',
+            'for url do :; done',
+            'case "$url" in',
+            `  "${catalogEndpoint}")`,
+            '    printf "%s\\n" "$url" >> "$WAVE_FIXTURE_CATALOG_CALLS"',
+            '    while [ ! -f "$WAVE_FIXTURE_CATALOG_RELEASE" ]; do sleep 0.02; done',
+            '    printf "[]" ;;',
+            `  "${endpoint}"*)`,
+            '    printf "%s\\n" "$url" >> "$WAVE_FIXTURE_TAG_CALLS"',
+            '    while [ ! -f "$WAVE_FIXTURE_TAG_RELEASE" ]; do sleep 0.02; done',
+            '    page=${url##*page=}',
+            '    [ -f "$WAVE_FIXTURE_TAGS.$page" ] || exit 22',
+            '    cat "$WAVE_FIXTURE_TAGS.$page" ;;',
+            '  *) exit 22 ;;',
+            'esac',
+            '',
+        ].join('\n'), { mode: 0o700 });
+        await fixture.start({
+            PATH: tools + delimiter + process.env.PATH,
+            TMPDIR: temporary,
+            WAVE_FIXTURE_TAGS: tags,
+            WAVE_FIXTURE_TAG_CALLS: calls,
+            WAVE_FIXTURE_CATALOG_CALLS: catalogCalls,
+            WAVE_FIXTURE_CATALOG_RELEASE: catalogRelease,
+            WAVE_FIXTURE_TAG_RELEASE: release,
+        });
+        assert.equal(await waitForFile(catalogCalls), `${catalogEndpoint}\n`);
+        const session = await fixtureSession(fixture);
+        const { socket, initial, schematicRevision } = await connectPreview(t, fixture.origin, session);
+        const { version, core } = initial.server;
+        assert.equal(version, panelVersion);
+        const baseVersion = version.replace(/ beta$/, '');
+        const [major, minor, patch] = baseVersion.split('.').map(Number);
+        const newer = `${major}.${minor + 10}.${patch}`;
+        const fullPage = first => [first, ...Array.from({ length: 99 }, (_, index) => `legacy-${index}`)];
+        assert.deepEqual(initial.server.panel, {
+            checking_updates: false, update_check_generation: 0, update_available: false,
+        });
+        assert.equal(initial.server.checking_updates, false);
+        assert.equal(core.latest_version, core.version);
+        assert.equal(core.update_available, false);
+        await assert.rejects(stat(calls), { code: 'ENOENT' });
+
+        const check = async (generation, pages, previous, beforeResult) => {
+            for (const page of [1, 2]) {
+                if (pages[page - 1] === undefined) await rm(`${tags}.${page}`, { force: true });
+                else await writeFile(`${tags}.${page}`, JSON.stringify(pages[page - 1].map(name => ({ name }))));
+            }
+            const completed = nextPreviewSnapshot(socket, frame =>
+                frame.data.server.panel.update_check_generation === generation &&
+                !frame.data.server.panel.checking_updates && !frame.data.server.core.checking_updates);
+            const ack = await requestPreview(socket, 'check_updates');
+            assert.equal(ack.ok, true, ack.feedback);
+            assert.equal(ack.data.server.checking_updates, true);
+            assert.equal(ack.data.server.panel.checking_updates, true);
+            assert.equal(ack.data.server.core.checking_updates, true);
+            assert.equal(ack.data.server.panel.latest_version, previous);
+            await beforeResult?.();
+            const result = await completed;
+            assert.equal(result.data.server.checking_updates, false);
+            assert.equal(result.data.server.version, version);
+            assert.equal(result.data.server.core.version, core.version);
+            assert.equal(result.data.server.core.latest_version, core.version);
+            assert.equal(result.schematic_revision, schematicRevision);
+            assert.deepEqual(await readdir(temporary), [], 'The panel check removes its staging directory.');
+            return result;
+        };
+
+        const available = await check(1, [fullPage(`v${major}.${minor + 9}.${patch}`),
+            [`v${newer}-beta`, `v${newer}`]], undefined, async () => {
+            assert.equal(await waitForFile(calls), `${endpoint}1\n`);
+            const [staging] = await readdir(temporary);
+            assert.match(staging, /^wave-panel-check-/);
+            assert.equal((await stat(join(temporary, staging))).mode & 0o777, 0o700);
+            const duplicate = await requestPreview(socket, 'check_updates');
+            assert.equal(duplicate.ok, true);
+            const panelFinished = nextPreviewSnapshot(socket, frame =>
+                !frame.data.server.panel.checking_updates && frame.data.server.panel.update_check_generation === 1);
+            await writeFile(release, '');
+            const partial = await panelFinished;
+            assert.equal(partial.data.server.panel.latest_version, newer);
+            assert.equal(partial.data.server.core.checking_updates, true);
+            assert.equal(partial.data.server.checking_updates, true);
+            const joined = await requestPreview(socket, 'check_updates');
+            assert.equal(joined.ok, true, joined.feedback);
+            assert.equal(joined.data.server.panel.checking_updates, false);
+            await writeFile(catalogRelease, '');
+        });
+        assert.equal(available.data.server.panel.latest_version, newer);
+        assert.equal(available.data.server.panel.update_available, true);
+        assert.equal(panelLogs(available, 'info', `Wave ${newer} is available.`).length, 1);
+        assert.equal(panelLogs(available, 'success', 'WaterWall update check completed.').length, 1);
+        assert.equal(await readFile(calls, 'utf8'), `${endpoint}1\n${endpoint}2\n`);
+        assert.equal(await readFile(catalogCalls, 'utf8'), `${catalogEndpoint}\n`);
+
+        const failed = await check(2, [fullPage(`v${major + 1}.0.0`)], newer);
+        assert.equal(failed.data.server.panel.latest_version, newer);
+        assert.equal(failed.data.server.panel.update_available, true);
+        assert.match(failed.data.server.panel.update_check_error, /GitHub/);
+        assert.equal(panelLogs(failed, 'error', failed.data.server.panel.update_check_error).length, 1);
+        assert.equal(await readFile(calls, 'utf8'), `${endpoint}1\n${endpoint}2\n`.repeat(2));
+
+        const invalid = await check(3, [['unversioned']], newer);
+        assert.equal(invalid.data.server.panel.latest_version, newer);
+        assert.match(invalid.data.server.panel.update_check_error, /tag/i);
+        assert.equal(panelLogs(invalid, 'error', invalid.data.server.panel.update_check_error).length, 1);
+
+        const current = await check(4, [[`v${baseVersion}-beta`]], newer);
+        assert.equal(current.data.server.panel.latest_version, version);
+        assert.equal(current.data.server.panel.update_available, false);
+        assert.equal(panelLogs(current, 'info', 'No newer Wave panel version is available.').length, 1);
+
+        const stable = await check(5, [[`v${baseVersion}`]], version);
+        assert.equal(stable.data.server.panel.latest_version, baseVersion);
+        assert.equal(stable.data.server.panel.update_available, true);
+        assert.equal(panelLogs(stable, 'info', `Wave ${baseVersion} is available.`).length, 1);
+
+        const older = await check(6, [['v0.0.0']], baseVersion);
+        assert.equal(older.data.server.panel.latest_version, '0.0.0');
+        assert.equal(older.data.server.panel.update_available, false);
+
+        const empty = await check(7, [[]], '0.0.0');
+        assert.equal(empty.data.server.panel.latest_version, undefined);
+        assert.equal(empty.data.server.panel.update_available, false);
+        assert.equal(empty.data.server.panel.update_check_error, undefined);
+        assert.equal(panelLogs(empty, 'info', 'Wave has no version tags on GitHub yet.').length, 1);
+        assert.equal(await readFile(catalogCalls, 'utf8'), `${catalogEndpoint}\n`.repeat(7));
+    });
+
+test('sends the selected schematic only in the first authenticated workspace snapshot', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    await fixture.start();
+    assert.equal(await websocketStatus(fixture.origin, `${fixture.basePath}/ws/workspace`), 401);
+    const session = await fixtureSession(fixture);
+    const { socket, initial, schematic } = await connectPreview(t, fixture.origin, session);
+    const bundled = JSON.parse(await readFile(bundledSchematicFile, 'utf8'));
+    assert.deepEqual(schematic, bundled);
+    assert.equal(initial.server.core.version, bundled.version);
+    assert.equal(Object.keys(schematic.nodes).length, 95);
+    assert.equal((await requestPreview(socket, 'refresh')).schematic, undefined);
+    assert.equal((await nextPreviewSnapshot(socket)).schematic, undefined);
+    assert.deepEqual((await connectPreview(t, fixture.origin, session)).schematic, bundled);
+});
+
+test('seeds the embedded schematic on first startup under umask 0002 and uses a corrected cache on restart', async t => {
+    const previous = process.umask(0o002);
+    try {
+        const fixture = await authFixture(t, undefined, { encrypted: false, prepareCore: false });
+        const settings = JSON.parse(await readFile(fixture.database, 'utf8'));
+        await writeFile(fixture.database, JSON.stringify({ ...settings, waterwall_install_attempted: true }));
+        const cached = schematicFile(fixture.backend);
+        assert.deepEqual((await readdir(dirname(fixture.backend))).sort(),
+            [basename(fixture.backend), basename(fixture.database)].sort());
+
+        await fixture.start();
+        const original = await readFile(bundledSchematicFile, 'utf8');
+        assert.equal(await readFile(cached, 'utf8'), original);
+        assert.deepEqual(await readdir(dirname(cached)), ['waterwall-1.6.0.json']);
+        await fixture.stop();
+
+        const corrected = original.replace('"label": "Core"', '"label": "Corrected core label"');
+        assert.notEqual(corrected, original);
+        await writeFile(cached, corrected);
+        await fixture.start();
+        assert.equal(await readFile(cached, 'utf8'), corrected);
+        const { schematic } = await connectPreview(t, fixture.origin, await fixtureSession(fixture));
+        assert.deepEqual(schematic, JSON.parse(corrected));
+    } finally {
+        process.umask(previous);
+    }
+});
+
+const unprivilegedUser = process.getuid?.() === 0 ? { uid: 65534, gid: 65534 } : undefined;
+
+async function writeWithMode(path, contents, mode = 0o644) {
+    await writeFile(path, contents, { mode });
+    await chmod(path, mode);
+}
+
+test('starts as an unprivileged user when an optional legacy directory is unreadable',
+    { skip: process.platform !== 'linux' }, async t => {
+        const fixture = await authFixture(t, undefined, { encrypted: false, runAs: unprivilegedUser });
+        await fixture.start();
+        await fixture.stop();
+        const release = coreReleaseDir(fixture.backend);
+        const bin = dirname(release);
+        const previousCache = join(bin, 'schematics');
+        await mkdir(previousCache, { mode: 0o000 });
+        await chmod(previousCache, 0o000);
+        const cached = await readFile(schematicFile(fixture.backend));
+
+        try {
+            await fixture.start();
+            assert.deepEqual(await readFile(schematicFile(fixture.backend)), cached);
+        } finally {
+            await chmod(previousCache, 0o700);
+        }
+    });
+
+test('starts the selected release and warns when the legacy binary cannot be read or its destination inspected',
+    { skip: process.platform !== 'linux' }, async t => {
+        const fixture = await authFixture(t, undefined, { encrypted: false, runAs: unprivilegedUser });
+        const version = '1.6.1';
+        const release = coreReleaseDir(fixture.backend, version);
+        const legacyRelease = coreReleaseDir(fixture.backend);
+        const legacyProgram = join(dirname(legacyRelease), 'Waterwall');
+        const selectedProgram = join(release, 'Waterwall');
+        const selectedSchematic = schematicFile(fixture.backend, version);
+        const legacyBinary = await readFile('/bin/true');
+        const original = await readFile(bundledSchematicFile, 'utf8');
+        await mkdir(release, { mode: 0o700 });
+        await chmod(release, 0o700);
+        await writeWithMode(selectedProgram, '#!/bin/sh\nexit 0\n', 0o700);
+        await writeWithMode(selectedSchematic, original.replace('"version": "1.6.0"', `"version": "${version}"`));
+        await writeWithMode(legacyProgram, legacyBinary, 0o100);
+        if (unprivilegedUser) {
+            const { uid, gid } = unprivilegedUser;
+            for (const path of [release, selectedProgram, selectedSchematic, legacyProgram]) {
+                await chown(path, uid, gid);
+            }
+        }
+        const originalLegacy = await stat(legacyProgram);
+        await run(legacyProgram, [], { cwd: fixture.cwd, timeout, ...unprivilegedUser });
+        const settings = JSON.parse(await readFile(fixture.database, 'utf8'));
+        await writeFile(fixture.database, JSON.stringify({ ...settings, waterwall_version: version }));
+
+        await fixture.start();
+        const session = await fixtureSession(fixture);
+        const { initial, schematic } = await connectPreview(t, fixture.origin, session);
+        assert.equal(initial.server.core.version, version);
+        assert.equal(initial.server.core.state, 'stopped');
+        assert.equal(schematic.version, version);
+        await fixture.stop();
+
+        assert.match(fixture.stderr, /Warning: Could not migrate legacy WaterWall executable/);
+        assert.ok(fixture.stderr.includes(legacyProgram));
+        assert.match(fixture.stderr, /Cannot copy the legacy executable into staging\. Permission denied/);
+        const remainingLegacy = await stat(legacyProgram);
+        assert.equal(remainingLegacy.ino, originalLegacy.ino);
+        assert.equal(remainingLegacy.mode & 0o777, 0o100);
+        assert.deepEqual(await readdir(legacyRelease), ['waterwall-1.6.0.json']);
+        await chmod(legacyProgram, 0o700);
+        assert.deepEqual(await readFile(legacyProgram), legacyBinary);
+
+        await chmod(legacyRelease, 0o600);
+        try {
+            await fixture.start();
+            await fixture.stop();
+            assert.ok(fixture.stderr.includes(join(legacyRelease, 'Waterwall')));
+            assert.match(fixture.stderr, /Cannot inspect the migration destination\. Permission denied/);
+        } finally {
+            await chmod(legacyRelease, 0o700);
+        }
+        assert.deepEqual(await readdir(legacyRelease), ['waterwall-1.6.0.json']);
+    });
+
+test('keeps a root-owned legacy WaterWall binary executable after migration changes its owner',
+    { skip: process.platform !== 'linux' || !unprivilegedUser }, async t => {
+        const fixture = await authFixture(t, undefined, { encrypted: false, runAs: unprivilegedUser });
+        const release = coreReleaseDir(fixture.backend);
+        const legacy = join(dirname(release), 'Waterwall');
+        const migrated = join(release, 'Waterwall');
+        const runAsService = { cwd: fixture.cwd, timeout, ...unprivilegedUser };
+        await writeWithMode(legacy, await readFile('/bin/true'), 0o655);
+        await run(legacy, [], runAsService);
+        await fixture.start();
+        await fixture.stop();
+        assert.equal((await stat(migrated)).uid, unprivilegedUser.uid);
+        assert.equal((await stat(legacy)).mode & 0o777, 0o655);
+        await run(migrated, [], runAsService);
+    });
+
+test('migrates legacy WaterWall binaries and valid schematics into version folders without overwriting them', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    const cached = schematicFile(fixture.backend);
+    const release = coreReleaseDir(fixture.backend);
+    const bin = dirname(release);
+    const previousCache = join(bin, 'schematics');
+    const olderCache = join(dirname(fixture.backend), 'schematics');
+    for (const directory of [previousCache, olderCache]) {
+        await mkdir(directory, { mode: 0o755 });
+        await chmod(directory, 0o755);
+    }
+    const previousPath = join(previousCache, 'waterwall-1.6.0.json');
+    const olderPath = join(olderCache, 'waterwall-1.6.0.json');
+    const original = await readFile(bundledSchematicFile, 'utf8');
+    await writeWithMode(previousPath, '{}');
+    await writeWithMode(olderPath, `${original}\n`);
+    const schematicVersion = version => original.replace('"version": "1.6.0"', `"version": "${version}"`);
+    const previous = schematicVersion('1.6.1');
+    await writeWithMode(join(previousCache, 'waterwall-1.6.1.json'), previous);
+    await writeWithMode(join(olderCache, 'waterwall-1.6.1.json'), `${previous}\n`);
+    const linkedSchematic = join(fixture.cwd, 'waterwall-1.6.2.json');
+    await writeWithMode(linkedSchematic, schematicVersion('1.6.2'));
+    await symlink(linkedSchematic, join(previousCache, 'waterwall-1.6.2.json'));
+    const writableSchematic = join(olderCache, 'waterwall-1.6.3.json');
+    await writeWithMode(writableSchematic, schematicVersion('1.6.3'), 0o666);
+    const redirectedRelease = join(fixture.cwd, 'redirected release');
+    await mkdir(redirectedRelease, { mode: 0o755 });
+    await chmod(redirectedRelease, 0o755);
+    await writeWithMode(join(redirectedRelease, 'waterwall-1.6.4.json'), schematicVersion('1.6.4'));
+    await symlink(redirectedRelease, coreReleaseDir(fixture.backend, '1.6.4'));
+    const legacyProgram = join(bin, 'Waterwall');
+    const program = join(release, 'Waterwall');
+    const previousBinary = '#!/bin/sh\nexit 0\n';
+    await writeWithMode(legacyProgram, previousBinary, 0o700);
+    await fixture.start();
+    const session = await fixtureSession(fixture);
+    const { initial } = await connectPreview(t, fixture.origin, session);
+    assert.equal(initial.server.core.state, 'stopped');
+    assert.deepEqual(initial.server.core.available_versions, ['1.6.1', '1.6.0']);
+    assert.equal(await readFile(cached, 'utf8'), `${original}\n`);
+    assert.equal(await readFile(previousPath, 'utf8'), '{}');
+    assert.equal(await readFile(olderPath, 'utf8'), `${original}\n`);
+    assert.equal(await readFile(schematicFile(fixture.backend, '1.6.1'), 'utf8'), previous);
+    assert.equal(await readFile(program, 'utf8'), previousBinary);
+    assert.equal(await readFile(legacyProgram, 'utf8'), previousBinary);
+    assert.equal((await stat(program)).mode & 0o777, 0o700);
+    for (const version of ['1.6.2', '1.6.3']) {
+        await assert.rejects(stat(schematicFile(fixture.backend, version)), { code: 'ENOENT' });
+    }
+    assert.deepEqual((await readdir(release)).sort(), ['Waterwall', 'waterwall-1.6.0.json']);
+    await fixture.stop();
+
+    await writeFile(previousPath, original);
+    await writeFile(legacyProgram, '#!/bin/sh\nexit 1\n');
+    await fixture.start();
+    assert.equal(await readFile(cached, 'utf8'), `${original}\n`);
+    assert.equal(await readFile(program, 'utf8'), previousBinary);
+});
+
+test('finds core updates, keeps the active release on failure, and reloads the selected version',
+    { skip: !supportedInstaller }, async t => {
+        const fixture = await authFixture(t, undefined, { encrypted: false });
+        const currentCore = await seedCore(fixture.backend, { executable: true });
+        const currentExecutable = await readFile(currentCore.program, 'utf8');
+        const original = await readFile(bundledSchematicFile, 'utf8');
+        const current = parseSchematic(original);
+        const selected = { ...current, version: '1.6.1', config: { ...current.config }, nodes: { ...current.nodes } };
+        delete selected.config.users_starter;
+        selected.nodes.FixtureNextRelease = {
+            ...selected.nodes.Template,
+            graph_rules: [{
+                assert: ['eq', ['get', '/ready'], true],
+                message: 'Enable the fixture node.',
+            }],
+        };
+
+        const payload = 'fixture archive bytes for the selected release\n';
+        const archive = 'Fixture-Waterwall-linux.zip';
+        const platform = process.arch === 'arm64' ? 'linux-aarch64' : 'linux-x86_64';
+        selected.packages = {
+            ...current.packages,
+            [platform]: { archive, sha256: createHash('sha256').update(payload).digest('hex') },
+        };
+        const schematicBytes = Buffer.from(JSON.stringify(selected));
+        const catalogEntry = (version, bytes) => ({
+            name: `waterwall-${version}.json`, type: 'file', size: bytes.length,
+            sha: createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'),
+        });
+        const candidate = catalogEntry(selected.version, schematicBytes);
+
+        const tools = join(fixture.cwd, 'fixture tools');
+        const listing = join(fixture.cwd, 'catalog listing');
+        const blobs = join(fixture.cwd, 'catalog blobs');
+        const catalogCalls = join(fixture.cwd, 'catalog calls');
+        const archiveCalls = join(fixture.cwd, 'archive calls');
+        const unzipCalls = join(fixture.cwd, 'unzip calls');
+        const archiveFile = join(fixture.cwd, 'fixture archive');
+        const archiveHold = join(fixture.cwd, 'archive hold');
+        const installedExecutable = '#!/bin/sh\nexit 0\n';
+        await mkdir(tools);
+        await mkdir(blobs);
+        await writeFile(join(blobs, candidate.sha), schematicBytes);
+        await writeFile(join(tools, 'curl'), [
+            '#!/bin/sh',
+            'for url do :; done',
+            'case "$url" in',
+            '  "https://api.github.com/repos/radkesvat/wave/contents/backend/schematics?ref=main")',
+            '    printf "%s\\n" "$url" >> "$WAVE_FIXTURE_CATALOG_CALLS"',
+            '    cat "$WAVE_FIXTURE_CATALOG_LISTING" ;;',
+            '  "https://api.github.com/repos/radkesvat/wave/tags?per_page=100&page=1") printf "[]" ;;',
+            '  "https://api.github.com/repos/radkesvat/wave/git/blobs/"*)',
+            '    printf "%s\\n" "$url" >> "$WAVE_FIXTURE_CATALOG_CALLS"',
+            '    cat "$WAVE_FIXTURE_CATALOG_BLOBS/${url##*/}" ;;',
+            '  "https://github.com/radkesvat/WaterWall/releases/download/"*)',
+            '    printf "%s\\n" "$url" >> "$WAVE_FIXTURE_ARCHIVE_CALLS"',
+            '    while [ -f "$WAVE_FIXTURE_ARCHIVE_HOLD" ]; do sleep 0.02; done',
+            '    cat "$WAVE_FIXTURE_ARCHIVE" ;;',
+            '  *) exit 22 ;;',
+            'esac',
+            '',
+        ].join('\n'), { mode: 0o700 });
+        await writeFile(join(tools, 'unzip'), [
+            '#!/bin/sh',
+            '[ "$1" = "-p" ] && [ "$3" = "Waterwall" ] || exit 2',
+            'cmp "$2" "$WAVE_FIXTURE_ARCHIVE" || exit 3',
+            'printf "%s\\n" "$3" >> "$WAVE_FIXTURE_UNZIP_CALLS"',
+            `printf '%s' '${installedExecutable}'`,
+            '',
+        ].join('\n'), { mode: 0o700 });
+        const env = {
+            PATH: tools + delimiter + process.env.PATH,
+            WAVE_FIXTURE_CATALOG_LISTING: listing,
+            WAVE_FIXTURE_CATALOG_BLOBS: blobs,
+            WAVE_FIXTURE_CATALOG_CALLS: catalogCalls,
+            WAVE_FIXTURE_ARCHIVE_CALLS: archiveCalls,
+            WAVE_FIXTURE_UNZIP_CALLS: unzipCalls,
+            WAVE_FIXTURE_ARCHIVE: archiveFile,
+            WAVE_FIXTURE_ARCHIVE_HOLD: archiveHold,
+        };
+
+        await fixture.start(env);
+        assert.match(await waitForFile(catalogCalls), /backend\/schematics\?ref=main/);
+        const session = await fixtureSession(fixture);
+        const { socket, initial, schematic, schematicRevision } = await connectPreview(t, fixture.origin, session);
+        assert.equal(initial.server.version, panelVersion);
+        assert.equal(initial.server.core.version, '1.6.0');
+        assert.equal(initial.server.core.state, 'stopped');
+        assert.deepEqual(initial.server.core.available_versions, ['1.6.0']);
+        assert.equal(schematic.version, '1.6.0');
+        assert.ok(schematicRevision > 0);
+        const compatible = await requestPreview(socket, 'apply_core_settings', {
+            schematic_revision: undefined, settings: { misc: { workers: 2 } },
+        });
+        assert.equal(compatible.ok, true, compatible.feedback);
+        const startupError = 'Could not fetch the Wave schematic list from GitHub.';
+        const startupFailure = await nextPreviewSnapshot(socket, frame =>
+            !frame.data.server.core.checking_updates && frame.data.server.core.update_check_error === startupError);
+        assert.equal(panelLogs(startupFailure, 'error', startupError).length, 1);
+
+        const changedActive = Buffer.from(JSON.stringify({
+            ...current,
+            packages: {
+                ...current.packages,
+                [platform]: { ...current.packages[platform], sha256: 'a'.repeat(64) },
+            },
+        }));
+        const activeEntry = catalogEntry(current.version, changedActive);
+        await writeFile(join(blobs, activeEntry.sha), changedActive);
+        await writeFile(listing, JSON.stringify([activeEntry]));
+        await unlink(currentCore.program);
+        const activeProtected = nextPreviewSnapshot(socket, frame =>
+            !frame.data.server.core.checking_updates &&
+            frame.data.server.core.update_check_error?.includes('published archive metadata changed'));
+        const checkActive = await requestPreview(socket, 'check_core_updates');
+        assert.equal(checkActive.ok, true, checkActive.feedback);
+        const unchanged = await activeProtected;
+        assert.equal(panelLogs(unchanged, 'error', unchanged.data.server.core.update_check_error).length, 1);
+        assert.equal(unchanged.data.server.core.state, 'missing');
+        assert.equal(unchanged.data.server.core.version, current.version);
+        assert.equal(unchanged.schematic_revision, schematicRevision);
+        assert.equal(await readFile(schematicFile(fixture.backend), 'utf8'), original);
+        assert.match(await readFile(catalogCalls, 'utf8'), new RegExp(`/git/blobs/${activeEntry.sha}`));
+        await assert.rejects(stat(archiveCalls), { code: 'ENOENT' });
+        await writeFile(currentCore.program, currentExecutable, { mode: 0o700 });
+
+        await writeFile(listing, JSON.stringify([candidate]));
+        const found = nextPreviewSnapshot(socket, frame =>
+            !frame.data.server.core.checking_updates && frame.data.server.core.available_versions.includes(selected.version));
+        const check = await requestPreview(socket, 'check_core_updates');
+        assert.equal(check.ok, true, check.feedback);
+        const checked = await found;
+        assert.equal(panelLogs(checked, 'success', 'WaterWall update check completed.').length, 1);
+        assert.deepEqual(checked.data.server.core.available_versions, [selected.version, '1.6.0']);
+        assert.equal(checked.data.server.core.latest_version, selected.version);
+        assert.equal(checked.data.server.core.update_available, true);
+        assert.equal(checked.schematic, undefined);
+        assert.equal(checked.schematic_revision, schematicRevision);
+        const targetFile = schematicFile(fixture.backend, selected.version);
+        assert.deepEqual(await readFile(targetFile), schematicBytes);
+        assert.match(await readFile(catalogCalls, 'utf8'), new RegExp(`/git/blobs/${candidate.sha}`));
+        await assert.rejects(stat(archiveCalls), { code: 'ENOENT' });
+
+        const badBlob = 'f'.repeat(40);
+        await writeFile(join(blobs, badBlob), schematicBytes.toString().replace('Enable the fixture node.', 'Ignore the fixture node.'));
+        await writeFile(listing, JSON.stringify([{ ...candidate, sha: badBlob }]));
+        const badCheck = nextPreviewSnapshot(socket, frame =>
+            !frame.data.server.core.checking_updates && frame.data.server.core.update_check_error);
+        assert.equal((await requestPreview(socket, 'check_core_updates')).ok, true);
+        const badResult = await badCheck;
+        const badResultError = badResult.data.server.core.update_check_error;
+        assert.equal(panelLogs(badResult, 'error', badResultError).length, 1);
+        assert.deepEqual(badResult.data.server.core.available_versions, [selected.version, '1.6.0']);
+        assert.equal(badResult.data.server.core.latest_version, selected.version);
+        assert.equal(badResult.data.server.core.update_available, true);
+        assert.deepEqual(await readFile(targetFile), schematicBytes);
+        await writeFile(listing, '[]');
+
+        await createCoreConfig(socket, 'Already running', true);
+        const running = nextPreviewSnapshot(socket, frame => frame.data.server.core.state === 'running');
+        const start = await requestPreview(socket, 'start_core');
+        assert.equal(start.ok, true, start.feedback);
+        await running;
+        const blocked = await requestPreview(socket, 'update_core', { version: selected.version });
+        assert.equal(blocked.ok, false);
+        assert.match(blocked.feedback, /Stop WaterWall/);
+        await assert.rejects(stat(archiveCalls), { code: 'ENOENT' });
+        const stopped = nextPreviewSnapshot(socket, frame => frame.data.server.core.state === 'stopped');
+        assert.equal((await requestPreview(socket, 'stop_core')).ok, true);
+        await stopped;
+
+        const stored = JSON.parse(await readFile(fixture.database, 'utf8'));
+        await writeFile(archiveFile, 'bad fixture archive bytes\n');
+        const failed = nextPreviewSnapshot(socket, frame =>
+            frame.data.server.core.update_target === undefined && frame.data.server.core.update_error?.includes('SHA-256'));
+        const rejected = await requestPreview(socket, 'update_core', { version: selected.version });
+        assert.equal(rejected.ok, true, rejected.feedback);
+        assert.equal(rejected.data.server.core.update_target, selected.version);
+        const rolledBack = await failed;
+        const installError = rolledBack.data.server.core.update_error;
+        assert.equal(panelLogs(rolledBack, 'error', installError).length, 1);
+        assert.equal(rolledBack.data.server.core.version, '1.6.0');
+        assert.equal(rolledBack.schematic_revision, schematicRevision);
+        assert.equal(rolledBack.schematic, undefined);
+        assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')), stored);
+        await assert.rejects(stat(unzipCalls), { code: 'ENOENT' });
+        const selectedProgram = join(coreReleaseDir(fixture.backend, selected.version), 'Waterwall');
+        await assert.rejects(stat(selectedProgram), { code: 'ENOENT' });
+
+        const peer = await connectPreview(t, fixture.origin, session);
+        await writeFile(archiveFile, payload);
+        await writeFile(archiveHold, '');
+        const catalogBeforeInstall = await readFile(catalogCalls, 'utf8');
+        const switched = nextPreviewSnapshot(socket, frame => frame.data.server.core.version === selected.version);
+        const peerSwitched = nextPreviewSnapshot(peer.socket, frame => frame.data.server.core.version === selected.version);
+        const requested = await requestPreview(socket, 'update_core', { version: selected.version });
+        assert.equal(requested.ok, true, requested.feedback);
+        const queued = await requestPreview(socket, 'check_updates');
+        assert.equal(queued.ok, true, queued.feedback);
+        assert.equal(queued.data.server.core.update_target, selected.version);
+        assert.equal(queued.data.server.core.checking_updates, true);
+        assert.equal(queued.data.server.panel.checking_updates, true);
+        assert.equal(await readFile(catalogCalls, 'utf8'), catalogBeforeInstall);
+        const afterQueuedCheck = nextPreviewSnapshot(socket, frame =>
+            frame.data.server.core.version === selected.version && !frame.data.server.core.checking_updates &&
+            frame.data.server.panel.update_check_generation === 1);
+        await unlink(archiveHold);
+        const applied = await switched;
+        assert.equal(applied.data.server.version, panelVersion);
+        assert.equal(applied.data.server.core.state, 'stopped');
+        assert.equal(applied.data.server.core.latest_version, selected.version);
+        assert.equal(applied.data.server.core.update_available, false);
+        assert.equal(applied.data.server.core.update_target, undefined);
+        assert.equal(applied.schematic.version, selected.version);
+        assert.deepEqual(applied.schematic.nodes.FixtureNextRelease, selected.nodes.FixtureNextRelease);
+        assert.ok(applied.schematic_revision > schematicRevision);
+        const peerApplied = await peerSwitched;
+        assert.equal(peerApplied.schematic.version, selected.version);
+        assert.equal(peerApplied.schematic_revision, applied.schematic_revision);
+        for (const error of [startupError, badResultError, installError]) {
+            assert.equal(panelLogs(peerApplied, 'error', error).length, 1);
+        }
+        assert.equal(panelLogs(await afterQueuedCheck, 'success', 'WaterWall update check completed.').length, 2);
+
+        const settings = { misc: { workers: 3 } };
+        for (const revision of [undefined, schematicRevision]) {
+            const stale = await requestPreview(peer.socket, 'apply_core_settings', {
+                schematic_revision: revision, settings,
+            });
+            assert.equal(stale.ok, false);
+            assert.match(stale.feedback, /WaterWall changed version/);
+            assert.equal(stale.data.server.core.version, selected.version);
+            assert.equal(stale.data.core_settings.misc.workers, 2);
+        }
+        assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')), { ...stored, waterwall_version: selected.version });
+        const savedSettings = await requestPreview(peer.socket, 'apply_core_settings', { settings });
+        assert.equal(savedSettings.ok, true, savedSettings.feedback);
+        assert.equal(savedSettings.data.core_settings.misc.workers, 3);
+        assert.equal(JSON.parse(await readFile(fixture.database, 'utf8')).core_settings.misc.workers, 3);
+        const theme = await requestPreview(peer.socket, 'apply_theme', { schematic_revision: undefined, theme: 'light' });
+        assert.equal(theme.ok, true, theme.feedback);
+        assert.equal(theme.data.settings.theme, 'light');
+        const expectedUrl = `https://github.com/radkesvat/WaterWall/releases/download/v${selected.version}/${archive}`;
+        const calls = (await readFile(archiveCalls, 'utf8')).trimEnd().split('\n');
+        assert.deepEqual(calls, [expectedUrl, expectedUrl]);
+        assert.equal(await readFile(unzipCalls, 'utf8'), 'Waterwall\n');
+        assert.equal(await readFile(selectedProgram, 'utf8'), installedExecutable);
+        assert.deepEqual((await readdir(dirname(targetFile))).sort(), ['Waterwall', `waterwall-${selected.version}.json`]);
+        assert.equal(await readFile(currentCore.program, 'utf8'), currentExecutable);
+
+        const profile = await createCoreConfig(socket, 'New-release node');
+        const { config, revision } = (await requestPreview(socket, 'get_core_config', { id: profile.id })).result;
+        assert.deepEqual(config.nodes, []);
+        const node = { name: 'New node', type: 'FixtureNextRelease' };
+        const save = settings => requestPreview(socket, 'save_core_config', {
+            id: profile.id, revision, config: { ...config, nodes: [{ ...node, settings }] },
+        });
+        const invalid = await save({});
+        assert.equal(invalid.ok, false);
+        assert.match(invalid.feedback, /Enable the fixture node/);
+        const valid = await save({ ready: true });
+        assert.equal(valid.ok, true, valid.feedback);
+        assert.deepEqual(valid.result.config.nodes, [{ ...node, settings: { ready: true } }]);
+
+        await fixture.stop();
+        await fixture.start(env);
+        const reopened = await connectPreview(t, fixture.origin, session);
+        assert.equal(reopened.initial.server.core.version, selected.version);
+        assert.equal(reopened.initial.server.core.state, 'stopped');
+        assert.equal(reopened.schematic.version, selected.version);
+        const omitted = await requestPreview(reopened.socket, 'apply_core_settings', {
+            schematic_revision: undefined, settings: { misc: { workers: 4 } },
+        });
+        assert.equal(omitted.ok, false);
+        assert.match(omitted.feedback, /WaterWall changed version/);
+        assert.equal(omitted.data.core_settings.misc.workers, 3);
+        const currentRevision = await requestPreview(reopened.socket, 'apply_core_settings', {
+            settings: { misc: { workers: 4 } },
+        });
+        assert.equal(currentRevision.ok, true, currentRevision.feedback);
+    });
+
 test('attempts first-run installation once and lets an authenticated administrator retry a missing core',
     { skip: !supportedInstaller }, async t => {
         const fixture = await authFixture(t, undefined, { encrypted: false, prepareCore: false });
-        const binDir = join(dirname(fixture.backend), 'waterwall_bin');
+        const releaseDir = coreReleaseDir(fixture.backend);
         const configDir = join(dirname(fixture.backend), 'configs');
         const tools = join(fixture.cwd, 'fixture tools');
         const calls = join(fixture.cwd, 'curl calls');
         const released = join(fixture.cwd, 'release curl');
-        await mkdir(binDir);
         await mkdir(tools);
         await writeFile(join(tools, 'curl'), [
             '#!/bin/sh',
+            'for url do :; done',
+            'case "$url" in',
+            '  "https://api.github.com/repos/radkesvat/wave/contents/backend/schematics?ref=main") printf "[]"; exit 0 ;;',
+            'esac',
             'printf "%s\n" "$*" >> "$WAVE_CORE_TEST_CALLS"',
             'attempt=0',
             'while [ ! -e "$WAVE_CORE_TEST_RELEASE" ] && [ "$attempt" -lt 200 ]; do',
@@ -735,19 +1390,22 @@ test('attempts first-run installation once and lets an authenticated administrat
         const firstFailure = failedInstall(first.socket);
         await writeFile(released, '');
         const firstFailed = await firstFailure;
+        if (firstFailed.data.server.core.checking_updates) {
+            await nextPreviewSnapshot(first.socket, ({ data }) => data.server.core.checking_updates === false);
+        }
         assert.equal(panelLogs(firstFailed, 'error', firstFailed.data.server.core.error).length, 1);
         assert.equal((await invoked()).length, 1);
-        assert.deepEqual(await readdir(binDir), []);
+        assert.deepEqual(await readdir(dirname(releaseDir)), ['1.6.0']);
+        assert.deepEqual(await readdir(releaseDir), ['waterwall-1.6.0.json']);
 
         await fixture.stop();
         await unlink(released);
-        await rmdir(binDir);
         await fixture.start(env);
         const restarted = await connectPreview(t, fixture.origin, session);
         assert.equal(restarted.initial.server.core.state, 'missing');
-        assert.deepEqual(await readdir(binDir), []);
+        assert.deepEqual(await readdir(releaseDir), ['waterwall-1.6.0.json']);
         await delay(250);
-        assert.equal((await invoked()).length, 1, 'Deleting the directory does not reset the first-run attempt.');
+        assert.equal((await invoked()).length, 1, 'Restarting does not reset the first-run attempt.');
 
         const retry = await requestPreview(restarted.socket, 'install_core');
         assert.equal(retry.ok, true, retry.feedback);
@@ -758,7 +1416,7 @@ test('attempts first-run installation once and lets an authenticated administrat
         assert.equal(panelLogs(secondFailed, 'error', secondFailed.data.server.core.error).length, 1);
         assert.equal(panelLogs(secondFailed, 'success', 'WaterWall installed.').length, 0);
         assert.equal((await invoked()).length, 2);
-        assert.deepEqual(await readdir(binDir), []);
+        assert.deepEqual(await readdir(releaseDir), ['waterwall-1.6.0.json']);
 
         const installed = nextPreviewSnapshot(restarted.socket, frame => frame.data.server.core.state === 'stopped');
         const staged = await seedCore(fixture.backend, { executable: true });
@@ -1008,6 +1666,8 @@ test('creates disabled configs with protected authentication and API starter nod
         assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), config);
         assert.equal((await stat(file)).mode & 0o777, 0o600);
         assert.equal(config.name, name);
+        assert.equal(config['config-version'], 1);
+        assert.equal(config['core-minimum-version'], 0);
         assert.equal(config.nodes.length, 4);
         assert.deepEqual(Object.fromEntries(config.nodes.map(node => [node.name, node.type])), {
             AuthenticationClient: 'AuthenticationClient', AuthenticationServer: 'AuthenticationServer',
@@ -1054,6 +1714,37 @@ test('creates disabled configs with protected authentication and API starter nod
         occupied.listen(port, address);
         await once(occupied, 'listening');
     }
+});
+
+test('persists starter template versions and extra top-level members', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    const schematic = parseSchematic(await readFile(bundledSchematicFile, 'utf8'));
+    schematic.version = '1.6.1';
+    const template = schematic.config.users_starter.template;
+    template['config-version'] = 2;
+    template['fixture-metadata'] = { members: ['kept', 12] };
+    const selected = schematicFile(fixture.backend, schematic.version);
+    await mkdir(dirname(selected), { mode: 0o700 });
+    await writeFile(selected, JSON.stringify(schematic), { mode: 0o600 });
+    const settings = JSON.parse(await readFile(fixture.database, 'utf8'));
+    await writeFile(fixture.database, JSON.stringify({ ...settings, waterwall_version: schematic.version }));
+
+    await fixture.start();
+    const session = await fixtureSession(fixture);
+    const { socket, initial } = await connectPreview(t, fixture.origin, session);
+    assert.equal(initial.server.core.version, schematic.version);
+    const name = 'Starter template';
+    const created = await requestPreview(socket, 'create_core_config', { name, add_auth_nodes: true });
+    assert.equal(created.ok, true, created.feedback);
+    const [row] = created.data.server.core.configs;
+    const opened = await requestPreview(socket, 'get_core_config', { id: row.id });
+    assert.equal(opened.ok, true, opened.feedback);
+    const file = join(dirname(fixture.backend), 'configs', name, 'config.json');
+    const saved = JSON.parse(await readFile(file, 'utf8'));
+    assert.equal(saved['config-version'], 2);
+    assert.equal(saved['core-minimum-version'], 0);
+    assert.deepEqual(saved['fixture-metadata'], template['fixture-metadata']);
+    assert.deepEqual(opened.result.config, saved);
 });
 
 test('rejects starter nodes when every eligible API port is occupied', async t => {
@@ -1316,12 +2007,14 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     const notes = 'x'.repeat(9 * 1024);
     const edited = await edit({
         name: 'Jordan', notes, enabled: false, 'wireguard-allowed-ips': '',
+        'record-stat-interval-ms': '2147483647',
         limit: { traffic: { up: null, down: '0' } }, time: { 'expire-at-ms': null },
     });
     assert.equal(edited.ok, true, edited.feedback);
     assert.equal(edited.feedback_in_logs_only, true);
     const updated = {
         ...record, name: 'Jordan', notes, enabled: false, 'wireguard-allowed-ips': '',
+        'record-stat-interval-ms': '2147483647',
         limit: { ...record.limit, traffic: { total: record.limit.traffic.total, down: '0' } },
         time: {
             'created-at-ms': createdAt, 'first-usage-at-ms': onDisk.time['first-usage-at-ms'],
@@ -1558,7 +2251,9 @@ test('restores backup metadata atomically and preserves running and edited confi
         assert.equal(restored.ok, true, restored.feedback);
         assert.deepEqual(restored.data.settings, settings);
         assert.deepEqual(restored.data.server.core.configs.slice(0, 2), [active, { ...standby, enabled: false }]);
-        assert.equal(JSON.parse(await readFile(configPath(restoredName), 'utf8')).name, restoredName);
+        assert.deepEqual(JSON.parse(await readFile(configPath(restoredName), 'utf8')), {
+            name: restoredName, 'config-version': 1, 'core-minimum-version': 0, nodes: [],
+        });
         const cleared = await restore([]);
         assert.equal(cleared.ok, true, cleared.feedback);
         assert.deepEqual(cleared.data.server.core.configs, [active]);
@@ -1581,16 +2276,149 @@ async function expectStartupFailure(args, diagnostic, executable = backend) {
     });
 }
 
+test('validates choice controls and offline user mappings in release schematics', async () => {
+    const source = await readFile(bundledSchematicFile, 'utf8');
+    const schematic = parseSchematic(source);
+    const check = path => run(backend, ['--check-schematic', path], { cwd, timeout });
+    assert.equal((await check(bundledSchematicFile)).stdout, 'WaterWall schematic is valid.\n');
+    for (const type of ['ConnectionToPackets', 'PacketsToConnection', 'PacketsToStream',
+        'StreamToPackets', 'WireGuardClient', 'WireGuardServer']) {
+        assert.equal(schematic.nodes[type].ports.layer, 'kNodeLayer3 | kNodeLayer4', type);
+    }
+    for (const type of ['UdpListener', 'UdpStatelessSocket']) {
+        assert.equal(schematic.nodes[type].ports.next_layer, 'kNodeLayer3 | kNodeLayer4Datagram', type);
+    }
+
+    const directory = await mkdtemp(join(cwd, 'check-schematic-'));
+    const candidate = join(directory, 'waterwall-1.6.0.json');
+    async function writeCandidate(edit) {
+        const document = parseSchematic(source);
+        edit(document);
+        await writeFile(candidate, JSON.stringify(document));
+    }
+    async function rejects(edit, diagnostic) {
+        await writeCandidate(edit);
+        await assert.rejects(check(candidate), { stderr: diagnostic, stdout: '' });
+    }
+    const choice = { key: 'fixture-choice', label: 'Fixture choice', kind: 'choice' };
+    await rejects(document => document.nodes.Template.fields.push(choice), /choice field.*string option/);
+    const nestedChoice = choices => document => document.nodes.Template.fields.push({
+        key: 'fixture-object', label: 'Fixture object', kind: 'object', children: [{ ...choice, choices }],
+    });
+    await rejects(nestedChoice([]), /choice field.*string option/);
+    await rejects(nestedChoice([1]), /Expected a string/);
+    await rejects(document => delete document.ui.users.fields.password, /requires ID and password controls/);
+    await rejects(document => { document.ui.users.fields.id.key = 'user-id'; }, /mapping for role id/);
+    await rejects(document => { document.ui.users.fields.id.path = '/gid'; }, /mapping for role id/);
+    await rejects(document => { document.ui.users.fields.enabled.key = 'name'; }, /mapping for role enabled/);
+    await rejects(document => { document.ui.users.access_fields[0].path = '/enabled'; }, /editable.*\/enabled/);
+    await rejects(document => { document.ui.users.limit_groups[0].fields[0].path = '/stats/traffic/up'; },
+        /editable.*\/stats\/traffic\/up/);
+
+    const interval = document => document.ui.users.access_fields.find(
+        field => field.path === '/record-stat-interval-ms');
+    await rejects(document => Object.assign(interval(document), { minimum: 2147483648, maximum: 2147483650 }),
+        /bounds.*\/record-stat-interval-ms/);
+    await rejects(document => {
+        interval(document).minimum = 2147483648;
+        delete interval(document).maximum;
+    }, /bounds.*\/record-stat-interval-ms/);
+    await rejects(document => { document.ui.users.fields.id.minimum = 0; }, /bounds.*\/id/);
+    await rejects(document => {
+        delete document.ui.users.fields.id.minimum;
+        document.ui.users.fields.id.maximum = 0;
+    }, /bounds.*\/id/);
+    await rejects(document => Object.assign(interval(document), { minimum: 50, maximum: 49 }),
+        /bounds.*\/record-stat-interval-ms/);
+    await rejects(document => { document.ui.users.fields.group.minimum = -1; }, /bounds.*\/gid/);
+    for (const bounds of [{}, { minimum: 100 }, { maximum: 200 }, { minimum: 100, maximum: 200 }]) {
+        await writeCandidate(document => {
+            delete interval(document).maximum;
+            Object.assign(interval(document), bounds);
+            delete document.ui.users.fields.id.minimum;
+            document.ui.users.fields.id.maximum = JSON.rawJSON('18446744073709551615');
+        });
+        assert.equal((await check(candidate)).stdout, 'WaterWall schematic is valid.\n');
+    }
+
+    const uploadQuota = document => document.ui.users.limit_groups[0].fields.find(
+        field => field.path === '/limit/traffic/up');
+    const noMegabyte = /\/limit\/traffic\/up.*no whole megabyte/;
+    await rejects(document => Object.assign(uploadQuota(document), { minimum: 1, maximum: 999999 }), noMegabyte);
+    await rejects(document => { uploadQuota(document).minimum = JSON.rawJSON('18446744073709000001'); }, noMegabyte);
+    for (const bounds of [
+        { minimum: 1000000, maximum: 2000000 },
+        { minimum: 500000, maximum: 2500000 },
+        { minimum: JSON.rawJSON('18446744073709000000') },
+        { minimum: 1, maximum: 999999, gigabytes: false },
+    ]) {
+        await writeCandidate(document => Object.assign(uploadQuota(document), bounds));
+        assert.equal((await check(candidate)).stdout, 'WaterWall schematic is valid.\n');
+    }
+
+    await writeCandidate(document => {
+        const { id, password } = document.ui.users.fields;
+        document.ui.users.fields = { id, password };
+        delete document.ui.users.access_fields;
+        delete document.ui.users.limit_groups;
+    });
+    assert.equal((await check(candidate)).stdout, 'WaterWall schematic is valid.\n');
+    await writeCandidate(document => {
+        document.runtime.users_protocol = 'none';
+        delete document.config.users_starter;
+        delete document.config.live_users;
+        delete document.ui.users;
+        for (const node of Object.values(document.nodes)) {
+            delete node.user_database;
+        }
+    });
+    assert.equal((await check(candidate)).stdout, 'WaterWall schematic is valid.\n');
+});
+
 async function isolatedBackend(name, settings = {}) {
-    const directory = join(cwd, name);
-    const executable = join(directory, basename(backend));
-    const db = join(directory, 'wave-db.json');
-    await mkdir(directory);
-    await copyFile(backend, executable);
+    const executable = await copyBackend(backend, cwd, name);
+    const db = join(dirname(executable), 'wave-db.json');
     await seedCore(executable);
     await writeFile(db, JSON.stringify({ waterwall_install_attempted: true, ...settings }), { mode: 0o600 });
     return { executable, db };
 }
+
+test('rejects startup when the selected schematic is missing or invalid', async () => {
+    const { executable, db } = await isolatedBackend('invalid-schematic', {
+        listen: { host: '127.0.0.1', port: 0 },
+        waterwall_version: '1.6.1',
+    });
+    const site = ['--site-dir', siteDir];
+    const legacy = join(dirname(executable), 'schematics');
+    await mkdir(legacy, { mode: 0o755 });
+    await chmod(legacy, 0o755);
+    await writeWithMode(join(legacy, 'waterwall-1.6.1.json'), '{}');
+    await expectStartupFailure(site, /waterwall-1\.6\.1\.json.*Expected a regular schematic file/, executable);
+    const settings = await readFile(db, 'utf8');
+
+    const selected = schematicFile(executable, '1.6.1');
+    assert.deepEqual(await readdir(dirname(selected)), []);
+    const bundled = await readFile(bundledSchematicFile, 'utf8');
+    const valid = bundled.replace('"version": "1.6.0"', '"version": "1.6.1"');
+    const legacyCandidate = join(legacy, 'waterwall-1.6.1.json');
+    await writeFile(legacyCandidate, valid);
+    await symlink(legacyCandidate, selected);
+    await expectStartupFailure(site, /waterwall-1\.6\.1\.json.*Expected a regular schematic file/, executable);
+    await unlink(selected);
+    await writeWithMode(selected, valid.replace('"schema_version": 1', '"schema_version": 2'));
+    await expectStartupFailure(site, /waterwall-1\.6\.1\.json.*Unsupported schematic format/, executable);
+    const check = await run(executable, ['--check-schematic', bundledSchematicFile], { cwd, timeout });
+    assert.equal(check.stdout, 'WaterWall schematic is valid.\n');
+    assert.equal(await readFile(db, 'utf8'), settings);
+    assert.deepEqual(await readdir(dirname(selected)), ['waterwall-1.6.1.json']);
+
+    await writeFile(db, JSON.stringify({ ...JSON.parse(settings), waterwall_version: '1.6.0' }));
+    const cachedDefault = schematicFile(executable);
+    const invalidDefault = bundled.replace('"schema_version": 1', '"schema_version": 2');
+    await writeWithMode(cachedDefault, invalidDefault);
+    await expectStartupFailure(site, /waterwall-1\.6\.0\.json.*Unsupported schematic format/, executable);
+    assert.equal(await readFile(cachedDefault, 'utf8'), invalidDefault);
+});
 
 test('rejects concurrent access to the database or a port already in use', async () => {
     await expectStartupFailure(['--site-dir', siteDir], /Another Wave process is using wave-db.json/);

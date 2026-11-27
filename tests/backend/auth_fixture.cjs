@@ -1,14 +1,31 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { mkdir, mkdtemp, rm, writeFile } = require('node:fs/promises');
+const { chmod, chown, mkdir, mkdtemp, rm, writeFile } = require('node:fs/promises');
 const { createServer } = require('node:net');
 const { tmpdir } = require('node:os');
-const { dirname, join, resolve } = require('node:path');
+const { delimiter, dirname, join, resolve } = require('node:path');
 const { createInterface } = require('node:readline');
-const { bindHost, copyBackend, hostname, timeout, tlsFixture, writeTlsConfig } = require('./tls_fixture.cjs');
+const { bindHost, copyBackend, coreReleaseDir, hostname, timeout, tlsFixture, writeTlsConfig } =
+    require('./tls_fixture.cjs');
 
 const panelBasePath = '/panel';
+const catalogTools = 'catalog tools';
+
+async function emptyCatalogPath(cwd) {
+    const bin = join(cwd, catalogTools);
+    await mkdir(bin);
+    await writeFile(join(bin, 'curl'), [
+        '#!/bin/sh',
+        'for url do :; done',
+        'case "$url" in',
+        '  "https://api.github.com/repos/radkesvat/wave/contents/backend/schematics?ref=main") printf "[]" ;;',
+        '  *) exit 22 ;;',
+        'esac',
+        '',
+    ].join('\n'), { mode: 0o700 });
+    return bin + delimiter + process.env.PATH;
+}
 
 async function loopbackPort() {
     const listener = createServer();
@@ -66,25 +83,28 @@ function fixtureWaterWall(logs, observeShutdown) {
 
 async function seedCore(backend, { executable = false, logs = [], observeShutdown = false } = {}) {
     const directory = dirname(backend);
-    const bin = join(directory, 'waterwall_bin');
+    const releaseDir = coreReleaseDir(backend);
     const configDir = join(directory, 'configs');
-    await mkdir(bin, { recursive: true });
-    await mkdir(configDir, { recursive: true });
-    const program = join(bin, 'Waterwall');
+    await mkdir(releaseDir, { recursive: true, mode: 0o755 });
+    await mkdir(configDir, { recursive: true, mode: 0o755 });
+    const program = join(releaseDir, 'Waterwall');
     if (executable) {
         const args = `${JSON.stringify(logs)}, ${observeShutdown}`;
         await writeFile(program, `#!/usr/bin/env node\n${rotatingLogPath}\n(${fixtureWaterWall})(${args});\n`,
             { mode: 0o700 });
     }
-    return { bin, configDir, program, processFile: join(directory, 'fixture-process.json'),
+    return { configDir, program, processFile: join(directory, 'fixture-process.json'),
         terminatedFile: join(directory, 'fixture-terminated') };
 }
 
-async function authFixture(t, webSite, { encrypted = true, prepareCore = true, basePath = panelBasePath } = {}) {
+async function authFixture(t, webSite, {
+    encrypted = true, prepareCore = true, basePath = panelBasePath, runAs,
+} = {}) {
     assert.ok(process.env.WAVE_BACKEND, 'Set WAVE_BACKEND to a native Wave build.');
     const cwd = await mkdtemp(join(tmpdir(), 'wave-auth-test-'));
     let server;
     let closed;
+    let stderr = '';
 
     async function stop() {
         if (server) {
@@ -104,15 +124,17 @@ async function authFixture(t, webSite, { encrypted = true, prepareCore = true, b
 
     const home = join(cwd, 'home');
     await mkdir(home);
+    const fixturePath = await emptyCatalogPath(cwd);
     const backend = await copyBackend(resolve(process.env.WAVE_BACKEND), cwd);
-    if (prepareCore) await seedCore(backend);
+    const core = prepareCore ? await seedCore(backend) : undefined;
     const siteDir = webSite ? resolve(webSite) : join(cwd, 'site');
     const index = '<!doctype html><title>Wave auth fixture</title>';
+    const siteAssets = { 'index.html': index, 'index.js': '', 'index.wasm': '' };
     if (!webSite) {
         await mkdir(siteDir);
-        await writeFile(join(siteDir, 'index.html'), index);
-        await writeFile(join(siteDir, 'index.js'), '');
-        await writeFile(join(siteDir, 'index.wasm'), '');
+        for (const [file, contents] of Object.entries(siteAssets)) {
+            await writeFile(join(siteDir, file), contents);
+        }
     }
     const port = await loopbackPort();
     const database = join(dirname(backend), 'wave-db.json');
@@ -125,6 +147,26 @@ async function authFixture(t, webSite, { encrypted = true, prepareCore = true, b
         await writeFile(database, JSON.stringify({
             listen, 'panel-base-path': basePath ?? undefined, waterwall_install_attempted: installAttempted,
         }), { mode: 0o600 });
+    }
+    if (runAs) {
+        const tools = join(cwd, catalogTools);
+        const permissions = [
+            [cwd, 0o700], [home, 0o700], [dirname(backend), 0o700], [backend, 0o700],
+            [database, 0o600], [tools, 0o700], [join(tools, 'curl'), 0o700],
+        ];
+        if (core) {
+            const release = dirname(core.program);
+            permissions.push([dirname(release), 0o700], [release, 0o700], [core.configDir, 0o700]);
+        }
+        if (!webSite) {
+            permissions.push([siteDir, 0o700]);
+            for (const file of Object.keys(siteAssets)) permissions.push([join(siteDir, file), 0o600]);
+        }
+        if (tls) permissions.push([tls.chainPath, 0o600], [tls.keyPath, 0o600]);
+        for (const [path, mode] of permissions) {
+            await chown(path, runAs.uid, runAs.gid);
+            await chmod(path, mode);
+        }
     }
     const origin = encrypted ? `https://${hostname}:${port}` : `http://${bindHost}:${port}`;
     const args = ['--site-dir', siteDir];
@@ -140,20 +182,20 @@ async function authFixture(t, webSite, { encrypted = true, prepareCore = true, b
     async function start(overrides = {}, { encrypted: useTls = encrypted } = {}) {
         // Give interactive shells a clean startup environment and private history.
         const env = {
-            PATH: process.env.PATH,
+            PATH: fixturePath,
             ...overrides,
             HOME: home,
             HISTFILE: join(home, '.bash_history'),
         };
-        server = spawn(backend, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+        stderr = '';
+        server = spawn(backend, args, { cwd, env, ...runAs, stdio: ['ignore', 'pipe', 'pipe'] });
         closed = once(server, 'close');
-        let errors = '';
-        server.stderr.setEncoding('utf8').on('data', data => { errors += data; });
+        server.stderr.setEncoding('utf8').on('data', data => { stderr += data; });
         const lines = createInterface({ input: server.stdout });
         try {
             const [line] = await Promise.race([
                 once(lines, 'line', { signal: AbortSignal.timeout(timeout) }),
-                closed.then(([code, signal]) => { throw new Error(`Fixture stopped (${signal ?? code}). ${errors}`); }),
+                closed.then(([code, signal]) => { throw new Error(`Fixture stopped (${signal ?? code}). ${stderr}`); }),
             ]);
             assert.equal(line, useTls ? `Authenticated HTTPS listening on port ${port}`
                 : `Listening on http://${bindHost}:${port}/`);
@@ -163,7 +205,7 @@ async function authFixture(t, webSite, { encrypted = true, prepareCore = true, b
     }
 
     return { cwd, backend, ca: tls?.ca, rootPath: tls?.rootPath, hostname, bindHost, lookup, origin, basePath,
-        index, database, start, stop };
+        index, database, start, stop, get stderr() { return stderr; } };
 }
 
-module.exports = { authFixture, panelBasePath, rotatingLogPath, seedCore, timeout };
+module.exports = { authFixture, emptyCatalogPath, panelBasePath, rotatingLogPath, seedCore, timeout };

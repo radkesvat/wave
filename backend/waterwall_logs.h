@@ -42,12 +42,13 @@ class WaterWallLogs {
     };
 
     struct Logger {
+        std::string_view source;
         std::filesystem::path base;
         std::array<File, 2> files;
     };
 
     std::filesystem::path directory_;
-    std::array<Logger, 4> loggers_;
+    std::vector<Logger> loggers_;
     std::array<std::string, 2> dates_;
     bool active_ = false;
 

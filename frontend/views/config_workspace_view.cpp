@@ -2,6 +2,7 @@
 
 #include "panel_controls_view.h"
 #include "view_helpers.h"
+#include "waterwall_schematic.h"
 
 #include <imgui_internal.h>
 
@@ -33,12 +34,14 @@ void sync_node_tabs(ConfigWorkspaceState& state, PreviewSession& session, const 
     state.tabs.clear();
     state.tabs.emplace_back();
     const bool has_live_users = view::bool_field(config, "live_users");
-    for (const auto& item : view::array_field(config, "auth_nodes")) {
-        const auto node = view::string_value(item);
-        if (!node.empty()) {
-            state.tabs.push_back({std::string(node), TabKind::offline_users});
-            if (has_live_users) {
-                state.tabs.push_back({std::string(node), TabKind::live_users});
+    if (!waterwall_version().empty()) {
+        for (const auto& item : view::array_field(config, "auth_nodes")) {
+            const auto node = view::string_value(item);
+            if (!node.empty()) {
+                state.tabs.push_back({std::string(node), TabKind::offline_users});
+                if (has_live_users) {
+                    state.tabs.push_back({std::string(node), TabKind::live_users});
+                }
             }
         }
     }
@@ -61,7 +64,7 @@ bool begin_tab(const ConfigWorkspaceState& state, const Tab& tab)
     }
 
     // Keep the tab ID independent from a name that may contain ImGui's ## delimiters.
-    std::string id = tab.kind == TabKind::live_users ? "###Live authentication/" : "###AuthenticationServer/";
+    std::string id = tab.kind == TabKind::live_users ? "###Live users/" : "###Offline users/";
     constexpr char hex[] = "0123456789abcdef";
     for (unsigned char byte : tab.node) {
         id += hex[byte >> 4];
@@ -154,13 +157,13 @@ std::string describe_config_workspace(const ConfigWorkspaceState& state)
         return description + describe_config_nodes(state.nodes);
     case TabKind::offline_users: {
         const auto users = state.users.find(state.selected.node);
-        return description + (users == state.users.end() ? "AuthenticationServer users."
-                                                         : describe_config_users(users->second));
+        return description +
+               (users == state.users.end() ? "Offline users." : describe_config_users(users->second));
     }
     case TabKind::live_users: {
         const auto users = state.live_users.find(state.selected.node);
-        return description + (users == state.live_users.end() ? "AuthenticationServer live users."
-                                                              : describe_config_live_users(users->second));
+        return description +
+               (users == state.live_users.end() ? "Live users." : describe_config_live_users(users->second));
     }
     }
     return description;

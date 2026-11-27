@@ -7,12 +7,11 @@
 #include "view_helpers.h"
 #include "waterwall_node_links.h"
 #include "waterwall_node_settings.h"
-#include "waterwall_nodes.h"
+#include "waterwall_schematic.h"
 
 #include <misc/cpp/imgui_stdlib.h>
 
 #include <algorithm>
-#include <array>
 #include <cfloat>
 #include <cmath>
 #include <format>
@@ -42,6 +41,7 @@ constexpr float zoom_max = 2.f;
 constexpr float zoom_step = 1.25f;
 constexpr float world_limit = 100000.f;
 constexpr double request_timeout = 5000;
+constexpr char schematic_unavailable[] = "The WaterWall schematic is unavailable.";
 
 const Json& nodes(const State& state)
 {
@@ -53,28 +53,15 @@ std::string_view name_of(const Json& node)
     return string_field(node, "name");
 }
 
-bool can_send(std::string_view type, const Json& settings)
-{
-    // WaterWall v1.6.0, tunnels/*/instance/node.c can_have_next.
-    constexpr std::array terminal_types{"APIServer",       "AuthenticationServer", "BlackHole",
-                                        "SpeedTestServer", "TcpConnector",         "TcpUdpConnector",
-                                        "UdpConnector"};
-    return std::ranges::find(terminal_types, type) == terminal_types.end() &&
-           allows_node_next(type, settings);
-}
-
 bool can_send(const Json& node)
 {
-    return can_send(string_field(node, "type"), field(node, "settings"));
+    return allows_node_next(string_field(node, "type"), field(node, "settings"));
 }
 
-bool can_receive(std::string_view type)
+std::string_view database_key(std::string_view type)
 {
-    // The can_have_prev flag is disabled on these chain heads.
-    constexpr std::array head_types{"AuthenticationClient", "PacketGenerator",   "SpeedTestClient",
-                                    "TcpListener",          "TcpUdpListener",    "TesterClient",
-                                    "UdpListener",          "UdpStatelessSocket"};
-    return std::ranges::find(head_types, type) == head_types.end();
+    const auto& node = waterwall_node(type);
+    return bool_field(node, "user_database") ? string_field(node, "database_key") : std::string_view{};
 }
 
 std::optional<std::size_t> find_node(const Json& list, std::string_view name)
@@ -172,10 +159,10 @@ std::vector<NodePorts> visible_ports(const Json& list, const std::vector<Link>& 
     for (std::size_t i = 0; i < list.size(); ++i) {
         const auto& node = list[i];
         const auto type = string_field(node, "type");
-        const bool adapter = type == "TunDevice" || type == "RawSocket";
+        const bool adapter = bool_field(field(waterwall_node(type), "ports"), "dual_ended");
         const auto connected = ports[i];
         // A device can be placed at either end. Show both choices until it is connected.
-        ports[i] = {can_receive(type) && (!adapter || connected.input || !connected.output),
+        ports[i] = {allows_node_previous(type) && (!adapter || connected.input || !connected.output),
                     can_send(node) && (!adapter || connected.output || !connected.input)};
     }
     return ports;
@@ -278,7 +265,7 @@ void connect(State& state, std::size_t source, std::size_t target)
 {
     state.link_from.reset();
     const auto& list = nodes(state);
-    if (name_of(list[target]).empty() || !can_receive(string_field(list[target], "type"))) {
+    if (name_of(list[target]).empty() || !allows_node_previous(string_field(list[target], "type"))) {
         state.error = "This node cannot receive a next connection.";
         return;
     }
@@ -602,10 +589,17 @@ constexpr char remove_title[] = "Delete node";
 constexpr char json_title[] = "Saved configuration JSON";
 constexpr char edit_json_title[] = "Edit configuration JSON";
 constexpr char import_title[] = "Resolve and save configuration";
-constexpr char import_notice[] =
-    "Wave replaces variables with their values and discards variable definitions, "
-    "comments, and commits metadata. Saving replaces this config’s nodes.";
 constexpr char reload_title[] = "Reload configuration";
+
+const Json& import_schematic()
+{
+    return field(field(waterwall_schematic(), "config"), "import");
+}
+
+std::string_view import_notice()
+{
+    return string_field(import_schematic(), "confirm_notice", "Saving replaces this config’s nodes.");
+}
 
 const char* title(State::Dialog dialog)
 {
@@ -745,7 +739,7 @@ bool apply_node(State& state, bool adding)
             return false;
         }
     }
-    const bool allow_next = can_send(state.node_type, settings);
+    const bool allow_next = allows_node_next(state.node_type, settings);
     const auto next = allow_next ? find_node(list, state.node_next) : std::nullopt;
     if (current && next && makes_cycle(list, *current, *next)) {
         state.error = "This connection would make a circular chain.";
@@ -822,9 +816,12 @@ bool apply_config_json(State& state)
     std::set<std::string_view> names;
     std::set<std::string_view> local_database_paths;
     for (const auto& node : array_field(state.saved, "nodes")) {
-        const auto path = string_field(field(node, "settings"), "db-path");
-        if (string_field(node, "type") == "AuthenticationServer" && !path.empty()) {
-            local_database_paths.insert(path);
+        const auto key = database_key(string_field(node, "type"));
+        if (!key.empty()) {
+            const auto path = string_field(field(node, "settings"), key);
+            if (!path.empty()) {
+                local_database_paths.insert(path);
+            }
         }
     }
     for (auto& node : imported) {
@@ -840,9 +837,10 @@ bool apply_config_json(State& state)
         }
         // Wave assigns local database paths on save. Keep paths already used by this config.
         auto settings = node.find("settings");
-        if (type == "AuthenticationServer" && settings != node.end() && settings->is_object() &&
-            !local_database_paths.contains(string_field(*settings, "db-path"))) {
-            settings->erase("db-path");
+        const auto key = database_key(type);
+        if (!key.empty() && settings != node.end() && settings->is_object() &&
+            !local_database_paths.contains(string_field(*settings, key))) {
+            settings->erase(std::string(key));
         }
     }
 
@@ -852,8 +850,12 @@ bool apply_config_json(State& state)
     auto draft = state.draft;
     draft["nodes"] = std::move(imported);
     if (needs_confirmation) {
-        draft.erase("variables");
-        draft.erase("commits");
+        const auto& import = import_schematic();
+        for (auto key : {string_field(import, "variables_key"), string_field(import, "commit_key")}) {
+            if (!key.empty()) {
+                draft.erase(std::string(key));
+            }
+        }
     }
     if (draft.dump(2).size() + 1 > max_core_config_bytes) {
         state.error = "Wave can save configs up to 256 KiB.";
@@ -894,7 +896,7 @@ bool select_target(const State& state, const char* label, std::string& target, b
             const auto type = string_field(node, "type");
             const bool compatible =
                 setting ? node_link_target_type_matches(*setting, type, field(node, "settings"))
-                        : can_receive(type);
+                        : allows_node_previous(type);
             if (name.empty() || (!adding && state.selected == i) || !compatible) {
                 continue;
             }
@@ -935,47 +937,14 @@ bool is_link_container(std::string_view path, const NodeLinkField& link)
                            : path.empty();
 }
 
-std::string_view link_help(const NodeLinkField& link, std::string_view hint)
-{
-    if (link.target_requires_unpaired) {
-        return "Choose a primary HalfDuplexServer in this configuration. Choosing a pair replaces Next for "
-               "this node.";
-    }
-    const std::string_view key = link.key;
-    struct LinkHelp {
-        std::string_view key;
-        std::string_view message;
-    };
-    constexpr LinkHelp messages[] = {
-        {"auth-client-node-name",
-         "Uses this AuthenticationClient's account service. Traffic follows the regular Next link."},
-        {"pair",
-         "Choose the other Bridge in this configuration. Paired sides need compatible traffic layers."},
-        {"dns-next", "DNS queries enter the selected node when DNS mode is chain."},
-        {"fallback-node-name", "Receives the fallback traffic. Next is the main route."},
-        {"destination", "Receives ordinary visitor traffic. Authenticated traffic follows Next."},
-        {"target", "Receives traffic when this routing rule matches."},
-        {"next", "Receives connections when this sniffing route matches."},
-        {"up", "Entry node for sent packets. Choose a different node for received packets."},
-        {"down", "Entry node for received packets. Choose a different node for sent packets."},
-        {"upload",
-         "Entry node for the upload transport. Set Download as well or leave both unset to use Next."},
-        {"download",
-         "Entry node for the download transport. Set Upload as well or leave both unset to use Next."},
-    };
-    const auto found = std::ranges::find(messages, key, &LinkHelp::key);
-    if (found != std::end(messages)) {
-        return found->message;
-    }
-    return hint.empty() ? "Choose another node from this configuration." : hint;
-}
-
 bool edit_setting_link(const State& state, Json& settings, bool adding, const NodeLinkField& setting,
                        std::string_view hint = {})
 {
     const auto* key = node_link_key(settings, setting);
     auto target = std::string(string_field(settings, key));
-    auto help = std::format("{}\n{}", key, link_help(setting, hint));
+    const std::string_view link_hint = setting.hint && *setting.hint ? setting.hint : hint;
+    auto help = std::format("{}\n{}", key,
+                            link_hint.empty() ? "Choose another node from this configuration." : link_hint);
     if (setting.activation_setting) {
         help += std::format("\nApplies when {} is {}.", setting.activation_setting,
                             setting.activation_is_boolean ? "enabled" : "set");
@@ -1001,16 +970,6 @@ std::string setting_help(const spec::Field& setting, std::string_view key)
         }
         help += description;
     };
-    const std::string_view field_name = setting.key;
-    if (field_name == "source-port" || field_name == "source-port-range") {
-        append("Matches the local port the peer connected to.");
-    } else if (setting.kind == object_list && field_name == "rules") {
-        append("Each rule needs a condition. All conditions in a rule must match.");
-    } else if (setting.kind == object_list && field_name == "routes") {
-        append("Routes are checked in order. The first match wins.");
-    } else if (setting.kind == object && field_name == "dns-behaviour" && help.empty()) {
-        append("Controls hostname resolution and which IP addresses WaterWall selects.");
-    }
     if (setting.kind == text_or_list) {
         append("Enter one quoted JSON string or an array of quoted strings.");
     } else if (setting.kind == port_range) {
@@ -1306,8 +1265,7 @@ bool edit_setting_fields(State& state, Json& settings, bool adding, std::span<co
         }
         ImGui::PushID(setting.key);
         const auto* key = spec::field_key(settings, setting);
-        if (state.node_type == "AuthenticationServer" && path.empty() &&
-            std::string_view(setting.key) == "db-path") {
+        if (path.empty() && database_key(state.node_type) == setting.key) {
             wrapped("Wave assigns the user database path when you save.", Color::secondary_text);
         } else if ((setting.kind == object && !setting.children.empty()) || setting.kind == object_list ||
                    setting.kind == string_list) {
@@ -1353,7 +1311,7 @@ void edit_node(State& state, bool adding)
     ImGui::SetNextItemWidth(-1);
     if (ImGui::BeginCombo("##node-type", state.node_type.empty() ? "Choose a WaterWall node type"
                                                                  : state.node_type.c_str())) {
-        for (const auto type : waterwall_node_types) {
+        for (const auto& type : waterwall_node_types()) {
             if (ImGui::Selectable(type.data(), state.node_type == type) && state.node_type != type) {
                 state.node_type = type;
                 state.invalid_setting_inputs.clear();
@@ -1387,20 +1345,24 @@ void edit_node(State& state, bool adding)
         settings = Json::object();
     }
     if (!state.node_type.empty()) {
-        const bool router = state.node_type == "Router" || state.node_type == "SniffRouter";
-        if (can_send(state.node_type, settings)) {
+        const auto& node = waterwall_node(state.node_type);
+        if (allows_node_next(state.node_type, settings)) {
+            const auto& next = field(node, "next_field");
+            const auto label = string_field(next, "label", "Next node");
             select_target(
-                state, router ? "Default next node" : "Next node", state.node_next, adding,
-                router ? "Receives traffic when no rule or route matches."
-                       : "Choose the next node in this chain. The graph shows this connection in blue.");
+                state, label.data(), state.node_next, adding,
+                string_field(next, "hint",
+                             "Choose the next node in this chain. The graph shows this connection in blue."));
         }
         ImGui::SeparatorText(std::format("{} settings", state.node_type).c_str());
         const auto fields = spec::fields(state.node_type);
         if (fields.empty() && node_link_fields(state.node_type).empty()) {
-            wrapped(std::ranges::binary_search(waterwall_node_types, state.node_type)
-                        ? "WaterWall 1.6.0 exposes no settings for this node."
-                        : "Use Custom JSON to edit this imported node’s settings.",
-                    Color::secondary_text);
+            if (node.is_object()) {
+                wrapped(std::format("WaterWall {} exposes no settings for this node.", waterwall_version()),
+                        Color::secondary_text);
+            } else {
+                wrapped("Use Custom JSON to edit this imported node’s settings.", Color::secondary_text);
+            }
         } else {
             ImGui::BeginDisabled(state.custom_json || !settings_error.empty());
             if (edit_setting_fields(state, settings, adding, fields) && !state.custom_json &&
@@ -1511,7 +1473,7 @@ void render_dialog(State& state, PreviewSession& session, bool reload_finished)
                 close_dialog(state);
                 return;
             }
-            wrapped(import_notice);
+            wrapped(import_notice());
             if (!state.error.empty()) {
                 wrapped(state.error, Color::error);
             }
@@ -1855,6 +1817,12 @@ void render_config_nodes(ConfigNodesState& state, PreviewSession& session, int c
         state.config_id = config_id;
     }
     state.viewport = {};
+    state.schematic_unavailable = session.ready() && waterwall_version().empty();
+    if (state.schematic_unavailable) {
+        state.graph_editable = false;
+        wrapped(schematic_unavailable, Color::warning);
+        return;
+    }
     if (!state.load_requested && session.ready()) {
         submit(state, session, State::Request::load);
     }
@@ -1896,6 +1864,9 @@ void render_config_nodes(ConfigNodesState& state, PreviewSession& session, int c
 
 std::string describe_config_nodes(const ConfigNodesState& state)
 {
+    if (state.schematic_unavailable) {
+        return std::string("Nodes. ") + schematic_unavailable;
+    }
     if (!state.saved.is_object()) {
         if (state.reply && !state.reply->message.empty()) {
             return "Nodes. " + state.reply->message;
@@ -1921,7 +1892,8 @@ std::string describe_config_nodes(const ConfigNodesState& state)
     if (state.dialog != State::Dialog::none) {
         description += std::format(" {}.", title(state.dialog));
         if (state.dialog == State::Dialog::confirm_import) {
-            description += std::string(" ") + import_notice;
+            description += ' ';
+            description += import_notice();
         }
         if ((state.dialog == State::Dialog::add || state.dialog == State::Dialog::edit) &&
             state.custom_json) {

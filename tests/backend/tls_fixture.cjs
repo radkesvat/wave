@@ -7,6 +7,8 @@ const run = promisify(execFile);
 const timeout = 10000;
 const hostname = 'panel.example.test';
 const bindHost = '127.0.0.1';
+const bundledCoreVersion = '1.6.0';
+const bundledSchematicFile = join(__dirname, '../../backend/schematics', `waterwall-${bundledCoreVersion}.json`);
 
 function openSSL(cwd, ...args) {
     return run('openssl', args, { cwd, timeout });
@@ -75,9 +77,17 @@ authorityKeyIdentifier = keyid
     return { ...await issue('valid'), rootPath, issuerPath, ca: await readFile(rootPath), issue };
 }
 
-async function copyBackend(source, cwd) {
-    const backend = join(cwd, 'bin', basename(source));
-    await mkdir(dirname(backend));
+function coreReleaseDir(backend, version = bundledCoreVersion) {
+    return join(dirname(backend), 'waterwall_bin', version);
+}
+
+function schematicFile(backend, version = bundledCoreVersion) {
+    return join(coreReleaseDir(backend, version), `waterwall-${version}.json`);
+}
+
+async function copyBackend(source, cwd, directory = 'bin') {
+    const backend = join(cwd, directory, basename(source));
+    await mkdir(dirname(backend), { recursive: true, mode: 0o755 });
     await copyFile(source, backend);
     return backend;
 }
@@ -91,4 +101,5 @@ function writeTlsConfig(config, { chainPath, keyPath }, { domain = hostname, lis
     }), { mode: 0o600 });
 }
 
-module.exports = { bindHost, copyBackend, hostname, openSSL, timeout, tlsFixture, writeTlsConfig };
+module.exports = { bindHost, bundledSchematicFile, copyBackend, coreReleaseDir, hostname, openSSL, schematicFile, timeout,
+    tlsFixture, writeTlsConfig };

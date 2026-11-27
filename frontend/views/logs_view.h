@@ -3,9 +3,9 @@
 #include <imgui.h>
 #include <nlohmann/json_fwd.hpp>
 
-#include <array>
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 
 namespace wave {
@@ -14,7 +14,7 @@ class PreviewSession;
 
 struct LogsViewState {
     ImGuiTextFilter search;
-    std::array<bool, 5> visible_sources{true, true, true, true, true};
+    std::set<std::string, std::less<>> hidden_sources;
     bool auto_scroll = true;
     std::optional<std::uint64_t> clear_request;
 };

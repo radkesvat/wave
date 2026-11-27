@@ -9,6 +9,8 @@
 
 namespace wave {
 
+bool uses_auth_database(const nlohmann::json& node);
+nlohmann::json make_empty_core_config(std::string_view name);
 nlohmann::json make_users_starter_config(std::string_view name, std::uint16_t port);
 nlohmann::json config_auth_nodes(const nlohmann::json& config);
 std::string auth_database_name(const nlohmann::json& node, std::string_view config_name,
