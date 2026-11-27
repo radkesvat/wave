@@ -1,4 +1,6 @@
 include(FetchContent)
+option(WAVE_ENABLE_UI_DEMOS "Include the Dear ImGui and ImPlot demos in the Tools menu" OFF)
+
 # Dear ImGui v1.93.0. Pin the archive to both its commit and content hash.
 FetchContent_Declare(imgui
     URL https://codeload.github.com/ocornut/imgui/tar.gz/c1aaac65e896a45f81f47a4d68f9959e0f86c859
@@ -52,6 +54,7 @@ add_executable(wave
     views/config_workspace_view.cpp
     views/console_view.cpp
     views/core_settings_view.cpp
+    views/donation_face.cpp
     views/panel_controls_view.cpp
     views/entry_view.cpp
     views/logs_view.cpp
@@ -59,7 +62,6 @@ add_executable(wave
     views/server_status_view.cpp
     views/settings_view.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
-    ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
@@ -68,8 +70,15 @@ add_executable(wave
     ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
     ${implot_SOURCE_DIR}/implot.cpp
     ${implot_SOURCE_DIR}/implot_items.cpp
-    ${implot_SOURCE_DIR}/implot_demo.cpp
 )
+if(WAVE_ENABLE_UI_DEMOS)
+    target_sources(wave PRIVATE
+        ${imgui_SOURCE_DIR}/imgui_demo.cpp
+        ${implot_SOURCE_DIR}/implot_demo.cpp
+    )
+    target_compile_definitions(wave PRIVATE WAVE_ENABLE_UI_DEMOS)
+endif()
+
 set_target_properties(wave PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
@@ -97,7 +106,10 @@ target_compile_options(wave PRIVATE
 
 # Poppins Medium 4.004 from google/fonts at 7dc16b7de42db624b902f2292b68ed9e489e5053.
 set(wave_font "${CMAKE_CURRENT_SOURCE_DIR}/fonts/Poppins-Medium.ttf")
-set_property(TARGET wave APPEND PROPERTY LINK_DEPENDS "${wave_shell}" "${wave_font}")
+set(wave_donation_face "${CMAKE_CURRENT_SOURCE_DIR}/assets/gc1.bmp")
+set(wave_donation_portrait "${CMAKE_CURRENT_SOURCE_DIR}/assets/gc2.bmp")
+set_property(TARGET wave APPEND PROPERTY LINK_DEPENDS
+    "${wave_shell}" "${wave_font}" "${wave_donation_face}" "${wave_donation_portrait}")
 target_link_options(wave PRIVATE
     -sUSE_SDL=2
     -sMIN_WEBGL_VERSION=2
@@ -107,6 +119,8 @@ target_link_options(wave PRIVATE
     "$<$<CONFIG:Release>:-sENVIRONMENT=web>"
     "SHELL:--shell-file \"${wave_shell}\""
     "SHELL:--embed-file \"${wave_font}@/poppins-medium.ttf\""
+    "SHELL:--embed-file \"${wave_donation_face}@/gc1.bmp\""
+    "SHELL:--embed-file \"${wave_donation_portrait}@/gc2.bmp\""
 )
 # Emscripten writes these assets when linking index.html.
 add_custom_command(TARGET wave POST_BUILD

@@ -2,6 +2,7 @@
 #include "panel.h"
 #include "preview_session.h"
 #include "theme.h"
+#include "views/donation_face.h"
 #include "views/view_helpers.h"
 
 #include <GLES3/gl3.h>
@@ -17,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <optional>
 #include <string>
 
 namespace {
@@ -63,6 +65,20 @@ EM_JS(void, set_scrollbar_colors, (ImU32 track, ImU32 thumb, ImU32 hover, ImU32 
     }
 });
 
+EM_JS(void, apply_browser_appearance,
+      (bool light, bool high_contrast, ImU32 canvas, ImU32 primary_text, ImU32 secondary_text, ImU32 terminal,
+       ImU32 toolbar, ImU32 divider, ImU32 control_border, ImU32 focus, ImU32 accent, ImU32 button_face,
+       ImU32 button_hover, ImU32 text_selection), {
+    const hex = color => "#" + [color & 255, (color >> 8) & 255, (color >> 16) & 255]
+        .map(byte => byte.toString(16).padStart(2, "0")).join("");
+    Module['applyAppearance']({
+        light: !!light, highContrast: !!high_contrast, canvas: hex(canvas), primaryText: hex(primary_text),
+        secondaryText: hex(secondary_text), terminal: hex(terminal), toolbar: hex(toolbar), divider: hex(divider),
+        controlBorder: hex(control_border), focus: hex(focus), accent: hex(accent), buttonFace: hex(button_face),
+        buttonHover: hex(button_hover), textSelection: hex(text_selection)
+    });
+});
+
 EM_JS(void, register_header_controls, (int menu, int tools), {
     Module['registerHeaderControls'](menu, tools);
 });
@@ -79,12 +95,12 @@ EM_JS(void, update_config_tabs, (const char* encoded, int tab), {
     Module['updateConfigTabs'](UTF8ToString(encoded), tab);
 });
 
-EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools, bool modal), {
-    Module['updateNavigation'](page, open, menu, tools, modal);
+EM_JS(void, update_navigation, (int page, bool open, bool menu, bool tools, bool modal, const char* donation), {
+    Module['updateNavigation'](page, open, menu, tools, modal, UTF8ToString(donation));
 });
 
-EM_JS(void, update_console, (bool active, float x, float y, float width, float height, bool high_contrast), {
-    Module['updateConsole'](active, x, y, width, height, high_contrast);
+EM_JS(void, update_console, (bool active, float x, float y, float width, float height), {
+    Module['updateConsole'](active, x, y, width, height);
 });
 
 EM_JS(int, browser_panel_focus, (), { return Module['panelFocus'](); });
@@ -119,9 +135,17 @@ EM_JS(void, show_startup_error, (), {
 });
 // clang-format on
 
-void apply_theme(bool high_contrast)
+void apply_theme(wave::theme::Appearance appearance)
 {
-    wave::theme::apply(high_contrast);
+    using wave::theme::Color;
+    using wave::theme::packed;
+    wave::theme::apply(appearance);
+    apply_browser_appearance(appearance.preset == wave::theme::Preset::light, appearance.high_contrast,
+                             packed(Color::canvas), packed(Color::primary_text),
+                             packed(Color::secondary_text), packed(Color::terminal), packed(Color::toolbar),
+                             packed(Color::divider), packed(Color::control_border), packed(Color::focus),
+                             packed(Color::accent), packed(Color::button_face), packed(Color::button_hover),
+                             packed(Color::text_selection));
     set_scrollbar_colors(ImGui::GetColorU32(ImGuiCol_ScrollbarBg), ImGui::GetColorU32(ImGuiCol_ScrollbarGrab),
                          ImGui::GetColorU32(ImGuiCol_ScrollbarGrabHovered),
                          ImGui::GetColorU32(ImGuiCol_ScrollbarGrabActive));
@@ -134,7 +158,10 @@ struct Application {
     bool imgui_sdl = false;
     bool imgui_gl = false;
     bool visible = false;
-    bool high_contrast = false;
+    wave::theme::Appearance appearance;
+    std::optional<wave::theme::Preset> theme_choice;
+    std::optional<std::uint64_t> theme_request;
+    wave::theme::Preset submitted_theme = wave::theme::Preset::standard;
     int minimum_height = 0;
     wave::PreviewSession session;
     wave::PanelState panel;
@@ -193,6 +220,7 @@ struct Application {
             SDL_SetError("Could not initialize the Dear ImGui backends");
             return false;
         }
+        wave::initialize_donation_faces();
         SDL_StartTextInput();
         auto& platform = ImGui::GetPlatformIO();
         platform.Platform_SetImeDataFn = [](ImGuiContext*, ImGuiViewport*, ImGuiPlatformImeData* data) {
@@ -209,7 +237,7 @@ struct Application {
         platform.Platform_OpenInShellFn = [](ImGuiContext*, const char* path) {
             return open_browser_link(path);
         };
-        apply_theme(high_contrast);
+        apply_theme(appearance);
         install_text_input();
         register_header_controls(wave::panel_menu_control, wave::panel_tools_control);
         for (const auto& item : wave::panel_navigation()) {
@@ -228,6 +256,7 @@ struct Application {
     {
         session.stop();
         if (imgui_gl) {
+            wave::shutdown_donation_faces();
             ImGui_ImplOpenGL3_Shutdown();
         }
         if (imgui_sdl) {
@@ -292,11 +321,43 @@ struct Application {
                     wave::abandon_config_workspace(workspace, session);
                 }
                 panel.workspaces.clear();
+                session.abandon(panel.about.donation_request);
+                panel.about = {};
                 panel.settings = {};
+                theme_choice.reset();
+                session.abandon(theme_request);
                 session.stop();
             }
         }
         session.update();
+    }
+
+    void update_theme_preference()
+    {
+        if (panel.entry.page != wave::EntryPage::workspace) {
+            return;
+        }
+        // A reply settles the submitted choice. A newer selection must survive its snapshot.
+        if (session.take_reply(theme_request) && theme_choice == submitted_theme) {
+            theme_choice.reset();
+        }
+        if (!session.ready() || theme_request) {
+            return;
+        }
+
+        if (!theme_choice) {
+            const auto& settings = wave::view::field(session.data(), "settings");
+            panel.appearance.preset = wave::theme::parse_preset(wave::view::string_field(settings, "theme"))
+                                          .value_or(wave::theme::Preset::standard);
+            return;
+        }
+
+        submitted_theme = *theme_choice;
+        theme_request = session.submit(
+            {{"action", "apply_theme"}, {"theme", wave::theme::preset_key(submitted_theme)}}, 5000);
+        if (!theme_request) {
+            theme_choice.reset();
+        }
     }
 
     void update_config_controls()
@@ -334,6 +395,7 @@ struct Application {
         const auto previous_entry = panel.entry.page;
         const auto previous_page = panel.page_control();
         update_session();
+        update_theme_preference();
         // Use the browser viewport even when the canvas extends beyond it.
         ImVec2 browser_viewport;
         read_browser_viewport(&browser_viewport.x, &browser_viewport.y);
@@ -347,15 +409,19 @@ struct Application {
             ImGui_ImplSDL2_ProcessEvent(&event);
         }
 
-        if (panel.high_contrast != high_contrast) {
-            high_contrast = panel.high_contrast;
-            apply_theme(high_contrast);
+        if (panel.appearance != appearance) {
+            appearance = panel.appearance;
+            apply_theme(appearance);
         }
         wave::theme::apply_text_scale(viewport_width);
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
+        const auto previous_preset = panel.appearance.preset;
         wave::render_panel(panel, session, browser_viewport, browser_panel_focus());
+        if (panel.appearance.preset != previous_preset) {
+            theme_choice = panel.appearance.preset;
+        }
         // ImGui may spread the paste shortcut across frames to preserve input order.
         if (paste_target &&
             (paste_target != ImGui::GetActiveID() || ImGui::GetCurrentContext()->InputEventsQueue.empty())) {
@@ -389,10 +455,10 @@ struct Application {
         update_config_controls();
         update_navigation(in_workspace ? panel.page_control() : 0, panel.navigation_open && in_workspace,
                           in_workspace && panel.menu_open, in_workspace && panel.tools_open,
-                          !in_workspace || wave::dialog_open());
+                          !in_workspace || wave::dialog_open(), wave::panel_donation_label(session));
         const auto& console = panel.console;
         update_console(in_workspace && panel.page == wave::PanelPage::console, console.left, console.top,
-                       console.width, console.height, panel.high_contrast);
+                       console.width, console.height);
         if (!visible) {
             show_panel();
             visible = true;
@@ -457,6 +523,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE bool wave_scroll_window_at(float x, float y)
                y < bounds.top + bounds.height;
     };
     if (wave::dialog_at(x, y) || wave::panel_tool_window_at(application.panel, x, y) ||
+        within(application.panel.settings.scroll_bounds) ||
         within(application.panel.settings.core.scroll_bounds) ||
         within(application.panel.config_nav_scroll_bounds)) {
         return true;

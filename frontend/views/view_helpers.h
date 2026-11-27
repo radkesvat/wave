@@ -3,6 +3,7 @@
 #include "theme.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -117,6 +118,10 @@ inline void help_marker(std::string_view description, bool same_line = true)
     const auto right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
     if (same_line && ImGui::GetItemRectMax().x + style.ItemInnerSpacing.x + size.x <= right) {
         ImGui::SameLine(0, style.ItemInnerSpacing.x);
+        // InvisibleButton uses the raw cursor position. Match ImGui's text baseline on this line.
+        const auto position = ImGui::GetCursorScreenPos();
+        const float baseline = ImGui::GetCurrentWindowRead()->DC.CurrLineTextBaseOffset;
+        ImGui::SetCursorScreenPos({position.x, position.y + baseline});
     }
     ImGui::PushID(description.data(), description.data() + description.size());
     const bool pressed = ImGui::InvisibleButton("##help", size, ImGuiButtonFlags_EnableNav);

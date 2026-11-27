@@ -25,8 +25,15 @@ struct ConfigUsersState {
         activity
     };
 
+    enum class Operation {
+        list,
+        password,
+        mutation
+    };
+
     Editor editor = Editor::none;
     Section section = Section::account;
+    Operation operation = Operation::list;
     nlohmann::json users;
     nlohmann::json selected_user;
     std::optional<std::uint64_t> request;
@@ -35,6 +42,7 @@ struct ConfigUsersState {
     std::string notes;
     std::string wireguard_ips;
     std::string password;
+    std::string saved_password;
     std::map<std::string_view, std::string> numbers;
     std::string validation;
     std::string read_error;
@@ -42,7 +50,8 @@ struct ConfigUsersState {
     bool open_account = false;
     bool enabled = true;
     bool editable = false;
-    bool mutation = false;
+    bool password_unavailable = false;
+    bool passive_read = false;
     bool blocked = false;
     bool refresh_needed = true;
     std::size_t page = 0;

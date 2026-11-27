@@ -528,20 +528,19 @@ void update_core_settings(CoreSettingsDraft& draft, PreviewSession& session)
 
 void render_core_settings(CoreSettingsDraft& draft, PreviewSession& session)
 {
+    if (!draft.source.is_object() && session.status() == PreviewStatus::loading) {
+        return;
+    }
     ImGui::Text("WaterWall %s", wave::version);
     view::wrapped(help, Color::secondary_text);
     if (!draft.notice.empty()) {
         view::wrapped(draft.notice, Color::warning);
     }
     const auto& snapshot = view::field(session.data(), "core_settings");
-    if (!session.ready()) {
-        if (session.status() == PreviewStatus::loading) {
-            draw_busy_spinner(ImGui::GetFrameHeight());
-        } else {
-            view::wrapped("Settings connection unavailable.", Color::warning);
-            if (theme::button("Reconnect")) {
-                session.start(true);
-            }
+    if (session.status() == PreviewStatus::unavailable) {
+        view::wrapped("Settings connection unavailable.", Color::warning);
+        if (theme::button("Reconnect")) {
+            session.start(true);
         }
     }
     if (!draft.source.is_object()) {

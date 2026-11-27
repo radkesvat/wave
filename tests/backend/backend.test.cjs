@@ -632,6 +632,106 @@ test('attempts first-run installation once and lets an authenticated administrat
         assert.equal((await invoked()).length, 2, 'Deleting the executable leaves installation up to the administrator.');
     });
 
+test('persists the panel theme and leaves saved settings intact on invalid choices', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8')).theme, undefined);
+    await fixture.start();
+    const session = await fixtureSession(fixture);
+    const { socket, initial } = await connectPreview(t, fixture.origin, session);
+    assert.equal(initial.settings.theme, 'default');
+    const original = JSON.parse(await readFile(fixture.database, 'utf8'));
+
+    for (const theme of ['light', 'classic', 'dark', 'default', 'darker']) {
+        const applied = await requestPreview(socket, 'apply_theme', { theme });
+        assert.equal(applied.ok, true, applied.feedback);
+        assert.equal(applied.data.settings.theme, theme);
+        assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')), { ...original, theme });
+    }
+
+    const saved = await readFile(fixture.database, 'utf8');
+    const savedFile = await stat(fixture.database, { bigint: true });
+    for (const input of [{}, { theme: null }, { theme: true }, { theme: 'Light' }, { theme: 'unknown' }]) {
+        const rejected = await requestPreview(socket, 'apply_theme', input);
+        assert.equal(rejected.ok, false);
+        assert.equal(rejected.data.settings.theme, 'darker');
+        assert.equal(await readFile(fixture.database, 'utf8'), saved);
+        const current = await stat(fixture.database, { bigint: true });
+        assert.equal(current.ino, savedFile.ino);
+        assert.equal(current.mtimeNs, savedFile.mtimeNs);
+    }
+
+    const reopened = await connectPreview(t, fixture.origin, session);
+    assert.equal(reopened.initial.settings.theme, 'darker');
+    await fixture.stop();
+    await fixture.start();
+    const restarted = await connectPreview(t, fixture.origin, session);
+    assert.equal(restarted.initial.settings.theme, 'darker');
+});
+
+test('persists donation responses and prompts again in the next UTC calendar month', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    const start = () => fixture.start({ TZ: 'UTC+12' });
+    await start();
+    const session = await fixtureSession(fixture);
+    const { socket, initial } = await connectPreview(t, fixture.origin, session);
+    assert.deepEqual(initial.settings.donation, { reminder_due: true });
+    const original = JSON.parse(await readFile(fixture.database, 'utf8'));
+    assert.equal(original.donation, undefined);
+
+    let response;
+    for (const answer of ['no', 'below_5', 'more_than_5']) {
+        const before = new Date();
+        const saved = await requestPreview(socket, 'apply_donation', { answer });
+        const after = new Date();
+        assert.equal(saved.ok, true, saved.feedback);
+        const { reminder_due: due, ...record } = saved.data.settings.donation;
+        assert.equal(record.answer, answer);
+        assert.match(record.answered_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+        const recorded = Date.parse(record.answered_at);
+        assert.ok(recorded >= Math.floor(before.getTime() / 1000) * 1000 && recorded <= after.getTime(),
+            'The timestamp uses the current UTC time even when the server is in another time zone.');
+        if (before.toISOString().slice(0, 7) === after.toISOString().slice(0, 7)) {
+            assert.equal(due, false);
+        }
+        assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')), { ...original, donation: record });
+        response = record;
+    }
+
+    const contents = await readFile(fixture.database, 'utf8');
+    for (const input of [{}, { answer: true }, { answer: 'yes' }, { answer: 'NO' }]) {
+        const rejected = await requestPreview(socket, 'apply_donation', input);
+        assert.equal(rejected.ok, false);
+        assert.equal(rejected.data.settings.donation.answer, response.answer);
+        assert.equal(rejected.data.settings.donation.answered_at, response.answered_at);
+        assert.equal(await readFile(fixture.database, 'utf8'), contents);
+    }
+
+    await fixture.stop();
+    await start();
+    const reopened = await connectPreview(t, fixture.origin, session);
+    assert.equal(reopened.initial.settings.donation.answer, response.answer);
+    assert.equal(reopened.initial.settings.donation.answered_at, response.answered_at);
+
+    await fixture.stop();
+    const now = new Date();
+    const previousMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) - 1000);
+    const expired = { ...response, answered_at: previousMonth.toISOString().replace('.000Z', 'Z') };
+    await writeFile(fixture.database, JSON.stringify({ ...original, donation: expired }));
+    await start();
+    const due = await connectPreview(t, fixture.origin, session);
+    assert.deepEqual(due.initial.settings.donation, { ...expired, reminder_due: true });
+    assert.deepEqual((await nextPreviewSnapshot(due.socket)).data.settings.donation,
+        { ...expired, reminder_due: true });
+
+    await fixture.stop();
+    const invalid = JSON.stringify({ ...original, donation: { ...response, answered_at: '2025-02-30T12:00:00Z' } });
+    await writeFile(fixture.database, invalid);
+    await start();
+    const malformed = await connectPreview(t, fixture.origin, session);
+    assert.deepEqual(malformed.initial.settings.donation, { reminder_due: true });
+    assert.equal(await readFile(fixture.database, 'utf8'), invalid);
+});
+
 test('preserves config files and keeps outdated core settings until the administrator reviews them', async t => {
     const fixture = await authFixture(t, undefined, { encrypted: false });
     const canLaunch = process.platform === 'linux';
@@ -738,6 +838,140 @@ test('preserves config files and keeps outdated core settings until the administ
     await createCoreConfig(restarted.socket, name);
     assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), skeleton);
     assert.equal(await readFile(notes, 'utf8'), 'Fixture notes survive removal.');
+});
+
+test('creates disabled configs with protected authentication and API starter nodes', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    await fixture.start();
+    const session = await fixtureSession(fixture);
+    const { socket } = await connectPreview(t, fixture.origin, session);
+    const ports = new Set();
+    const credentials = new Set();
+    const rejected = await requestPreview(socket, 'create_core_config', { name: 'Invalid starter', add_auth_nodes: 'true' });
+    assert.equal(rejected.ok, false);
+    assert.deepEqual(rejected.data.server.core.configs, []);
+    assert.deepEqual(await readdir(join(dirname(fixture.backend), 'configs')), []);
+
+    for (const name of ['Starter Alpha', 'Starter Beta']) {
+        const created = await requestPreview(socket, 'create_core_config', { name: ` ${name} `, add_auth_nodes: true });
+        assert.equal(created.ok, true, created.feedback);
+        const row = created.data.server.core.configs.find(config => config.name === name);
+        assert.ok(row, 'The new config is registered under its trimmed name.');
+        assert.equal(row.enabled, false);
+        assert.equal(row.active, false);
+        assert.deepEqual(row.auth_nodes, ['AuthenticationServer']);
+        assert.equal(row.live_users, true);
+
+        const opened = await requestPreview(socket, 'get_core_config', { id: row.id });
+        assert.equal(opened.ok, true, opened.feedback);
+        assert.equal(opened.result.editable, true);
+        const { config } = opened.result;
+        const directory = join(dirname(fixture.backend), 'configs', name);
+        const file = join(directory, 'config.json');
+        assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), config);
+        assert.equal((await stat(file)).mode & 0o777, 0o600);
+        assert.equal(config.name, name);
+        assert.equal(config.nodes.length, 4);
+        assert.deepEqual(Object.fromEntries(config.nodes.map(node => [node.name, node.type])), {
+            AuthenticationClient: 'AuthenticationClient', AuthenticationServer: 'AuthenticationServer',
+            ApiListener: 'TcpListener', UsersApi: 'APIServer',
+        });
+        const [authClient, authServer, listener, api] =
+            ['AuthenticationClient', 'AuthenticationServer', 'ApiListener', 'UsersApi'].map(nodeName =>
+                config.nodes.find(node => node.name === nodeName));
+        assert.equal(authClient.next, authServer.name);
+        assert.equal(listener.next, api.name);
+        assert.equal(authClient.settings.name, 'wave-auth');
+        assert.deepEqual(authServer.settings['auth-clients'], [{
+            ...authClient.settings, 'allow-user-pull': true, 'allow-stats-push': true,
+        }]);
+        assert.equal(api.settings.clients.length, 1);
+        const [reader] = api.settings.clients;
+        assert.equal(reader.name, 'wave-users');
+        assert.deepEqual(reader.allow, [{ config: name, node: authServer.name, operations: ['list-users'] }]);
+        for (const credential of [authClient.settings.secret, reader.token]) {
+            assert.ok(typeof credential === 'string' && /^[0-9a-f]{64}$/.test(credential));
+            assert.ok(!credentials.has(credential), 'Each generated credential is independent.');
+            assert.ok(!JSON.stringify(created).includes(credential), 'The creation acknowledgement keeps credentials private.');
+            credentials.add(credential);
+        }
+
+        const databaseName = authServer['panel-settings']['auth-db'];
+        assert.match(databaseName, /^auth-[0-9a-f]{32}\.json$/);
+        assert.equal(authServer.settings['db-path'], `configs/${name}/${databaseName}`);
+        const usersFile = join(directory, databaseName);
+        assert.deepEqual(JSON.parse(await readFile(usersFile, 'utf8')), { users: [] });
+        assert.equal((await stat(usersFile)).mode & 0o777, 0o600);
+        const users = await requestPreview(socket, 'get_config_users', { config_id: row.id, node: authServer.name });
+        assert.equal(users.ok, true, users.feedback);
+        assert.deepEqual(users.result.users, []);
+
+        const { address, port } = listener.settings;
+        assert.equal(address, '127.0.0.1');
+        assert.ok(Number.isInteger(port) && port >= 49152 && port <= 65535);
+        assert.ok(!ports.has(port), 'Each starter config receives a distinct API port.');
+        ports.add(port);
+        // Keep each verified port occupied while generating the next config.
+        const occupied = createServer();
+        t.after(() => occupied.listening && new Promise(resolve => occupied.close(resolve)));
+        occupied.listen(port, address);
+        await once(occupied, 'listening');
+    }
+});
+
+test('rejects starter nodes when every eligible API port is occupied', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    await fixture.start();
+    const session = await fixtureSession(fixture);
+    const { socket } = await connectPreview(t, fixture.origin, session);
+
+    const occupied = createServer();
+    t.after(() => occupied.listening && new Promise(resolve => occupied.close(resolve)));
+    for (let candidate = 65534; candidate > 49152; candidate--) {
+        occupied.listen(candidate, '127.0.0.1');
+        try {
+            await once(occupied, 'listening');
+            break;
+        } catch (error) {
+            if (error.code !== 'EADDRINUSE') throw error;
+        }
+    }
+    assert.ok(occupied.listening, 'Expected a loopback listener within the dynamic port range.');
+    const { port } = occupied.address();
+
+    const reservations = await createCoreConfig(socket, 'Port reservations');
+    const { config, revision } = (await requestPreview(socket, 'get_core_config', { id: reservations.id })).result;
+    const ranges = [[49152, port - 1], [port + 1, 65535]];
+    const nodes = ranges.map((range, index) => ({
+        name: `Reserved ${index}`, type: 'TcpListener', next: 'Sink', settings: {
+            address: '127.0.0.1', 'port-range': range, 'multiport-backend': 'socket',
+        },
+    }));
+    nodes.push({ name: 'Sink', type: 'BlackHole' });
+    const saved = await requestPreview(socket, 'save_core_config', {
+        id: reservations.id, config: { ...config, nodes }, revision,
+    });
+    assert.equal(saved.ok, true, saved.feedback);
+    const registered = await readFile(fixture.database, 'utf8');
+    const configDirectory = join(dirname(fixture.backend), 'configs');
+
+    const name = 'Wait for port';
+    const create = () => requestPreview(socket, 'create_core_config', { name, add_auth_nodes: true });
+    const rejected = await create();
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.feedback, /available loopback TCP port/);
+    assert.deepEqual(rejected.data.server.core.configs.map(row => row.name), [reservations.name]);
+    assert.equal(await readFile(fixture.database, 'utf8'), registered);
+    assert.deepEqual(await readdir(configDirectory), [reservations.name]);
+
+    await new Promise(resolve => occupied.close(resolve));
+    const created = await create();
+    assert.equal(created.ok, true, created.feedback);
+    const row = created.data.server.core.configs.find(row => row.name === name);
+    assert.ok(row);
+    const { result } = await requestPreview(socket, 'get_core_config', { id: row.id });
+    const listener = result.config.nodes.find(node => node.type === 'TcpListener');
+    assert.deepEqual(listener.settings, { address: '127.0.0.1', port });
 });
 
 test('validates configured WaterWall links and preserves supported aliases and peer references', async t => {
@@ -876,6 +1110,27 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     assert.deepEqual(stored.users, [{ ...record, password }]);
     assert.deepEqual((await users(socket, 'guests')).result.users, []);
 
+    const readPassword = (sock, node, user_id = record.id) =>
+        users(sock, node, 'get_config_user_password', { user_id });
+    const selected = await readPassword(socket, 'staff');
+    assert.equal(selected.ok, true, selected.feedback);
+    assert.deepEqual(selected.result, { password });
+    assert.equal(selected.feedback, '');
+    assert.equal(selected.feedback_in_logs_only, undefined);
+    assert.doesNotMatch(JSON.stringify(selected.data), new RegExp(password));
+    const { initial: peer } = await connectPreview(t, fixture.origin, session);
+    assert.doesNotMatch(JSON.stringify(peer), new RegExp(password));
+    const listed = await users(socket, 'staff');
+    assert.deepEqual(listed.result.users, [record]);
+    assert.doesNotMatch(JSON.stringify(listed), new RegExp(password));
+    for (const userId of [null, `0${record.id}`, '18446744073709551616', '2']) {
+        const rejected = await readPassword(socket, 'staff', userId);
+        assert.equal(rejected.ok, false);
+        assert.equal(rejected.result, undefined);
+        assert.equal(rejected.feedback_in_logs_only, undefined);
+    }
+    assert.equal((await readPassword(socket, 'guests')).ok, false);
+
     const renamed = structuredClone(savedGraph);
     renamed.nodes[0].next = 'directory';
     renamed.nodes[1].name = 'directory';
@@ -883,8 +1138,10 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     assert.equal(rename.ok, true, rename.feedback);
     assert.equal(rename.result.config.nodes[1].settings['db-path'], savedGraph.nodes[1].settings['db-path']);
     assert.equal((await users(socket, 'staff')).ok, false);
-    // Model WaterWall-managed history and a legacy expiration before applying a partial user edit.
+    // Model WaterWall-managed history and legacy fields before applying a partial user edit.
     const onDisk = stored.users[0];
+    onDisk.pass = onDisk.password;
+    delete onDisk.password;
     onDisk.limit.traffic.u = onDisk.limit.traffic.up;
     onDisk.time['first-usage-at-ms'] = '1920000000000';
     onDisk['expires-at-ms'] = '1924992001000';
@@ -892,6 +1149,7 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     onDisk.extension = { preserved: true };
     const existing = JSON.stringify(stored);
     await writeFile(databases[0], existing);
+    assert.deepEqual((await readPassword(socket, 'directory')).result, { password });
     const create = user => users(socket, 'directory', 'create_config_user', { user });
     const edit = user => users(socket, 'directory', 'edit_config_user', { user_id: record.id, user });
     for (const [fields, feedback] of [
@@ -936,7 +1194,8 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     };
     assert.deepEqual(edited.result.users, [updated]);
     const [merged] = JSON.parse(await readFile(databases[0], 'utf8')).users;
-    assert.equal(merged.password, password);
+    assert.equal(merged.pass, password);
+    assert.equal(merged.password, undefined);
     assert.equal(merged['expires-at-ms'], undefined);
     assert.deepEqual(merged.limit.traffic, updated.limit.traffic);
     assert.deepEqual(merged.extension, onDisk.extension);
@@ -950,6 +1209,10 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     assert.equal((await users(socket, 'directory')).ok, false);
     assert.equal((await users(socket, 'directory', 'delete_config_user', { user_id: record.id })).ok, false);
     await running;
+    const blockedPassword = await readPassword(socket, 'directory');
+    assert.equal(blockedPassword.ok, false);
+    assert.match(blockedPassword.feedback, /Stop WaterWall/);
+    assert.equal(blockedPassword.result, undefined);
     const stopped = nextPreviewSnapshot(socket, frame => frame.data.server.core.state === 'stopped');
     assert.equal((await requestPreview(socket, 'stop_core')).ok, true);
     await stopped;
@@ -965,7 +1228,11 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     });
     assert.equal(rotated.ok, true, rotated.feedback);
     assert.deepEqual(rotated.result.users, [updated]);
-    assert.equal(JSON.parse(await readFile(databases[0], 'utf8')).users[0].password, otherPassword);
+    assert.doesNotMatch(JSON.stringify(rotated), new RegExp(otherPassword));
+    const [storedRotation] = JSON.parse(await readFile(databases[0], 'utf8')).users;
+    assert.equal(storedRotation.password, otherPassword);
+    assert.equal(storedRotation.pass, undefined);
+    assert.deepEqual((await readPassword(restarted.socket, 'directory')).result, { password: otherPassword });
     const deleted = await users(restarted.socket, 'directory', 'delete_config_user', { user_id: record.id });
     assert.equal(deleted.ok, true, deleted.feedback);
     assert.equal(deleted.feedback_in_logs_only, true);

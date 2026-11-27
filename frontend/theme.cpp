@@ -28,6 +28,7 @@ constexpr auto standard = [] {
     colors[index(Color::inset)] = rgb(0x0D0B0E);
     colors[index(Color::pane)] = rgb(0x1F1B22);
     colors[index(Color::toolbar)] = rgb(0x1A171C);
+    colors[index(Color::terminal)] = rgb(0x050506);
     colors[index(Color::raised)] = rgb(0x2B2730);
     colors[index(Color::divider)] = rgb(0x3D3A43);
     colors[index(Color::plot_grid)] = colors[index(Color::divider)];
@@ -56,7 +57,7 @@ constexpr auto standard = [] {
     return colors;
 }();
 
-constexpr auto stronger = [] {
+constexpr auto standard_high_contrast = [] {
     auto colors = standard;
     colors[index(Color::divider)] = rgb(0x7C7789);
     colors[index(Color::plot_grid)] = rgb(0x53505C);
@@ -74,6 +75,171 @@ constexpr auto stronger = [] {
     colors[index(Color::scrollbar)] = colors[index(Color::control_border)];
     return colors;
 }();
+
+constexpr auto light = [] {
+    auto colors = standard;
+    colors[index(Color::canvas)] = rgb(0xF0F2F7);
+    colors[index(Color::header)] = rgb(0xE4E8F0);
+    colors[index(Color::inset)] = rgb(0xFFFFFF);
+    colors[index(Color::pane)] = rgb(0xF9FAFD);
+    colors[index(Color::toolbar)] = rgb(0xE7EAF2);
+    colors[index(Color::terminal)] = colors[index(Color::pane)];
+    colors[index(Color::raised)] = rgb(0xE1E5EE);
+    colors[index(Color::divider)] = rgb(0xA4ABBD);
+    colors[index(Color::plot_grid)] = rgb(0xCED4E2);
+    colors[index(Color::control_border)] = rgb(0x687189);
+    colors[index(Color::primary_text)] = rgb(0x232834);
+    colors[index(Color::secondary_text)] = rgb(0x465269);
+    colors[index(Color::disabled_text)] = rgb(0x626D80);
+    colors[index(Color::accent)] = rgb(0x9E420B);
+    colors[index(Color::focus)] = colors[index(Color::accent)];
+    colors[index(Color::success)] = rgb(0x2D6716);
+    colors[index(Color::info)] = rgb(0x145C9E);
+    colors[index(Color::error)] = rgb(0xA52F33);
+    colors[index(Color::warning)] = rgb(0x875000);
+    colors[index(Color::hover)] = rgb(0xD8DEEB);
+    colors[index(Color::pressed)] = rgb(0xCED4E2);
+    colors[index(Color::button_face)] = rgb(0xE6E9F2);
+    colors[index(Color::button_hover)] = rgb(0xD1D9EB);
+    colors[index(Color::button_pressed)] = rgb(0xC3CDE2);
+    colors[index(Color::button_shadow)] = rgb(0x263750, 36);
+    colors[index(Color::selected)] = rgb(0xD8E0F0);
+    colors[index(Color::chart_fill)] = rgb(0x9E420B, 38);
+    colors[index(Color::text_selection)] = rgb(0xBDCEE9);
+    colors[index(Color::scrollbar)] = colors[index(Color::control_border)];
+    colors[index(Color::dim)] = rgb(0x232834, 120);
+    return colors;
+}();
+
+constexpr auto classic = [] {
+    auto colors = standard;
+    colors[index(Color::canvas)] = rgb(0x1B2529);
+    colors[index(Color::header)] = rgb(0x333740);
+    colors[index(Color::inset)] = rgb(0x141A22);
+    colors[index(Color::pane)] = rgb(0x232C36);
+    colors[index(Color::toolbar)] = rgb(0x181B25);
+    colors[index(Color::terminal)] = rgb(0x121B21);
+    colors[index(Color::raised)] = rgb(0x303C48);
+    colors[index(Color::divider)] = rgb(0x4B5662);
+    colors[index(Color::plot_grid)] = rgb(0x36414B);
+    colors[index(Color::control_border)] = rgb(0x778999);
+    colors[index(Color::primary_text)] = rgb(0xF1F4FA);
+    colors[index(Color::secondary_text)] = rgb(0xBFC8D5);
+    colors[index(Color::disabled_text)] = rgb(0xADB8CA);
+    colors[index(Color::accent)] = rgb(0x65A7F5);
+    colors[index(Color::focus)] = colors[index(Color::accent)];
+    colors[index(Color::success)] = rgb(0x86CC88);
+    colors[index(Color::info)] = rgb(0x74D5D1);
+    colors[index(Color::error)] = rgb(0xFF8A80);
+    colors[index(Color::warning)] = rgb(0xF9C973);
+    colors[index(Color::hover)] = rgb(0x394956);
+    colors[index(Color::pressed)] = rgb(0x324A61);
+    colors[index(Color::button_face)] = rgb(0x364653);
+    colors[index(Color::button_hover)] = rgb(0x495C6D);
+    colors[index(Color::button_pressed)] = rgb(0x354D65);
+    colors[index(Color::button_shadow)] = rgb(0x0C121A, 165);
+    colors[index(Color::selected)] = rgb(0x223B53);
+    colors[index(Color::chart_fill)] = rgb(0x65A7F5, 38);
+    colors[index(Color::text_selection)] = rgb(0x30567A);
+    colors[index(Color::scrollbar)] = colors[index(Color::control_border)];
+    return colors;
+}();
+
+constexpr auto dark = [] {
+    auto colors = standard;
+    colors[index(Color::canvas)] = rgb(0x171A20);
+    colors[index(Color::header)] = rgb(0x101217);
+    colors[index(Color::inset)] = rgb(0x111318);
+    colors[index(Color::pane)] = rgb(0x22262E);
+    colors[index(Color::toolbar)] = rgb(0x1D2027);
+    colors[index(Color::terminal)] = colors[index(Color::header)];
+    colors[index(Color::raised)] = rgb(0x2B303B);
+    colors[index(Color::divider)] = rgb(0x48505F);
+    colors[index(Color::plot_grid)] = rgb(0x3C4350);
+    colors[index(Color::control_border)] = rgb(0x808BA1);
+    colors[index(Color::primary_text)] = rgb(0xE9EDF5);
+    colors[index(Color::secondary_text)] = rgb(0xB7C3D4);
+    colors[index(Color::disabled_text)] = rgb(0xA7B1C5);
+    colors[index(Color::accent)] = rgb(0xC1A4FF);
+    colors[index(Color::focus)] = colors[index(Color::accent)];
+    colors[index(Color::info)] = rgb(0x74BBF4);
+    colors[index(Color::hover)] = rgb(0x343C49);
+    colors[index(Color::pressed)] = rgb(0x3C3550);
+    colors[index(Color::button_face)] = rgb(0x393F4D);
+    colors[index(Color::button_hover)] = rgb(0x4A5264);
+    colors[index(Color::button_pressed)] = rgb(0x4C3D65);
+    colors[index(Color::selected)] = rgb(0x373146);
+    colors[index(Color::chart_fill)] = rgb(0xC1A4FF, 38);
+    colors[index(Color::text_selection)] = rgb(0x4C3D65);
+    colors[index(Color::scrollbar)] = colors[index(Color::control_border)];
+    return colors;
+}();
+
+constexpr auto darker = [] {
+    auto colors = standard;
+    colors[index(Color::canvas)] = rgb(0x08090B);
+    colors[index(Color::header)] = rgb(0x0D0E10);
+    colors[index(Color::inset)] = rgb(0x050608);
+    colors[index(Color::pane)] = rgb(0x141517);
+    colors[index(Color::toolbar)] = rgb(0x111214);
+    colors[index(Color::terminal)] = rgb(0x030405);
+    colors[index(Color::raised)] = rgb(0x202124);
+    colors[index(Color::divider)] = rgb(0x36383D);
+    colors[index(Color::plot_grid)] = colors[index(Color::divider)];
+    colors[index(Color::control_border)] = rgb(0x787B84);
+    colors[index(Color::primary_text)] = rgb(0xF2F3F5);
+    colors[index(Color::secondary_text)] = rgb(0xB8BBC3);
+    colors[index(Color::disabled_text)] = rgb(0xA5A9B3);
+    colors[index(Color::accent)] = rgb(0xFA8B7F);
+    colors[index(Color::focus)] = colors[index(Color::accent)];
+    colors[index(Color::error)] = rgb(0xFD747E);
+    colors[index(Color::hover)] = rgb(0x303238);
+    colors[index(Color::pressed)] = rgb(0x40292D);
+    colors[index(Color::button_face)] = rgb(0x34363D);
+    colors[index(Color::button_hover)] = rgb(0x474B54);
+    colors[index(Color::button_pressed)] = rgb(0x503337);
+    colors[index(Color::selected)] = rgb(0x322528);
+    colors[index(Color::chart_fill)] = rgb(0xFA8B7F, 38);
+    colors[index(Color::text_selection)] = rgb(0x532E34);
+    colors[index(Color::scrollbar)] = colors[index(Color::control_border)];
+    return colors;
+}();
+
+constexpr ImU32 mix(ImU32 from, ImU32 to, unsigned percent)
+{
+    const auto channel = [=](unsigned shift) {
+        const auto start = (from >> shift) & 0xFF;
+        const auto end = (to >> shift) & 0xFF;
+        return (start * (100 - percent) + end * percent + 50) / 100;
+    };
+    return IM_COL32(channel(IM_COL32_R_SHIFT), channel(IM_COL32_G_SHIFT), channel(IM_COL32_B_SHIFT),
+                    channel(IM_COL32_A_SHIFT));
+}
+
+constexpr Palette with_high_contrast(Palette colors)
+{
+    const auto text = colors[index(Color::primary_text)];
+    const auto strengthen = [&](Color color, unsigned percent) {
+        auto& value = colors[index(color)];
+        value = mix(value, text, percent);
+    };
+    strengthen(Color::divider, 44);
+    strengthen(Color::plot_grid, 24);
+    strengthen(Color::control_border, 45);
+    strengthen(Color::secondary_text, 50);
+    strengthen(Color::disabled_text, 35);
+    strengthen(Color::focus, 32);
+    strengthen(Color::hover, 12);
+    strengthen(Color::pressed, 15);
+    strengthen(Color::selected, 12);
+    colors[index(Color::scrollbar)] = colors[index(Color::control_border)];
+    return colors;
+}
+
+constexpr std::array presets{standard, light, classic, dark, darker};
+constexpr std::array high_contrast_presets{standard_high_contrast, with_high_contrast(light),
+                                           with_high_contrast(classic), with_high_contrast(dark),
+                                           with_high_contrast(darker)};
 
 const Palette* current = &standard;
 
@@ -97,9 +263,10 @@ ImVec4 rgba(Color color)
     return ImGui::ColorConvertU32ToFloat4(packed(color));
 }
 
-void apply(bool high_contrast)
+void apply(Appearance appearance)
 {
-    current = high_contrast ? &stronger : &standard;
+    const auto& palettes = appearance.high_contrast ? high_contrast_presets : presets;
+    current = &palettes[static_cast<std::size_t>(appearance.preset)];
     auto& style = ImGui::GetStyle();
     style.WindowPadding = window_padding;
     style.FramePadding = {8, 5};
@@ -124,7 +291,7 @@ void apply(bool high_contrast)
     style.SeparatorSize = border_width;
     style.SeparatorTextBorderSize = border_width;
     style.ScrollbarSize = scrollbar_size;
-    style.DisabledAlpha = high_contrast ? 0.90f : 0.82f;
+    style.DisabledAlpha = appearance.high_contrast ? 0.90f : 0.82f;
 
     const auto set = [&style](ImGuiCol slot, Color color) { style.Colors[slot] = rgba(color); };
     set(ImGuiCol_Text, Color::primary_text);

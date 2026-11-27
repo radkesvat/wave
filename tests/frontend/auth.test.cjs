@@ -7,7 +7,7 @@ const { authFixture, timeout } = require('../backend/auth_fixture.cjs');
 const viewport = { width: 1280, height: 800 };
 
 function waitForStatus(page, name) {
-    return page.getByRole('img', { name }).waitFor({ timeout });
+    return page.getByRole('img', { name, exact: true }).waitFor({ timeout });
 }
 
 function settleCanvas(page) {
@@ -29,6 +29,20 @@ async function matchingPixels(page, clip, color) {
         }
         return matches;
     }, { content: image.toString('base64'), color });
+}
+
+async function expectEntryTitleStrip(page, title) {
+    await settleCanvas(page);
+    const { width } = page.viewportSize();
+    const pixels = title ? Array.from({ length: 29 }, (_, row) => row) : [];
+    for (const x of [0, width - 1]) {
+        assert.deepEqual(await matchingPixels(page, { x, y: 48, width: 1, height: 30 }, [26, 23, 28]), pixels,
+            title ? `${title} reaches both edges of the viewport.` : 'The entry title strip is absent.');
+    }
+    if (title) {
+        const label = await matchingPixels(page, { x: 12, y: 48, width: 96, height: 29 }, [234, 235, 255]);
+        assert.ok(label.length, `${title} text is visible in the strip.`);
+    }
 }
 
 async function visibleInputs(page, top, bottom) {
@@ -144,9 +158,17 @@ test('authenticates an administrator and closes the terminal on sign-out', async
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: fixture.origin });
     const page = await context.newPage();
     const credentials = { username: 'fixture-browser', password: 'fake browser test passphrase 5Vx2m 🔒' };
+    const sessionGate = Promise.withResolvers();
+    await page.routeWebSocket('**/ws/panel', socket => {
+        socket.connectToServer().onMessage(async message => {
+            await sessionGate.promise;
+            socket.send(message);
+        });
+    });
 
     await page.goto(fixture.origin + '/panel');
-    await waitForStatus(page, 'Set up administrator.');
+    await waitForStatus(page, 'Set up administrator. Setup.');
+    await expectEntryTitleStrip(page, 'Setup');
     assert.equal((await context.request.get(fixture.origin + '/terminal/xterm.js')).status(), 401);
     const setupEndpoint = '**/api/auth/setup';
     const initialSetupFrame = await entryDialogFrame(page);
@@ -155,7 +177,7 @@ test('authenticates an administrator and closes the terminal on sign-out', async
     let rejectedSetup;
     try {
         await submitCredentials(page, { ...credentials, password: 'Password1' });
-        await waitForStatus(page, 'Set up administrator. Operation in progress.');
+        await waitForStatus(page, 'Set up administrator. Operation in progress. Setup.');
         assert.deepEqual(await entryDialogFrame(page), initialSetupFrame, 'Setup keeps its dialog size while pending.');
         assert.equal(await entrySpinner(page, initialSetupFrame), true, 'Setup progress appears in the lower-left footer.');
         await page.mouse.click(820, initialSetupFrame.bottom - 25, { delay: 40 });
@@ -167,13 +189,14 @@ test('authenticates an administrator and closes the terminal on sign-out', async
         heldSetup.release();
     }
     assert.equal((await rejectedSetup).status(), 422);
-    await waitForStatus(page, 'Set up administrator. Choose a less predictable password. A longer password may help.');
+    await waitForStatus(page, 'Set up administrator. Choose a less predictable password. A longer password may help. Setup.');
     assert.equal(await entrySpinner(page, await entryDialogFrame(page)), false, 'The rejected setup returns to idle.');
     const setup = page.waitForRequest(setupEndpoint, { timeout });
     await submitCredentials(page, credentials, true);
     assert.deepEqual((await setup).postDataJSON(), credentials);
 
-    await waitForStatus(page, 'Sign in to Wave.');
+    await waitForStatus(page, 'Sign in to Wave. Welcome.');
+    await expectEntryTitleStrip(page, 'Welcome');
     assert.equal(heldSetup.requests(), 2, 'Retrying the rejected setup reaches the backend.');
     const signInFrame = await entryDialogFrame(page);
     const signInEndpoint = '**/api/auth/sign-in';
@@ -181,11 +204,14 @@ test('authenticates an administrator and closes the terminal on sign-out', async
     await submitCredentials(page, { ...credentials, password: 'different fixture passphrase 88' });
     assert.equal((await rejectedSignIn).status(), 401);
     const cooldown = delay(1100);
-    await waitForStatus(page, 'Sign in to Wave. The username or password was rejected.');
+    const signInError = 'Sign in to Wave. The username or password was rejected. Welcome.';
+    await waitForStatus(page, signInError);
     const rejectionFrame = await entryDialogFrame(page);
     await expectFooterError(page, rejectionFrame);
     assert.equal(await entrySpinner(page, rejectionFrame), false, 'The rejected sign-in returns to idle.');
     await page.setViewportSize({ width: 324, height: viewport.height });
+    await waitForStatus(page, signInError);
+    await expectEntryTitleStrip(page, 'Welcome');
     await expectFooterError(page, await entryDialogFrame(page));
     await page.setViewportSize(viewport);
     // The backend throttles attempts for one second following a rejected sign-in.
@@ -195,7 +221,7 @@ test('authenticates an administrator and closes the terminal on sign-out', async
     let acceptedSignIn;
     try {
         await submitCredentials(page, credentials);
-        await waitForStatus(page, 'Sign in to Wave. Operation in progress.');
+        await waitForStatus(page, 'Sign in to Wave. Operation in progress. Welcome.');
         assert.deepEqual(await entryDialogFrame(page), signInFrame, 'Sign-in keeps its dialog size while pending.');
         assert.equal(await entrySpinner(page, signInFrame), true, 'Sign-in progress appears in the lower-left footer.');
         const progressText = await matchingPixels(page, {
@@ -207,8 +233,18 @@ test('authenticates an administrator and closes the terminal on sign-out', async
         heldSignIn.release();
     }
     assert.equal((await acceptedSignIn).status(), 204);
+    try {
+        await waitForStatus(page, 'Checking the session…');
+        await expectEntryTitleStrip(page);
+        const indicator = await matchingPixels(page, { x: 12, y: 60, width: 24, height: 36 }, [81, 165, 246]);
+        assert.equal(indicator.length, 0, 'The page body stays clear while checking the session.');
+    } finally {
+        sessionGate.resolve();
+    }
     const workspace = /Wave Server Status.*CPU/;
     await waitForStatus(page, workspace);
+    await expectEntryTitleStrip(page);
+    assert.doesNotMatch(await page.locator('#canvas').getAttribute('aria-label'), /(?:Setup|Welcome)\.$/);
     await page.reload();
     await waitForStatus(page, workspace);
 
@@ -234,13 +270,13 @@ test('authenticates an administrator and closes the terminal on sign-out', async
 
     await page.mouse.click(134, 23, { delay: 40 });
     await settleCanvas(page);
-    await page.mouse.click(172, 135, { delay: 40 });
+    await page.mouse.click(172, 198, { delay: 40 });
     await page.waitForFunction(() => document.getElementById('panel-controls').inert, null, { timeout });
     const signOut = page.waitForResponse('**/api/auth/sign-out', { timeout });
     await page.mouse.click(757, 426, { delay: 40 });
     assert.equal((await signOut).status(), 204);
-    await waitForStatus(page, 'Sign in to Wave.');
+    await waitForStatus(page, 'Sign in to Wave. Welcome.');
     if (shellPid) await waitForShellExit(shellPid);
     await page.goto(fixture.origin + '/panel');
-    await waitForStatus(page, 'Sign in to Wave.');
+    await waitForStatus(page, 'Sign in to Wave. Welcome.');
 });

@@ -49,6 +49,11 @@ The release preset uses `-O3 -DNDEBUG` and enables link-time optimization
 with `-flto` during compilation and linking. It generates a browser-only
 JavaScript loader. [Emscripten optimization guide](https://emscripten.org/docs/optimizing/Optimizing-Code.html#lto)
 
+`WAVE_ENABLE_UI_DEMOS` enables the Dear ImGui and ImPlot example windows in
+**Tools**. It defaults to `OFF`, including in the web presets used by CI.
+For development, set it to `ON` in a local `CMakeUserPresets.json` preset
+or configure with `cmake --preset web-debug -DWAVE_ENABLE_UI_DEMOS=ON`.
+
 Run the native backend to serve either frontend build. Pass
 `--site-dir build/web-debug/site` to use the debug build. [Native backend](#native-backend)
 
@@ -61,12 +66,13 @@ to show the compile and link commands. When switching SDK versions, add
 ## Workspace theme
 
 Wave starts with a near-black canvas, charcoal panes, and lavender text.
-Orange marks the right edge of the active navigation row, keyboard focus,
-and highlighted values. Green indicates success or an enabled state, blue
-indicates links and information, amber indicates warnings, and coral indicates
-errors. Panes, tabs, and controls use rounded corners. Table rows, plot grids,
-and progress fills keep straight edges. Borders use logical pixels so they
-scale with the canvas.
+The active navigation row has a near-black fill and an orange right edge.
+Orange also marks keyboard focus and highlighted values. Green indicates
+success or an enabled state. Blue indicates links and information, amber
+indicates warnings, and coral indicates errors. Panes and controls use
+rounded corners. Tab corners have a radius of 2 logical pixels, matching
+the old panel's Default theme. Table rows, plot grids, and progress fills
+keep straight edges. Borders use logical pixels so they scale with the canvas.
 
 Workspace buttons use a lighter fill, a subtle shadow, and distinct colors
 for hover and press. The header uses flat Menu and Tools controls.
@@ -81,10 +87,13 @@ frontend CMake file also generate the browser shell and a C++ swatch header.
 Rebuilding after a swatch change updates both the loading screen and the
 canvas with no additional asset requests.
 
-Choose **High contrast** in **Menu** to strengthen boundaries, secondary text,
-and keyboard focus. The workspace and its widgets apply the variant together
-on the next frame. Toggle it again to restore the default. Reloading starts
-with the default theme.
+Choose **Menu → Theme** to switch between **Default**, **Light**, **Classic**,
+**Dark**, and **Darker**. The choice applies to the workspace, charts, node
+graph, scrollbars, and terminal. Wave saves the preset automatically as
+`theme` in `wave-db.json` and restores it when a browser opens the authenticated
+workspace. Open workspaces receive the saved preset automatically.
+**High contrast** strengthens boundaries, secondary text, and keyboard focus
+for the current page with any theme.
 
 ## Frontend tests
 
@@ -173,19 +182,20 @@ list and what **Copy** includes. The pane also provides search and auto-scroll.
 Workspace operation results appear in **Logs**.
 
 Menu opens version information and signs you out. Tools opens diagnostics
-and input helpers. **ImGui Demo** and **ImPlot Demo** toggle the libraries'
-interactive example windows.
+and input helpers. When built with `WAVE_ENABLE_UI_DEMOS`, Tools also
+offers **ImGui Demo** and **ImPlot Demo**.
 
 Preview dialogs share a square-cornered frame, a dark title strip, and a
 right-aligned action row below the body. Workspace dialogs center in the
-visible viewport, including when the page is scrolled. Entry dialogs center
-beneath Wave's header when there is room. In very short viewports, the
-dialog body and actions scroll together. At larger heights, the actions
+visible viewport, including when the page is scrolled. When space allows,
+entry dialogs center beneath the **Welcome** bar on sign-in and the **Setup**
+bar during administrator setup. In very short viewports, the dialog body
+and actions scroll together. At larger heights, the actions
 stay visible while a long body scrolls. Action rows wrap on narrow screens.
-During a request, a circular spinner appears at the lower left of the dialog.
-Actions outside a dialog show a spinner beside their controls. Workspace
-operation results are recorded in **Logs**. Forms show validation where you
-enter the values.
+During a submitted action, a circular spinner appears at the lower left of
+its dialog or beside its controls. Content areas waiting for initial data
+stay empty until that data arrives. Workspace operation results are recorded
+in **Logs**. Forms show validation where you enter the values.
 
 Hover over or focus a **(?)** beside a field to read its help. On a touch
 screen, tap the marker and tap outside the help to dismiss it.
@@ -200,8 +210,8 @@ session opens the workspace directly.
 Use **Settings → Panel → Administrator** to change the username or password.
 Saving administrator credentials signs out every active session. In the
 **Panel** tab, **Session expiry (days)** controls how long new sign-ins last
-and defaults to 3 days. The tab also shows the sample domain, certificate
-chain path, and private key path.
+and defaults to 3 days. The **Preview TLS** box shows the sample domain,
+certificate chain path, and private key path.
 **Apply changes** keeps those sample values for the current preview process.
 Configure deployment TLS in `wave-db.json`. [Administrator setup](authentication.md#set-up-the-administrator)
 
@@ -209,9 +219,24 @@ Configure deployment TLS in `wave-db.json`. [Administrator setup](authentication
 
 The sidebar starts with **Server Status**, followed by the WaterWall configs.
 **Console**, **Settings**, and **About** are pinned to the bottom of the desktop
-sidebar and share the last row on narrow screens.
+sidebar and share the last row on narrow screens. The dashed donation box sits
+below the sidebar and matches its width and corner rounding. Select the box to
+open **About**. It shows **no donation** or **donated** for the current month and
+**donation?** when a new UTC calendar month begins after a saved answer.
 Tab goes from **Menu** and **Tools** into the workspace. Press Enter on a
 focused pane, then use Tab to move between its controls.
+
+The **Donations** section in **About** records your answer and the time you
+answered. Select **Donate** in this section or in the **No** response to open
+the project's support page. A current-month Yes answer shows the saved choice
+and next reminder date in `YY/MM/DD` (UTC). **Change answer** opens the same
+choices in a dialog. When the reminder is due, the choices return to the page
+for the new month.
+
+Wave stores the answer and timestamp as plain JSON in `wave-db.json` under `donation`.
+Set `answer` to `no`, `below_5`, or `more_than_5`. Set `answered_at` to a UTC
+timestamp such as `2026-11-27T14:15:00Z`. To edit the file by hand, stop Wave,
+update the object, and restart Wave to load it.
 
 Wave's scrollable panes use inset, rounded scrollbar thumbs and share the
 same track, hover, and drag colors in each contrast mode. Classic page
@@ -396,12 +421,24 @@ header to enable or disable it. The header's **Delete** button asks for
 confirmation before removing its `config.json` and any empty config folder.
 Configs in use by the running core are protected.
 
+Select **Add API and authentication database nodes** in **Create config** to
+start with an **AuthenticationClient → AuthenticationServer** chain and a
+**TcpListener → UsersApi** chain. `UsersApi` is an `APIServer` with a randomly
+generated token that allows `list-users` for this config's AuthenticationServer.
+Wave creates a private, empty user database and a separate shared secret for
+the authentication chain. The TCP listener uses `127.0.0.1` and a random port
+from 49152 to 65535. Wave checks that the port can be bound during creation and
+skips ports already assigned to conflicting listeners in saved configs.
+
 #### Nodes and AuthenticationServer users
 
 Select a config in the sidebar and open the **Nodes** tab. Use the graph's
-**Nodes** menu to add, edit, or delete WaterWall 1.6.0 nodes. Drag nodes to
-move them and use the connection ports or the next node selector to link
-them. Double-click a node card to open its editor. The graph labels links
+**Nodes** menu to add, edit, or delete WaterWall 1.6.0 nodes. New nodes appear
+at the center of the visible graph at the current pan and zoom. Right-click
+the graph for **Add node**, **Save**, and **Fit graph**. Right-click a node
+for its **Edit node** and **Delete node** actions. Drag nodes to move them and
+use the connection ports or the next node selector to link them. Double-click
+a node card to open its editor. The graph labels links
 defined in WaterWall settings, including split paths, pairs, fallbacks,
 authentication dependencies, and route targets.
 The node editor shows controls and value checks for the selected WaterWall
@@ -415,15 +452,15 @@ Renaming a node updates references in the config.
 TunDevice and RawSocket show the connected port when placed at either end of
 a chain. Unconnected adapters show both ports so you can attach either side.
 Roll the mouse wheel up to zoom in around the pointer and down to zoom out.
-Use **View** to zoom or fit the graph. In **Config**, choose **Save changes**
-to write `config.json` or **View saved JSON** to see the saved file. Wave writes
-coordinates and each node's custom JSON preference into its `panel-settings`
-object. WaterWall ignores that object.
+Use **View** to zoom or fit the graph. Select **Save** at the start of the
+menu bar to write `config.json`. Choose **Config → View saved JSON** to see
+the saved file. Wave writes coordinates and each node's custom JSON
+preference into its `panel-settings` object. WaterWall ignores that object.
 
 Use **Config → Edit JSON** to edit the current draft or paste an existing `config.json`
 or a JSON array of nodes. **Apply nodes** replaces the draft's nodes and keeps
-the destination config's top-level settings. Review the graph, then use **Save
-changes**. For imported AuthenticationServer nodes, Wave keeps any existing
+the destination config's top-level settings. Review the graph, then select
+**Save**. For imported AuthenticationServer nodes, Wave keeps any existing
 local user database and assigns a local database path to each new node.
 
 Pasted configs with WaterWall variables, `//` comments, or top-level `commits`
@@ -453,16 +490,21 @@ settings. You can enter a unique nonzero user ID when adding an account or
 leave it blank to generate one. Existing IDs, creation and first-use times,
 and recorded statistics are shown for reference.
 
-Traffic quotas use charged bytes. Bandwidth limits use bytes per second. Zero
-or blank limits mean unlimited. Absolute expiry uses Unix epoch milliseconds,
-and first-use expiry uses a duration in milliseconds. Clearing a numeric
-override restores WaterWall's default, including the 120,000 ms statistics
-record interval. A WireGuard account can have one IPv4 or IPv6 CIDR.
+The offline editor shows traffic quotas and recorded traffic in decimal GB.
+Enter up to three decimal places for quotas. `10.531` GB is 10 GB and 531 MB.
+WaterWall stores the charged byte count. Saved values with finer precision
+retain their exact byte count until the field is changed. Bandwidth limits
+use bytes per second. Zero or blank limits mean unlimited. Absolute expiry
+uses Unix epoch milliseconds, and first-use expiry uses a duration in
+milliseconds. Clearing a numeric override restores WaterWall's default,
+including the 120,000 ms statistics record interval. A WireGuard account can
+have one IPv4 or IPv6 CIDR.
 
-End-user passwords are stored in WaterWall's required format in the private
-node database. The panel accepts new passwords and never returns existing
-passwords in user lists. Wave reads databases up to 16 MiB and loads 50 users
-per page. Deleting a node or removing a config preserves user
+**Edit** shows the saved WaterWall user password in clear text for the
+selected account. The authenticated offline read retrieves just that
+password from the private node database. A blank replacement keeps the saved
+password. Wave reads databases up to 16 MiB and loads 50 users per page.
+Deleting a node or removing a config preserves user
 database files. To manage a pre-existing AuthenticationServer in Wave, place
 its database in the config folder and set its `db-path` to that file before
 editing the node. Each server also needs its own `auth-clients` settings before
@@ -507,12 +549,15 @@ connection closes, Server Status shows the last snapshot and offers to reconnect
 | --- | --- |
 | `install_core`, `start_core`, `stop_core`, `restart_core` | None |
 | `apply_core_settings` | WaterWall 1.6.0 `misc`, `log`, and `dns` overrides as `settings`, up to 16 KiB |
-| `create_core_config` | `name` |
+| `apply_theme` | `theme` set to `default`, `light`, `classic`, `dark`, or `darker` |
+| `apply_donation` | `answer` set to `no`, `below_5`, or `more_than_5`. The snapshot reports the saved answer, its UTC timestamp, and whether the reminder is due in `data.settings.donation`. |
+| `create_core_config` | `name`, optional boolean `add_auth_nodes` to provision the two starter chains |
 | `get_core_config` | Config `id`. The result has `config`, `revision`, and `editable`. |
 | `save_core_config` | Config `id`, edited `config` object, and last loaded `revision` |
 | `set_core_config_enabled` | Config `id` and boolean `enabled` |
 | `remove_core_config` | Config `id` |
 | `get_config_users` | `config_id`, AuthServer `node` name, and optional zero-based `page` |
+| `get_config_user_password` | `config_id`, AuthServer `node` name, and decimal string `user_id`. The offline edit read returns `result.password` to the requesting administrator. |
 | `get_live_config_users` | `config_id`, AuthServer `node` name, and optional opaque `cursor` from the previous live page |
 | `create_config_user` | `config_id`, `node`, `user` object with `password` and optional decimal string `id`, and optional `page` |
 | `edit_config_user` | `config_id`, `node`, string `user_id`, changed fields in `user`, and optional `page`. Set a numeric override to `null` to restore its default. |

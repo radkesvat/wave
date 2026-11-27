@@ -5,6 +5,7 @@
 
 #include <misc/cpp/imgui_stdlib.h>
 
+#include <algorithm>
 #include <charconv>
 #include <format>
 #include <limits>
@@ -14,11 +15,14 @@ namespace wave {
 namespace {
 
 using Editor = ConfigUsersState::Editor;
+using Operation = ConfigUsersState::Operation;
 using Section = ConfigUsersState::Section;
 using theme::Color;
 using view::Json;
 
 constexpr char offline_only[] = "Stop WaterWall to access this users database.";
+constexpr std::uint64_t bytes_per_megabyte = 1'000'000;
+constexpr std::uint64_t megabytes_per_gigabyte = 1'000;
 
 struct NumberField {
     const char* path;
@@ -27,6 +31,7 @@ struct NumberField {
     std::string_view help;
     std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
     std::uint64_t minimum = 0;
+    bool gigabytes = false;
 };
 
 constexpr NumberField account_id{
@@ -49,11 +54,21 @@ constexpr NumberField access_fields[] = {
      "unset."},
 };
 constexpr NumberField traffic_fields[] = {
-    {"/limit/traffic/up", "Upload traffic (bytes)", "Unlimited",
-     "Traffic quotas use charged bytes. Enter 1073741824 for 1 GiB."},
-    {"/limit/traffic/down", "Download traffic (bytes)", "Unlimited", {}},
-    {"/limit/traffic/total", "Total traffic (bytes)", "Unlimited",
-     "Caps combined charged upload and download bytes alongside the individual direction limits."},
+    {.path = "/limit/traffic/up",
+     .label = "Upload traffic (GB)",
+     .hint = "Unlimited",
+     .help = "Enter a quota in GB with up to three decimal places. 0.001 GB is 1 MB.",
+     .gigabytes = true},
+    {.path = "/limit/traffic/down",
+     .label = "Download traffic (GB)",
+     .hint = "Unlimited",
+     .help = "Enter a quota in GB with up to three decimal places. 0.001 GB is 1 MB.",
+     .gigabytes = true},
+    {.path = "/limit/traffic/total",
+     .label = "Total traffic (GB)",
+     .hint = "Unlimited",
+     .help = "Caps combined upload and download traffic in GB with up to three decimal places.",
+     .gigabytes = true},
 };
 constexpr NumberField bandwidth_fields[] = {
     {"/limit/bandwidth/up", "Upload bandwidth (bytes/s)", "Unlimited",
@@ -81,10 +96,55 @@ std::string number_text(const Json& user, const char* path)
     return value.is_number_integer() ? value.dump() : std::string(view::string_value(value));
 }
 
-void clear_password(ConfigUsersState& state)
+std::optional<std::uint64_t> parse_unsigned(std::string_view text)
 {
-    std::ranges::fill(state.password, '\0');
-    state.password.clear();
+    std::uint64_t value = 0;
+    const auto* end = text.data() + text.size();
+    const auto parsed = std::from_chars(text.data(), end, value);
+    return parsed.ec == std::errc{} && parsed.ptr == end ? std::optional(value) : std::nullopt;
+}
+
+std::string gigabytes_text(std::uint64_t bytes)
+{
+    const auto megabytes = bytes / bytes_per_megabyte;
+    return std::format("{}.{:03}", megabytes / megabytes_per_gigabyte, megabytes % megabytes_per_gigabyte);
+}
+
+std::string display_number(const Json& user, const NumberField& field)
+{
+    auto text = number_text(user, field.path);
+    if (field.gigabytes) {
+        if (const auto bytes = parse_unsigned(text)) {
+            return gigabytes_text(*bytes);
+        }
+    }
+    return text;
+}
+
+std::optional<std::uint64_t> parse_gigabytes(std::string_view text)
+{
+    // Shift the decimal point to get an integer count of MB without losing precision.
+    std::string megabytes(text);
+    std::size_t fractional_digits = 0;
+    if (const auto point = megabytes.find('.'); point != std::string::npos) {
+        fractional_digits = megabytes.size() - point - 1;
+        if (fractional_digits > 3 || megabytes.size() == 1) {
+            return std::nullopt;
+        }
+        megabytes.erase(point, 1);
+    }
+    megabytes.append(3 - fractional_digits, '0');
+    const auto value = parse_unsigned(megabytes);
+    if (!value || *value > std::numeric_limits<std::uint64_t>::max() / bytes_per_megabyte) {
+        return std::nullopt;
+    }
+    return *value * bytes_per_megabyte;
+}
+
+void clear_password(std::string& password)
+{
+    std::ranges::fill(password, '\0');
+    password.clear();
 }
 
 void select_user(ConfigUsersState& state, Editor editor, const Json& user = {})
@@ -98,40 +158,58 @@ void select_user(ConfigUsersState& state, Editor editor, const Json& user = {})
     state.email = view::string_field(user, "email");
     state.notes = view::string_field(user, "notes");
     state.wireguard_ips = view::string_field(user, "wireguard-allowed-ips");
-    clear_password(state);
+    clear_password(state.password);
+    clear_password(state.saved_password);
+    state.password_unavailable = false;
     state.enabled = view::bool_field(user, "enabled", true);
     state.numbers.clear();
     for (const auto fields : number_groups) {
         for (const auto& field : fields) {
-            state.numbers.emplace(field.path, number_text(user, field.path));
+            state.numbers.emplace(field.path, display_number(user, field));
         }
     }
     state.validation.clear();
     state.read_error.clear();
 }
 
-void submit(ConfigUsersState& state, PreviewSession& session, Json request, bool mutation)
+void submit(ConfigUsersState& state, PreviewSession& session, Json request, Operation operation)
 {
     state.read_error.clear();
     state.request = session.submit(std::move(request), 5000);
-    state.mutation = mutation;
-    if (!state.request && !mutation) {
-        state.read_error = "The user connection is unavailable.";
+    state.operation = operation;
+    state.passive_read = false;
+    if (!state.request) {
+        if (operation == Operation::list) {
+            state.read_error = "The user connection is unavailable.";
+        } else if (operation == Operation::password) {
+            state.password_unavailable = true;
+        }
     }
 }
 
 void refresh(ConfigUsersState& state, PreviewSession& session, int config_id, std::string_view node,
-             std::size_t page)
+             std::size_t page, bool passive = false)
 {
     submit(state, session,
-           {{"action", "get_config_users"}, {"config_id", config_id}, {"node", node}, {"page", page}}, false);
+           {{"action", "get_config_users"}, {"config_id", config_id}, {"node", node}, {"page", page}},
+           Operation::list);
+    state.passive_read = passive;
     state.refresh_needed = false;
 }
 
 void update(ConfigUsersState& state, PreviewSession& session, int config_id, std::string_view node)
 {
     if (auto reply = session.take_reply(state.request)) {
-        if (reply->ok()) {
+        state.passive_read = false;
+        if (state.operation == Operation::password) {
+            const auto password =
+                reply->ok() ? view::string_field(reply->result, "password") : std::string_view{};
+            state.password_unavailable = password.empty();
+            if (!state.password_unavailable) {
+                state.saved_password = password;
+                state.password = password;
+            }
+        } else if (reply->ok()) {
             const auto users = reply->result.find("users");
             if (users != reply->result.end() && users->is_array()) {
                 state.editable = view::bool_field(reply->result, "editable");
@@ -139,16 +217,16 @@ void update(ConfigUsersState& state, PreviewSession& session, int config_id, std
                 state.page_count = reply->result.value("page_count", std::size_t{0});
                 state.total = reply->result.value("total", users->size());
                 state.users = std::move(*users);
-                if (state.mutation) {
+                if (state.operation == Operation::mutation) {
                     select_user(state, Editor::none);
                 }
-            } else if (state.mutation) {
+            } else if (state.operation == Operation::mutation) {
                 session.add_local_log("error",
                                       "Wave sent an invalid user list. Refresh users before retrying.");
             } else {
                 state.read_error = "Wave sent an invalid user list.";
             }
-        } else if (!state.mutation) {
+        } else if (state.operation == Operation::list) {
             if (reply->status == PreviewReply::Status::timed_out) {
                 state.read_error = "Wave did not confirm the request. Refresh users before retrying.";
             } else if (reply->status == PreviewReply::Status::disconnected) {
@@ -160,7 +238,7 @@ void update(ConfigUsersState& state, PreviewSession& session, int config_id, std
         }
     }
     if (state.refresh_needed && !state.request && session.ready()) {
-        refresh(state, session, config_id, node, state.page);
+        refresh(state, session, config_id, node, state.page, true);
     }
 }
 
@@ -205,6 +283,9 @@ UserPatch pending_patch(const ConfigUsersState& state, bool creating)
                 continue;
             }
             const auto& text = state.numbers.at(field.path);
+            if (text == display_number(state.selected_user, field)) {
+                continue;
+            }
             const auto original = number_text(state.selected_user, field.path);
             const Json::json_pointer key(field.path);
             if (text.empty()) {
@@ -213,16 +294,17 @@ UserPatch pending_patch(const ConfigUsersState& state, bool creating)
                 }
                 continue;
             }
-            std::uint64_t value = 0;
-            const auto* end = text.data() + text.size();
-            const auto parsed = std::from_chars(text.data(), end, value);
-            if (parsed.ec != std::errc{} || parsed.ptr != end || value < field.minimum ||
-                value > field.maximum) {
-                patch.issue = std::format("{} requires a whole number from {} to {}.", field.label,
-                                          field.minimum, field.maximum);
+            const auto value = field.gigabytes ? parse_gigabytes(text) : parse_unsigned(text);
+            if (!value || *value < field.minimum || *value > field.maximum) {
+                patch.issue =
+                    field.gigabytes
+                        ? std::format("{} must be between 0 and {}, with up to three decimal places.",
+                                      field.label, gigabytes_text(field.maximum))
+                        : std::format("{} requires a whole number from {} to {}.", field.label, field.minimum,
+                                      field.maximum);
                 return patch;
             }
-            const auto canonical = std::to_string(value);
+            const auto canonical = std::to_string(*value);
             if (canonical != original) {
                 patch.fields[key] = canonical;
             }
@@ -247,8 +329,18 @@ void edit_text(const char* label, std::string& text, const char* hint, std::stri
 
 void edit_number(ConfigUsersState& state, const NumberField& field)
 {
-    edit_text(field.label, state.numbers.at(field.path), field.hint, field.help,
-              ImGuiInputTextFlags_CharsDecimal);
+    std::string saved_quota_help;
+    auto help = field.help;
+    if (field.gigabytes) {
+        const auto bytes = parse_unsigned(number_text(state.selected_user, field.path));
+        if (bytes && *bytes % bytes_per_megabyte != 0) {
+            saved_quota_help = std::format("{} The saved quota is {} bytes. It keeps its exact value until "
+                                           "you change this field.",
+                                           help, *bytes);
+            help = saved_quota_help;
+        }
+    }
+    edit_text(field.label, state.numbers.at(field.path), field.hint, help, ImGuiInputTextFlags_CharsDecimal);
 }
 
 bool begin_fields(const char* id, bool narrow)
@@ -269,7 +361,7 @@ void render_account(ConfigUsersState& state, bool creating, bool narrow)
         edit_text("Password", state.password, creating ? "Required" : "Keep current password",
                   "Use the credential expected by the WaterWall node. SOCKS5 username and password "
                   "authentication uses the combined username:password string.",
-                  ImGuiInputTextFlags_Password);
+                  creating ? ImGuiInputTextFlags_Password : ImGuiInputTextFlags_None);
         ImGui::TableNextColumn();
         if (creating) {
             edit_number(state, account_id);
@@ -328,12 +420,13 @@ void render_activity(const Json& user)
     struct Reading {
         const char* label;
         const char* path;
+        bool gigabytes = false;
     };
     constexpr Reading timestamps[] = {{"Created (Unix ms)", "/time/created-at-ms"},
                                       {"First used (Unix ms)", "/time/first-usage-at-ms"}};
     constexpr Reading account_stats[] = {
-        {"Uploaded (bytes)", "/stats/traffic/up"},
-        {"Downloaded (bytes)", "/stats/traffic/down"},
+        {"Uploaded (GB)", "/stats/traffic/up", true},
+        {"Downloaded (GB)", "/stats/traffic/down", true},
         {"Upload speed (bytes/s)", "/stats/speed/up"},
         {"Download speed (bytes/s)", "/stats/speed/down"},
         {"IP addresses", "/stats/ips"},
@@ -350,7 +443,12 @@ void render_activity(const Json& user)
             ImGui::TableNextColumn();
             view::wrapped(reading.label);
             ImGui::TableNextColumn();
-            const auto value = number_text(user, reading.path);
+            auto value = number_text(user, reading.path);
+            if (reading.gigabytes) {
+                if (const auto bytes = parse_unsigned(value)) {
+                    value = *bytes > 0 && *bytes < bytes_per_megabyte ? "<0.001" : gigabytes_text(*bytes);
+                }
+            }
             view::wrapped(value.empty() ? "Not recorded" : std::string_view(value), Color::secondary_text);
         }
         ImGui::EndTable();
@@ -433,9 +531,10 @@ void render_editor(ConfigUsersState& state, PreviewSession& session, int config_
 
     auto patch = removing ? UserPatch{} : pending_patch(state, creating);
     state.validation = std::move(patch.issue);
-    const bool has_password = !state.password.empty();
-    const bool changed = !patch.fields.empty() || has_password;
-    ImGui::BeginDisabled(!writable || !state.validation.empty() || (creating && !has_password) ||
+    const bool password_changed =
+        !state.password.empty() && (creating || state.password != state.saved_password);
+    const bool changed = !patch.fields.empty() || password_changed;
+    ImGui::BeginDisabled(!writable || !state.validation.empty() || (creating && !password_changed) ||
                          (!creating && !removing && !changed));
     if (theme::button(removing ? "Delete user" : creating ? "Create user" : "Save user")) {
         Json request{{"config_id", config_id}, {"node", node}, {"page", state.page}};
@@ -446,50 +545,71 @@ void render_editor(ConfigUsersState& state, PreviewSession& session, int config_
             request["user_id"] = state.user_id;
         }
         if (!removing) {
-            if (has_password) {
+            if (password_changed) {
                 patch.fields["password"] = state.password;
             }
             request["user"] = std::move(patch.fields);
         }
-        submit(state, session, std::move(request), true);
-        clear_password(state);
+        submit(state, session, std::move(request), Operation::mutation);
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::BeginDisabled(state.request.has_value());
+    ImGui::BeginDisabled(state.request && state.operation != Operation::password);
     if (theme::button("Cancel")) {
+        session.abandon(state.request);
         select_user(state, Editor::none);
     }
     ImGui::EndDisabled();
-    if (state.request) {
+    if (state.request && !state.passive_read) {
         ImGui::SameLine();
         draw_busy_spinner(ImGui::GetFrameHeight());
     }
     if (!state.validation.empty()) {
         view::wrapped(state.validation, Color::error);
     }
+    if (state.password_unavailable && state.section == Section::account) {
+        view::wrapped("Could not load the saved password.", Color::warning);
+    }
 }
 
-void render_users(ConfigUsersState& state, bool writable, bool narrow)
+void render_users(ConfigUsersState& state, PreviewSession& session, int config_id, std::string_view node,
+                  bool writable, bool narrow)
 {
+    constexpr char default_group[] = "Default";
+    constexpr char enabled_label[] = "Enabled";
+    constexpr char disabled_label[] = "Disabled";
     if (!ImGui::BeginTable("AuthenticationServer users", narrow ? 2 : 4,
                            ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
         return;
     }
     ImGui::TableSetupColumn("User");
     if (!narrow) {
-        ImGui::TableSetupColumn("Group", ImGuiTableColumnFlags_WidthFixed);
-        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed);
+        float group_width = std::max(ImGui::CalcTextSize("Group").x, ImGui::CalcTextSize(default_group).x);
+        for (const auto& user : state.users) {
+            const auto group = view::string_field(user, "gid", default_group);
+            group_width =
+                std::max(group_width, ImGui::CalcTextSize(group.data(), group.data() + group.size()).x);
+        }
+        const float state_width =
+            std::max({ImGui::CalcTextSize("State").x, ImGui::CalcTextSize(enabled_label).x,
+                      ImGui::CalcTextSize(disabled_label).x});
+        ImGui::TableSetupColumn("Group", ImGuiTableColumnFlags_WidthFixed, group_width);
+        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, state_width);
     }
     ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed);
     ImGui::TableHeadersRow();
+    const auto cell_text = [](std::string_view value, Color color) {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::rgba(color));
+        view::text(value);
+        ImGui::PopStyleColor();
+    };
     for (const auto& user : state.users) {
         const auto id = view::string_field(user, "id");
         const auto name = view::string_field(user, "name");
         const auto email = view::string_field(user, "email");
         const auto group = view::string_field(user, "gid");
         const bool enabled = view::bool_field(user, "enabled");
-        const auto status = enabled ? "Enabled" : "Disabled";
+        const auto status = enabled ? enabled_label : disabled_label;
         const auto status_color = enabled ? Color::success : Color::secondary_text;
         const bool oversized = view::bool_field(user, "oversized");
         ImGui::PushID(id.data(), id.data() + id.size());
@@ -513,15 +633,21 @@ void render_users(ConfigUsersState& state, bool writable, bool narrow)
             }
         } else {
             ImGui::TableNextColumn();
-            view::wrapped(group.empty() ? "Default" : group, Color::secondary_text);
+            cell_text(group.empty() ? default_group : group, Color::secondary_text);
             ImGui::TableNextColumn();
-            view::wrapped(status, status_color);
+            cell_text(status, status_color);
         }
         ImGui::TableNextColumn();
         ImGui::BeginDisabled(!writable);
         ImGui::BeginDisabled(oversized);
         if (theme::small_button("Edit")) {
             select_user(state, Editor::edit, user);
+            submit(state, session,
+                   {{"action", "get_config_user_password"},
+                    {"config_id", config_id},
+                    {"node", node},
+                    {"user_id", state.user_id}},
+                   Operation::password);
         }
         ImGui::EndDisabled();
         if (!narrow) {
@@ -538,7 +664,7 @@ void render_users(ConfigUsersState& state, bool writable, bool narrow)
 
 void render_paging(ConfigUsersState& state, PreviewSession& session, int config_id, std::string_view node)
 {
-    if (state.page_count <= 1) {
+    if (!state.users.is_array() || state.page_count <= 1) {
         return;
     }
     ImGui::BeginDisabled(state.request.has_value() || !session.ready() || state.editor != Editor::none);
@@ -578,8 +704,8 @@ void render_config_users(ConfigUsersState& state, PreviewSession& session, int c
         return;
     }
     state.blocked = false;
-    const bool pending_mutation = state.request && state.mutation;
-    if (state.last_frame != frame - 1 && !pending_mutation) {
+    const bool pending_editor_request = state.request && state.operation != Operation::list;
+    if (state.last_frame != frame - 1 && !pending_editor_request) {
         session.abandon(state.request);
         state.users = nullptr;
         state.editable = false;
@@ -603,7 +729,7 @@ void render_config_users(ConfigUsersState& state, PreviewSession& session, int c
         refresh(state, session, config_id, node, state.page);
     }
     ImGui::EndDisabled();
-    if (state.request) {
+    if (state.request && !state.passive_read) {
         ImGui::SameLine();
         draw_busy_spinner(ImGui::GetFrameHeight());
     } else if (!state.read_error.empty()) {
@@ -616,7 +742,8 @@ void render_config_users(ConfigUsersState& state, PreviewSession& session, int c
             if (state.users.empty()) {
                 view::wrapped("No users.", Color::secondary_text);
             } else {
-                render_users(state, writable && state.editor == Editor::none, narrow);
+                render_users(state, session, config_id, node, writable && state.editor == Editor::none,
+                             narrow);
             }
         }
     }
@@ -642,7 +769,17 @@ std::string describe_config_users(const ConfigUsersState& state)
     }
     if (state.request) {
         description += ' ';
-        description += state.mutation ? busy_description : "Loading users.";
+        switch (state.operation) {
+        case Operation::list:
+            description += "Loading users.";
+            break;
+        case Operation::password:
+            description += "Loading saved password.";
+            break;
+        case Operation::mutation:
+            description += busy_description;
+            break;
+        }
     } else if (!state.read_error.empty()) {
         description += ' ' + state.read_error;
     }

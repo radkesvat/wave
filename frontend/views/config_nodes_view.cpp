@@ -1,5 +1,6 @@
 #include "config_nodes_view.h"
 
+#include "browser_ui.h"
 #include "config_json_import.h"
 #include "core_config_json.h"
 #include "dialog.h"
@@ -350,6 +351,7 @@ void poll(State& state, PreviewSession& session)
         state.draft = config;
         state.revision = revision;
         state.dirty = false;
+        state.context_node.reset();
         if (state.operation == State::Request::save_import) {
             reset_graph_view(state);
             state.reply = PreviewReply{PreviewReply::Status::accepted, {}};
@@ -666,6 +668,24 @@ Json parse_node_settings(std::string_view text, std::string& error)
     return settings;
 }
 
+ImVec2 centered_node_position(const State& state, float canvas_top)
+{
+    const auto visible = visible_canvas();
+    auto viewport = state.viewport;
+    viewport.top = std::max(canvas_top, ImGui::GetWindowDrawList()->GetClipRectMin().y);
+    const Bounds clipped{
+        std::max(viewport.left, visible.left),
+        std::max(viewport.top, visible.top),
+        std::min(viewport.right, visible.left + visible.width),
+        std::min(viewport.bottom, visible.top + visible.height),
+    };
+    const auto& camera = clipped.right > clipped.left && clipped.bottom > clipped.top ? clipped : viewport;
+    const float x = ((camera.left + camera.right) / 2 - state.canvas_origin.x - state.pan_x) / state.zoom;
+    const float y = ((camera.top + camera.bottom) / 2 - canvas_top - state.pan_y) / state.zoom;
+    return {std::clamp(x - card_width / 2, -world_limit, world_limit),
+            std::clamp(y - card_height / 2, -world_limit, world_limit)};
+}
+
 bool apply_node(State& state, bool adding)
 {
     auto draft = state.draft;
@@ -714,6 +734,10 @@ bool apply_node(State& state, bool adding)
     node["type"] = state.node_type;
     if (!settings.empty() || previous_settings != node.end() || adding) {
         node["settings"] = std::move(settings);
+    }
+    if (adding) {
+        const auto position = state.add_position;
+        node["panel-settings"] = {{"x", position.x}, {"y", position.y}};
     }
     auto panel = node.find("panel-settings");
     if (state.custom_json) {
@@ -1539,6 +1563,8 @@ struct GraphStatus {
     Color color = Color::secondary_text;
 };
 
+constexpr char unsaved_status[] = "Unsaved changes";
+
 GraphStatus graph_status(const State& state, bool active)
 {
     if (!state.error.empty() && state.dialog == State::Dialog::none) {
@@ -1553,25 +1579,75 @@ GraphStatus graph_status(const State& state, bool active)
     if (state.link_from) {
         return {"Select the node to connect."};
     }
-    return {state.dirty ? "Unsaved changes" : ""};
+    return {state.dirty ? unsaved_status : ""};
 }
 
-bool draw_menu_status(GraphStatus status)
+std::optional<ImVec2> menu_status_position(std::string_view message)
 {
-    if (status.message.empty() || status.message.find('\n') != std::string_view::npos) {
-        return false;
+    if (message.empty() || message.find('\n') != std::string_view::npos) {
+        return {};
     }
-    const auto start = status.message.data();
-    const auto end = start + status.message.size();
+    const auto start = message.data();
+    const auto end = start + message.size();
     const auto cursor = ImGui::GetCursorScreenPos();
     const auto& style = ImGui::GetStyle();
-    auto& draw = *ImGui::GetWindowDrawList();
-    const float x = draw.GetClipRectMax().x - style.FramePadding.x - ImGui::CalcTextSize(start, end).x;
+    const float x = ImGui::GetWindowDrawList()->GetClipRectMax().x - style.FramePadding.x -
+                    ImGui::CalcTextSize(start, end).x;
     if (x < cursor.x + style.ItemSpacing.x) {
-        return false;
+        return {};
     }
-    draw.AddText({x, cursor.y + style.FramePadding.y}, packed(status.color), start, end);
-    return true;
+    return ImVec2{x, cursor.y + style.FramePadding.y};
+}
+
+void save_menu_item(State& state, PreviewSession& session)
+{
+    if (ImGui::MenuItem("Save", nullptr, false, state.graph_editable && state.dirty)) {
+        submit(state, session, State::Request::save);
+    }
+}
+
+State::Dialog node_edit_menu_items(State& state, std::optional<std::size_t> target)
+{
+    const auto& list = nodes(state);
+    const bool editable =
+        state.graph_editable && target && *target < list.size() && list[*target].is_object();
+    if (ImGui::MenuItem("Edit node", nullptr, false, editable)) {
+        state.selected = target;
+        return State::Dialog::edit;
+    }
+    if (ImGui::MenuItem("Delete node", nullptr, false, editable)) {
+        state.selected = target;
+        return State::Dialog::remove;
+    }
+    return State::Dialog::none;
+}
+
+State::Dialog graph_context_menu(State& state, PreviewSession& session, float width, float height)
+{
+    constexpr char id[] = "##graph-context-menu";
+    if (state.dialog == State::Dialog::none && !ImGui::IsItemActive() && ImGui::OpenPopupOnItemClick(id)) {
+        const auto mouse = ImGui::GetIO().MousePos;
+        state.context_node = node_at(state, mouse.x, mouse.y);
+    }
+    auto dialog = State::Dialog::none;
+    if (ImGui::BeginPopup(id)) {
+        if (ImGui::MenuItem("Add node", nullptr, false, state.graph_editable)) {
+            dialog = State::Dialog::add;
+        }
+        save_menu_item(state, session);
+        if (ImGui::MenuItem("Fit graph", nullptr, false, !nodes(state).empty())) {
+            fit_graph(state, width, height);
+        }
+        if (state.context_node) {
+            ImGui::Separator();
+            const auto edit_dialog = node_edit_menu_items(state, state.context_node);
+            if (edit_dialog != State::Dialog::none) {
+                dialog = edit_dialog;
+            }
+        }
+        ImGui::EndPopup();
+    }
+    return dialog;
 }
 
 void render_graph_pane(State& state, PreviewSession& session, bool active, bool narrow)
@@ -1583,25 +1659,17 @@ void render_graph_pane(State& state, PreviewSession& session, bool active, bool 
         ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
     if (ImGui::BeginChild("Graph pane", {0, height}, ImGuiChildFlags_NavFlattened, flags)) {
         bool fit = false;
+        bool unsaved_status_below_menu = false;
         GraphStatus status;
         if (ImGui::BeginMenuBar()) {
+            save_menu_item(state, session);
             if (ImGui::BeginMenu("Nodes")) {
-                const bool selected = state.selected && *state.selected < nodes(state).size();
-                if (ImGui::MenuItem("Add node", nullptr, false, state.graph_editable)) {
-                    dialog = State::Dialog::add;
-                }
-                if (ImGui::MenuItem("Edit node", nullptr, false, state.graph_editable && selected)) {
-                    dialog = State::Dialog::edit;
-                }
-                if (ImGui::MenuItem("Delete node", nullptr, false, state.graph_editable && selected)) {
-                    dialog = State::Dialog::remove;
-                }
+                const bool add = ImGui::MenuItem("Add node", nullptr, false, state.graph_editable);
+                const auto edit_dialog = node_edit_menu_items(state, state.selected);
+                dialog = add ? State::Dialog::add : edit_dialog;
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Config")) {
-                if (ImGui::MenuItem("Save changes", nullptr, false, state.graph_editable && state.dirty)) {
-                    submit(state, session, State::Request::save);
-                }
                 if (ImGui::MenuItem("Edit JSON", nullptr, false, state.graph_editable)) {
                     dialog = State::Dialog::edit_json;
                 }
@@ -1627,21 +1695,26 @@ void render_graph_pane(State& state, PreviewSession& session, bool active, bool 
                 fit = ImGui::MenuItem("Fit graph", nullptr, false, !nodes(state).empty());
                 ImGui::EndMenu();
             }
-            help_marker(
-                "Blue links are Next connections. Amber links are traffic branches configured in node "
-                "settings. "
-                "Gray links are references such as pairs and authentication services. Select a node's output "
-                "and another node's input to connect them.",
-                false);
             if (state.request && state.dialog != State::Dialog::confirm_import &&
                 state.dialog != State::Dialog::reload) {
                 draw_busy_spinner(ImGui::GetFrameHeight());
             }
             status = graph_status(state, active);
-            if (draw_menu_status(status)) {
+            if (const auto position = menu_status_position(status.message)) {
+                ImGui::GetWindowDrawList()->AddText(*position, packed(status.color), status.message.data(),
+                                                    status.message.data() + status.message.size());
                 status.message = {};
             }
+            unsaved_status_below_menu =
+                state.dialog == State::Dialog::add && !menu_status_position(unsaved_status);
             ImGui::EndMenuBar();
+        }
+        float add_canvas_top = ImGui::GetCursorScreenPos().y;
+        if (unsaved_status_below_menu) {
+            // The draft status can take a row above the graph once Add is confirmed.
+            const float wrap_width = ImGui::GetContentRegionAvail().x;
+            const float status_height = ImGui::CalcTextSize(unsaved_status, nullptr, false, wrap_width).y;
+            add_canvas_top = std::trunc(add_canvas_top + status_height + ImGui::GetStyle().ItemSpacing.y);
         }
         if (!status.message.empty()) {
             wrapped(status.message, status.color);
@@ -1653,6 +1726,13 @@ void render_graph_pane(State& state, PreviewSession& session, bool active, bool 
         }
         if (draw_graph(state, canvas_height)) {
             dialog = State::Dialog::edit;
+        }
+        if (state.dialog == State::Dialog::add) {
+            state.add_position = centered_node_position(state, add_canvas_top);
+        }
+        const auto context_dialog = graph_context_menu(state, session, available.x, canvas_height);
+        if (context_dialog != State::Dialog::none) {
+            dialog = context_dialog;
         }
     }
     ImGui::EndChild();
@@ -1724,8 +1804,9 @@ void render_config_nodes(ConfigNodesState& state, PreviewSession& session, int c
     }
     if (!state.saved.is_object()) {
         if (state.request || session.status() == PreviewStatus::loading) {
-            draw_busy_spinner(ImGui::GetFrameHeight());
-        } else if (session.ready()) {
+            return;
+        }
+        if (session.ready()) {
             wrapped("The configuration could not be loaded.", Color::warning);
             if (theme::button("Retry")) {
                 submit(state, session, State::Request::load);

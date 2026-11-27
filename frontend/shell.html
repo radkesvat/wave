@@ -74,9 +74,6 @@
       }
 
       #wave-console {
-        --terminal-border: #3d3a43;
-        --terminal-text: #b5b4c5;
-        --terminal-focus: #f3814a;
         position: absolute;
         box-sizing: border-box;
         display: flex;
@@ -84,13 +81,7 @@
         overflow: hidden;
         border: 1px solid var(--terminal-border);
         border-radius: 8px;
-        background: #050506;
-      }
-
-      #wave-console[data-high-contrast] {
-        --terminal-border: #b5b0c4;
-        --terminal-text: #eaebff;
-        --terminal-focus: #ffb48f;
+        background: var(--terminal-background);
       }
 
       #wave-console-toolbar {
@@ -100,22 +91,22 @@
         gap: 6px;
         padding: 6px 8px;
         border-bottom: 1px solid var(--terminal-border);
-        background: #1a171c;
+        background: var(--terminal-toolbar);
         font-size: .875rem;
       }
 
       #wave-console-toolbar button {
         min-height: 32px;
         padding: 3px 10px;
-        border: 1px solid #8a8495;
+        border: 1px solid var(--terminal-control-border);
         border-radius: 5px;
-        background: #45404f;
-        color: #eaebff;
+        background: var(--terminal-button-face);
+        color: var(--terminal-primary-text);
         font: inherit;
       }
 
-      #wave-console-toolbar button:hover:not(:disabled) { background: #595067; }
-      #wave-console-toolbar button[aria-pressed="true"] { background: #754430; }
+      #wave-console-toolbar button:hover:not(:disabled) { background: var(--terminal-button-hover); }
+      #wave-console-toolbar button[aria-pressed="true"] { background: var(--terminal-selection); }
       #wave-console-toolbar button:focus-visible { outline: 2px solid var(--terminal-focus); }
 
       #wave-console-status {
@@ -149,7 +140,7 @@
     <div id="panel-controls" class="panel-controls" hidden>
       <button id="menu" type="button" aria-expanded="false">Menu</button>
       <button id="tools" type="button" aria-expanded="false">Tools</button>
-      <nav id="navigation" aria-label="Wave"></nav>
+      <nav id="navigation" aria-label="Wave" aria-description="no donation"></nav>
       <div id="config-tabs" role="tablist" aria-label="Config tabs" hidden></div>
     </div>
     <main>
@@ -180,6 +171,7 @@
         const configTabs = document.getElementById("config-tabs");
         const textInput = document.getElementById("wave-text-input");
         const terminalPanel = document.getElementById("wave-console");
+        const themeColor = document.querySelector('meta[name="theme-color"]');
         const pageLinks = new Map();
         const headerControlIds = new Map();
         let activePage;
@@ -190,6 +182,7 @@
         let consolePosition = "";
         let consoleLoading;
         let consoleView;
+        let appearance;
         startup.hidden = false;
 
         if (CSS.supports("selector(::-webkit-scrollbar-thumb)")) {
@@ -316,6 +309,7 @@
           event.preventDefault();
         }, { passive: false });
 
+        canvas.addEventListener("contextmenu", event => event.preventDefault());
         canvas.addEventListener("pointerdown", event => {
           if (event.pointerType !== "touch") {
             if (document.activeElement !== textInput) canvas.focus({ preventScroll: true });
@@ -434,13 +428,16 @@
           canvas.setAttribute("aria-label", description);
         }
 
-        function updateNavigation(page, open, menuOpen, toolsOpen, modal) {
+        function updateNavigation(page, open, menuOpen, toolsOpen, modal, donation) {
           const updateExpanded = (element, expanded) => {
             const value = expanded ? "true" : "false";
             if (element.getAttribute("aria-expanded") !== value) element.setAttribute("aria-expanded", value);
           };
           updateExpanded(menu, menuOpen);
           updateExpanded(tools, toolsOpen);
+          if (navigation.getAttribute("aria-description") !== donation) {
+            navigation.setAttribute("aria-description", donation);
+          }
           if (controls.inert !== Boolean(modal)) {
             controls.inert = modal;
           }
@@ -458,7 +455,33 @@
           return headerControlIds.get(document.activeElement) ?? 0;
         }
 
-        function updateConsole(active, x, y, width, height, highContrast) {
+        function applyAppearance(palette) {
+          appearance = palette;
+          Object.assign(document.documentElement.style, {
+            backgroundColor: palette.canvas,
+            color: palette.primaryText,
+            colorScheme: palette.light ? "light" : "dark"
+          });
+          themeColor.content = palette.canvas;
+          const terminalColors = {
+            "--terminal-background": palette.terminal,
+            "--terminal-border": palette.highContrast ? palette.controlBorder : palette.divider,
+            "--terminal-text": palette.highContrast ? palette.primaryText : palette.secondaryText,
+            "--terminal-focus": palette.focus,
+            "--terminal-toolbar": palette.toolbar,
+            "--terminal-control-border": palette.controlBorder,
+            "--terminal-primary-text": palette.primaryText,
+            "--terminal-button-face": palette.buttonFace,
+            "--terminal-button-hover": palette.buttonHover,
+            "--terminal-selection": palette.textSelection
+          };
+          for (const [property, color] of Object.entries(terminalColors)) {
+            terminalPanel.style.setProperty(property, color);
+          }
+          consoleView?.setAppearance(palette);
+        }
+
+        function updateConsole(active, x, y, width, height) {
           const visible = Boolean(active && width > 0 && height > 0);
           if (terminalPanel.hidden === visible) terminalPanel.hidden = !visible;
           if (!active && consoleActive) consoleView?.disconnect();
@@ -472,10 +495,8 @@
             });
             consolePosition = position;
           }
-          terminalPanel.toggleAttribute("data-high-contrast", highContrast);
-          consoleView?.setHighContrast(highContrast);
           consoleLoading ??= import("./console.js").then(({ createConsole }) => {
-            consoleView = createConsole(terminalPanel, copyText);
+            consoleView = createConsole(terminalPanel, copyText, appearance);
           }).catch(() => {
             document.getElementById("wave-console-status").textContent = "Console could not load. Reload Wave to retry.";
           });
@@ -486,7 +507,8 @@
         return {
           canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
           updateConfigLinks, updateConfigTabs,
-          panelFocus, setTextInput, installTextInput, copyText, updateConsole, onAbort: showStartupError
+          panelFocus, setTextInput, installTextInput, copyText, applyAppearance, updateConsole,
+          onAbort: showStartupError
         };
       })();
     </script>

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -26,6 +27,7 @@ struct WaterWallUsersPage {
 
 bool has_waterwall_users_api(const nlohmann::json& config);
 std::size_t waterwall_tcp_bindings(const nlohmann::json& config, const WaterWallUsersEndpoint& endpoint);
+std::optional<std::uint16_t> available_waterwall_api_port(std::span<const nlohmann::json> configs);
 std::optional<WaterWallUsersEndpoint> waterwall_users_endpoint(const nlohmann::json& config,
                                                                std::string_view node);
 bool valid_waterwall_users_cursor(std::string_view cursor);

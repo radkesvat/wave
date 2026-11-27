@@ -1,5 +1,7 @@
 #include "waterwall_users.h"
 
+#include <openssl/rand.h>
+
 #include <arpa/inet.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -365,6 +367,45 @@ std::size_t waterwall_tcp_bindings(const Json& config, const WaterWallUsersEndpo
         return (type == "TcpListener" || type == "TcpUdpListener") &&
                can_receive_at(field(node, "settings"), endpoint);
     }));
+}
+
+std::optional<std::uint16_t> available_waterwall_api_port(std::span<const Json> configs)
+{
+    constexpr unsigned first_port = 49152;
+    constexpr unsigned port_count = 65536 - first_port;
+    std::uint16_t offset;
+    if (RAND_bytes(reinterpret_cast<unsigned char*>(&offset), sizeof(offset)) != 1) {
+        return std::nullopt;
+    }
+    const int socket = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+    if (socket < 0) {
+        return std::nullopt;
+    }
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    WaterWallUsersEndpoint endpoint{"127.0.0.1", 0, {}, {}, {}};
+    std::optional<std::uint16_t> selected;
+    // Check the whole dynamic port range from a random starting point, including saved listeners.
+    for (unsigned step = 0; step < port_count; ++step) {
+        endpoint.port = static_cast<std::uint16_t>(first_port + (offset + step) % port_count);
+        if (std::ranges::any_of(configs, [&](const Json& config) {
+                return waterwall_tcp_bindings(config, endpoint) != 0;
+            })) {
+            continue;
+        }
+        address.sin_port = htons(endpoint.port);
+        if (::bind(socket, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0) {
+            selected = endpoint.port;
+            break;
+        }
+        if (errno != EADDRINUSE) {
+            break;
+        }
+    }
+    ::close(socket);
+    return selected;
 }
 
 std::optional<WaterWallUsersEndpoint> waterwall_users_endpoint(const Json& config, std::string_view node)

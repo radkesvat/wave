@@ -15,7 +15,20 @@ function loadStylesheet() {
     });
 }
 
-export function createConsole(panel, copyText) {
+function terminalAppearance(palette) {
+    return {
+        minimumContrastRatio: palette.highContrast ? 7 : 4.5,
+        theme: {
+            background: palette.terminal,
+            foreground: palette.primaryText,
+            cursor: palette.accent,
+            cursorAccent: palette.terminal,
+            selectionBackground: palette.textSelection
+        }
+    };
+}
+
+export function createConsole(panel, copyText, appearance) {
     const mount = panel.querySelector("#wave-console-terminal");
     const status = panel.querySelector("#wave-console-status");
     const toggle = panel.querySelector("#wave-console-toggle");
@@ -197,10 +210,9 @@ export function createConsole(panel, copyText) {
                 disableStdin: true,
                 fontFamily: 'ui-monospace, "Cascadia Mono", "Liberation Mono", monospace',
                 fontSize: 14,
-                minimumContrastRatio: panel.hasAttribute("data-high-contrast") ? 7 : 4.5,
                 screenReaderMode: screenReader.checked,
                 scrollback: 5000,
-                theme: { background: "#050506", foreground: "#eaebff", cursor: "#f3814a" }
+                ...terminalAppearance(appearance)
             });
             fitAddon = new FitAddon();
             terminal.loadAddon(fitAddon);
@@ -254,11 +266,9 @@ export function createConsole(panel, copyText) {
 
     return {
         disconnect,
-        setHighContrast(highContrast) {
-            const ratio = highContrast ? 7 : 4.5;
-            if (terminal && terminal.options.minimumContrastRatio !== ratio) {
-                terminal.options.minimumContrastRatio = ratio;
-            }
+        setAppearance(palette) {
+            appearance = palette;
+            if (terminal) terminal.options = terminalAppearance(palette);
         }
     };
 }

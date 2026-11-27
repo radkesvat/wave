@@ -24,6 +24,7 @@ struct SettingsViewState {
     };
 
     Tab tab = Tab::panel;
+    CanvasViewport scroll_bounds{};
     CoreSettingsDraft core;
     SessionSettingsDraft sessions;
     nlohmann::json source;

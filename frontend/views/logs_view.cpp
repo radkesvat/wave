@@ -114,12 +114,13 @@ void update_logs_view(LogsViewState& state, PreviewSession& session)
 void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
 {
     constexpr char search_hint[] = "Message, source, or time";
+    constexpr char auto_scroll_label[] = "Auto-scroll";
     const auto& style = ImGui::GetStyle();
     const float row_end = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
     const float search_width = ImGui::CalcTextSize(search_hint).x + 3 * style.FramePadding.x;
-    const float search_label_space = ImGui::CalcTextSize("Search").x +
-                                     ImGui::CalcTextSize(view::help_marker_label).x +
-                                     2 * style.ItemInnerSpacing.x;
+    const float label_extra_width =
+        ImGui::CalcTextSize(view::help_marker_label).x + 2 * style.ItemInnerSpacing.x;
+    const float search_label_space = ImGui::CalcTextSize("Search").x + label_extra_width;
     const float spinner_space = state.clear_request ? busy_spinner_width + style.ItemSpacing.x : 0;
     const float controls_width = view::button_width("Options") + view::button_width("Clear") +
                                  view::button_width("Copy") + 3 * style.ItemSpacing.x + search_width +
@@ -139,8 +140,11 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
     if (theme::button("Options")) {
         ImGui::OpenPopup("Log options");
     }
+    // Reserve room for the marker so the popup's auto-sizing keeps it beside the checkbox.
+    ImGui::SetNextWindowContentSize(
+        {ImGui::GetFrameHeight() + ImGui::CalcTextSize(auto_scroll_label).x + label_extra_width, 0});
     if (ImGui::BeginPopup("Log options")) {
-        if (ImGui::Checkbox("Auto-scroll", &state.auto_scroll)) {
+        if (ImGui::Checkbox(auto_scroll_label, &state.auto_scroll)) {
             turned_on = state.auto_scroll;
         }
         view::help_marker("Follow new entries while you are at the bottom of Logs. Scroll up to read "
@@ -172,9 +176,7 @@ void render_logs(LogsViewState& state, PreviewSession& session, bool narrow)
     view::help_marker("Use spaces to require all terms, commas to match alternatives, and quotation marks "
                       "for phrases. Add a minus sign before a term to exclude it.");
     if (!ready && logs.empty()) {
-        if (session.status() == PreviewStatus::loading) {
-            draw_busy_spinner(ImGui::GetFrameHeight());
-        } else {
+        if (session.status() != PreviewStatus::loading) {
             ImGui::TextDisabled("Logs unavailable.");
         }
         ImGui::PopID();

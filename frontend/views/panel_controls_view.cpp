@@ -20,7 +20,7 @@ using theme::Color;
 using ControlsDialog = PanelControlsState::Dialog;
 
 constexpr char popup_id[] = "###ServerPanelControlsDialog";
-constexpr char target_label[] = "Target panel version";
+constexpr char target_label[] = "Target version";
 constexpr char unsaved_config_warning[] = "Unsaved node changes will be lost.";
 constexpr char restore_message[] =
     "Choose a backup JSON file to replace the sample TLS settings and inactive config list.";
@@ -316,7 +316,15 @@ void render_create(PanelControlsState& state, PreviewSession& session, const Jso
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##core-config-name", "Enter a name", state.config_name.data(),
                              state.config_name.size());
+    constexpr char auth_nodes_label[] = "Add API and authentication database nodes###Add auth nodes";
+    constexpr char wrapped_auth_nodes_label[] = "Add API and authentication\ndatabase nodes###Add auth nodes";
+    const float checkbox_width = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +
+                                 ImGui::CalcTextSize(auth_nodes_label, nullptr, true).x;
+    const bool label_fits = checkbox_width <= ImGui::GetContentRegionAvail().x;
+    ImGui::Checkbox(label_fits ? auth_nodes_label : wrapped_auth_nodes_label, &state.add_auth_nodes);
     ImGui::EndDisabled();
+    help_marker("Adds a local API listener and an AuthenticationServer node for managing this config's user "
+                "database.");
     const auto name = core_config_name(state.config_name.data());
     if (!name.empty() || state.config_name.front() == '\0') {
         wrapped("New configs start disabled.", Color::secondary_text);
@@ -332,7 +340,11 @@ void render_create(PanelControlsState& state, PreviewSession& session, const Jso
     if (action == 0 || state.request_accepted.has_value()) {
         close_dialog(state);
     } else if (action == 1 && !name.empty()) {
-        submit(state, session, {{"action", "create_core_config"}, {"name", state.config_name.data()}});
+        Json request{{"action", "create_core_config"}, {"name", state.config_name.data()}};
+        if (state.add_auth_nodes) {
+            request["add_auth_nodes"] = true;
+        }
+        submit(state, session, std::move(request));
     }
 }
 
@@ -501,6 +513,7 @@ void render_create_config_menu(PanelControlsState& state, const PreviewSession& 
     const bool available = session.ready() && !state.request_id;
     if (ImGui::MenuItem("Create config", nullptr, false, available && can_edit_configs(core))) {
         state.config_name.fill('\0');
+        state.add_auth_nodes = false;
         open_dialog(state, ControlsDialog::create);
     }
 }
@@ -584,8 +597,7 @@ void render_panel_controls(PanelControlsState& state, PreviewSession& session, f
     const bool lifecycle_busy = core_transition_pending(session);
     const bool disabled = !session.ready() || state.request_id.has_value();
     const bool busy = state.dialog == ControlsDialog::none &&
-                      (lifecycle_busy || (state.request_id && state.action_config_id == 0) ||
-                       session.status() == PreviewStatus::loading);
+                      (lifecycle_busy || (state.request_id && state.action_config_id == 0));
     const float button_space = std::max(2.0f, width - ImGui::GetStyle().ItemSpacing.x);
     const float primary_width = std::floor(button_space * 2.0f / 3.0f);
     const float secondary_width = button_space - primary_width;
@@ -713,6 +725,8 @@ std::string describe_panel_controls(const PanelControlsState& state, const Previ
         break;
     case ControlsDialog::create:
         description += "Create new config. ";
+        description += "Add API and authentication database nodes ";
+        description += state.add_auth_nodes ? "checked. " : "unchecked. ";
         break;
     case ControlsDialog::remove:
         description += std::format("Confirm deletion of {} and its config.json file. ", state.remove_name);

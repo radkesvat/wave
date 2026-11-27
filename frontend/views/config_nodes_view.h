@@ -55,6 +55,7 @@ struct ConfigNodesState {
     std::optional<PreviewReply> reply;
 
     Dialog dialog = Dialog::none;
+    ImVec2 add_position;
     std::string node_name;
     std::string node_type;
     std::string node_next;
@@ -70,6 +71,7 @@ struct ConfigNodesState {
     std::optional<std::size_t> grabbed;
     std::optional<std::size_t> last_clicked_node;
     std::optional<std::size_t> touch_node;
+    std::optional<std::size_t> context_node;
     bool dragged = false;
     bool pressed_output = false;
     Bounds viewport;

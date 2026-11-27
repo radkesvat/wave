@@ -11,7 +11,10 @@
       "name": "web",
       "hidden": true,
       "inherits": "ninja",
-      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": {
+        "WAVE_ENABLE_UI_DEMOS": "OFF"
+      }
     },
     {
       "name": "web-debug",

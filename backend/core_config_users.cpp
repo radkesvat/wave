@@ -696,10 +696,11 @@ bool CoreConfigUsers::remove(std::string_view config_name, std::string_view db_n
 CoreConfigUsers::Result CoreConfigUsers::execute(std::string_view action, std::string_view config_name,
                                                  std::string_view db_name, const Json& input) const
 {
-    const bool read_only = action == "get_config_users";
+    const bool list = action == "get_config_users";
+    const bool read_password = action == "get_config_user_password";
     const bool create = action == "create_config_user";
     const bool edit = action == "edit_config_user";
-    if (!read_only && !create && !edit && action != "delete_config_user") {
+    if (!list && !read_password && !create && !edit && action != "delete_config_user") {
         return {false, "Unknown AuthenticationServer user action."};
     }
     std::uint64_t page = 0;
@@ -725,7 +726,7 @@ CoreConfigUsers::Result CoreConfigUsers::execute(std::string_view action, std::s
         const bool wrapper = database.contains("users");
         auto rows = database_rows(database);
         auto listing = public_users(rows, page);
-        if (read_only) {
+        if (list) {
             return {true, {}, listing.response(true)};
         }
         Json patch;
@@ -758,6 +759,11 @@ CoreConfigUsers::Result CoreConfigUsers::execute(std::string_view action, std::s
             const auto row = number ? listing.index.find(*number) : listing.index.end();
             if (row == listing.index.end()) {
                 return {false, "That AuthenticationServer user is unavailable."};
+            }
+            if (read_password) {
+                // The listing has already validated the credential in every database row.
+                const auto* password = select_field(rows.at(row->second), password_field, true);
+                return {true, {}, {{"password", *password}}};
             }
             if (edit) {
                 patch_fields(rows.at(row->second), patch, user_fields);

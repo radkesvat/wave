@@ -59,22 +59,66 @@ bool contains_nul(const Json& value)
     return text(value).find('\0') != std::string_view::npos;
 }
 
-std::string new_db_name()
+template <std::size_t size> std::string random_hex()
 {
-    std::array<unsigned char, 16> bytes{};
+    std::array<unsigned char, size> bytes{};
     if (RAND_bytes(bytes.data(), bytes.size()) != 1) {
         return {};
     }
-    std::string result = "auth-";
+    std::string result;
+    result.reserve(2 * size);
     constexpr char hex[] = "0123456789abcdef";
     for (const auto byte : bytes) {
         result.push_back(hex[byte >> 4]);
         result.push_back(hex[byte & 0xf]);
     }
-    return result + ".json";
+    return result;
+}
+
+std::string new_db_name()
+{
+    const auto suffix = random_hex<16>();
+    return suffix.empty() ? std::string{} : "auth-" + suffix + ".json";
 }
 
 } // namespace
+
+Json make_users_starter_config(std::string_view name, std::uint16_t port)
+{
+    const auto secret = random_hex<32>();
+    const auto token = random_hex<32>();
+    if (secret.empty() || token.empty()) {
+        return nullptr;
+    }
+
+    constexpr char auth_client[] = "AuthenticationClient";
+    constexpr char auth_server[] = "AuthenticationServer";
+    constexpr char api_server[] = "UsersApi";
+    const Json auth_credential{{"name", "wave-auth"}, {"secret", secret}};
+    auto auth_permission = auth_credential;
+    auth_permission["allow-user-pull"] = true;
+    auth_permission["allow-stats-push"] = true;
+    const Json api_permission{
+        {"config", name}, {"node", auth_server}, {"operations", Json::array({"list-users"})}};
+    const Json api_credential{
+        {"name", "wave-users"}, {"token", token}, {"allow", Json::array({api_permission})}};
+
+    const Json client{{"name", auth_client},
+                      {"type", auth_client},
+                      {"next", auth_server},
+                      {"settings", auth_credential}};
+    const Json server{{"name", auth_server},
+                      {"type", auth_server},
+                      {"settings", {{"auth-clients", Json::array({auth_permission})}}}};
+    const Json listener{{"name", "ApiListener"},
+                        {"type", "TcpListener"},
+                        {"next", api_server},
+                        {"settings", {{"address", "127.0.0.1"}, {"port", port}}}};
+    const Json api{{"name", api_server},
+                   {"type", "APIServer"},
+                   {"settings", {{"clients", Json::array({api_credential})}}}};
+    return {{"name", name}, {"nodes", Json::array({client, server, listener, api})}};
+}
 
 Json config_auth_nodes(const Json& config)
 {

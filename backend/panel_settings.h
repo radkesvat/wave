@@ -1,11 +1,13 @@
 #pragma once
 
+#include "panel_theme.h"
 #include "tls.h"
 
 #include <nlohmann/json_fwd.hpp>
 
 #include <memory>
 #include <optional>
+#include <string_view>
 
 namespace wave {
 
@@ -25,6 +27,8 @@ class PanelDatabase {
     const nlohmann::json& initial_contents() const;
     int session_expiry_days() const;
     void save_session_expiry_days(int days);
+    void save_theme(theme::Preset preset);
+    void save_donation(std::string_view answer, std::string_view answered_at);
     bool claim_waterwall_install();
     void save_auth(const nlohmann::json& admins, const nlohmann::json& auth);
     void save_core_settings(const nlohmann::json& settings);

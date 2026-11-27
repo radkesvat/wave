@@ -516,6 +516,18 @@ void PanelDatabase::save_session_expiry_days(int days)
     impl_->session_expiry_days = days;
 }
 
+void PanelDatabase::save_theme(theme::Preset preset)
+{
+    const Json value = theme::preset_key(preset);
+    impl_->save_fields({{"theme", value}});
+}
+
+void PanelDatabase::save_donation(std::string_view answer, std::string_view answered_at)
+{
+    const Json value = {{"answer", answer}, {"answered_at", answered_at}};
+    impl_->save_fields({{"donation", value}});
+}
+
 bool PanelDatabase::claim_waterwall_install()
 {
     std::lock_guard lock(impl_->write_mutex);

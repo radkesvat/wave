@@ -24,6 +24,7 @@ struct PanelControlsState {
     std::string target_version;
     // Leave room for one extra UTF-8 character so validation can detect an overlong name.
     std::array<char, max_core_config_name_bytes + 5> config_name{};
+    bool add_auth_nodes = false;
     int remove_id = 0;
     int action_config_id = 0;
     unsigned keyboard_focus = 0;

@@ -24,8 +24,6 @@ const char* title(EntryPage page)
 void render_entry(EntryViewState& state, AuthSession& session, float entry_top)
 {
     if (state.page == EntryPage::checking) {
-        ImGui::SetCursorPos({12, entry_top + 12});
-        draw_busy_spinner(ImGui::GetFrameHeight());
         return;
     }
 

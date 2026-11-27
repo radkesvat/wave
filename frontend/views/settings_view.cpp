@@ -7,6 +7,7 @@
 
 #include <misc/cpp/imgui_stdlib.h>
 
+#include <algorithm>
 #include <charconv>
 #include <format>
 #include <utility>
@@ -126,8 +127,6 @@ void render_administrator_settings(SettingsViewState& state, AuthSession& auth)
         state.new_password.fill('\0');
     }
 
-    ImGui::Spacing();
-    ImGui::SeparatorText("Administrator");
     ImGui::BeginDisabled(auth.pending());
     edit("Username", state.admin_username, "", 0,
          "Use up to 64 ASCII letters, digits, dots, underscores, or hyphens. Sign in with the updated "
@@ -200,11 +199,6 @@ void update_session_settings(SessionSettingsDraft& draft, PreviewSession& sessio
 
 void render_session_settings(SessionSettingsDraft& draft, PreviewSession& session)
 {
-    if (!draft.saved_days) {
-        return;
-    }
-    ImGui::Spacing();
-    ImGui::SeparatorText("Sessions");
     ImGui::BeginDisabled(!session.ready() || draft.request.has_value());
     ImGui::PushID("Session expiry (days)");
     ImGui::TextUnformatted("Session expiry (days)");
@@ -236,13 +230,67 @@ void render_session_settings(SessionSettingsDraft& draft, PreviewSession& sessio
 
 void show_settings_connection(PreviewSession& session)
 {
-    if (session.status() == PreviewStatus::loading) {
-        draw_busy_spinner(ImGui::GetFrameHeight());
-    } else {
+    if (session.status() == PreviewStatus::unavailable) {
         wrapped("Settings connection unavailable.", Color::warning);
         if (theme::button("Reconnect")) {
             session.start(true);
         }
+    }
+}
+
+void render_panel_settings(SettingsViewState& state, AuthSession& auth, PreviewSession& session, bool narrow)
+{
+    constexpr float min_column_width = 300;
+    constexpr float max_card_width = 348;
+    const float available = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const int columns = std::clamp(static_cast<int>((available + gap) / (min_column_width + gap)), 1, 3);
+    const float width = std::min(max_card_width, (available - (columns - 1) * gap) / columns);
+    int card_index = 0;
+    const auto begin_card = [&](const char* title) {
+        if (card_index++ % columns != 0) {
+            ImGui::SameLine();
+        }
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {9, 8});
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, theme::control_radius);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::rgba(Color::pane));
+        ImGui::PushStyleColor(ImGuiCol_Border, theme::rgba(Color::divider));
+        // Recompute card heights and keep processing the TLS dialog while its card is scrolled out of view.
+        const bool visible =
+            ImGui::BeginChild(title, {width, 0},
+                              ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened |
+                                  ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysAutoResize,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar(2);
+        if (visible) {
+            ImGui::PushStyleVar(ImGuiStyleVar_SeparatorTextPadding, {0, 3});
+            ImGui::SeparatorText(title);
+            ImGui::PopStyleVar();
+        }
+        return visible;
+    };
+
+    if (session.status() != PreviewStatus::loading || state.apply_request) {
+        if (begin_card("Preview TLS")) {
+            if (session.ready()) {
+                render_tls_settings(state, session, narrow);
+            } else {
+                show_settings_connection(session);
+            }
+            render_tls_dialog(state, session);
+        }
+        ImGui::EndChild();
+    }
+    if (begin_card("Administrator")) {
+        render_administrator_settings(state, auth);
+    }
+    ImGui::EndChild();
+    if (state.sessions.saved_days) {
+        if (begin_card("Sessions")) {
+            render_session_settings(state.sessions, session);
+        }
+        ImGui::EndChild();
     }
 }
 
@@ -255,21 +303,31 @@ void render_settings(SettingsViewState& state, AuthSession& auth, PreviewSession
     if (!ImGui::BeginTabBar("Settings tabs")) {
         return;
     }
-    if (ImGui::BeginTabItem("Panel")) {
-        state.tab = SettingsViewState::Tab::panel;
-        if (session.ready()) {
-            render_tls_settings(state, session, narrow);
-        } else {
-            show_settings_connection(session);
+    using Tab = SettingsViewState::Tab;
+    for (const auto tab : {Tab::panel, Tab::core}) {
+        if (!ImGui::BeginTabItem(tab == Tab::panel ? "Panel" : "Core")) {
+            continue;
         }
-        render_tls_dialog(state, session);
-        render_administrator_settings(state, auth);
-        render_session_settings(state.sessions, session);
-        ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Core")) {
-        state.tab = SettingsViewState::Tab::core;
-        render_core_settings(state.core, session);
+        state.tab = tab;
+        // Attach the top edge of the content frame to the tab bar.
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {6, 6});
+        const bool visible =
+            ImGui::BeginChild("Settings content", {}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
+        ImGui::PopStyleVar();
+        if (visible) {
+            if (ImGui::GetScrollMaxY() > 0) {
+                const auto position = ImGui::GetWindowPos();
+                const auto size = ImGui::GetWindowSize();
+                state.scroll_bounds = {position.x, position.y, size.x, size.y};
+            }
+            if (tab == Tab::panel) {
+                render_panel_settings(state, auth, session, narrow);
+            } else {
+                render_core_settings(state.core, session);
+            }
+        }
+        ImGui::EndChild();
         ImGui::EndTabItem();
     }
     ImGui::EndTabBar();

@@ -1,9 +1,30 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace wave {
 
-void render_about(std::string_view version);
+class PreviewSession;
+
+struct AboutViewState {
+    enum class Answer {
+        none,
+        no,
+        below_5,
+        more_than_5
+    };
+
+    Answer submitted = Answer::none;
+    std::optional<std::uint64_t> donation_request;
+    bool donation_saved = false;
+    bool choosing_answer = false;
+};
+
+void update_about(AboutViewState& state, PreviewSession& session);
+void render_about(AboutViewState& state, PreviewSession& session, std::string_view version);
+std::string describe_about(const AboutViewState& state, const PreviewSession& session);
 
 } // namespace wave

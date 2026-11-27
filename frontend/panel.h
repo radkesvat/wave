@@ -1,6 +1,8 @@
 #pragma once
 
 #include "auth_session.h"
+#include "theme.h"
+#include "views/about_view.h"
 #include "views/config_workspace_view.h"
 #include "views/console_view.h"
 #include "views/entry_view.h"
@@ -55,6 +57,7 @@ struct PanelState {
     std::map<int, ConfigWorkspaceState> workspaces;
     AuthSession auth;
     EntryViewState entry;
+    AboutViewState about;
     LogsViewState logs;
     SettingsViewState settings;
     CanvasViewport console{};
@@ -64,10 +67,12 @@ struct PanelState {
     bool navigation_open = true;
     bool menu_open = false;
     bool tools_open = false;
-    bool high_contrast = false;
+    theme::Appearance appearance;
     bool metrics_open = false;
+#ifdef WAVE_ENABLE_UI_DEMOS
     bool imgui_demo_open = false;
     bool implot_demo_open = false;
+#endif
     int browser_control = 0;
     PanelDialog requested_dialog = PanelDialog::none;
     std::optional<std::uint64_t> refresh_request;
@@ -78,6 +83,7 @@ struct PanelState {
 };
 
 const char* panel_page_name(PanelPage page);
+const char* panel_donation_label(const PreviewSession& session);
 std::span<const PanelNavigationItem> panel_navigation();
 float panel_height(float viewport_width, const PanelState& state);
 void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_viewport, int browser_focus);

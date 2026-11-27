@@ -27,6 +27,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -38,6 +39,7 @@ namespace wave {
 namespace {
 
 using Json = nlohmann::json;
+using UtcTime = std::chrono::sys_seconds;
 using namespace std::chrono_literals;
 
 constexpr auto host_sample_interval = 500ms;
@@ -56,7 +58,8 @@ bool workspace_mutation(std::string_view action)
     constexpr std::string_view actions[] = {
         "install_core", "start_core", "stop_core", "restart_core", "update_panel",
         "create_core_config", "set_core_config_enabled", "remove_core_config", "restore_preview_backup",
-        "apply_settings", "apply_core_settings", "apply_session_settings", "save_core_config",
+        "apply_settings", "apply_core_settings", "apply_session_settings", "apply_theme", "apply_donation",
+        "save_core_config",
         "create_config_user", "edit_config_user", "delete_config_user",
     };
     return std::ranges::find(actions, action) != std::end(actions);
@@ -90,6 +93,83 @@ bool text_value(const Json& value, std::size_t limit, bool required = false)
     const auto* text = value.get_ptr<const std::string*>();
     return text && text->size() <= limit && text->find('\0') == std::string::npos &&
            (!required || text->find_first_not_of(" \t\r\n") != std::string::npos);
+}
+
+struct Donation {
+    std::string answer;
+    std::string answered_at;
+    UtcTime time;
+};
+
+bool valid_donation_answer(std::string_view answer)
+{
+    return answer == "no" || answer == "below_5" || answer == "more_than_5";
+}
+
+UtcTime utc_now()
+{
+    return std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+}
+
+std::optional<UtcTime> parse_utc_timestamp(std::string_view timestamp)
+{
+    if (timestamp.size() != 20 || timestamp[4] != '-' || timestamp[7] != '-' || timestamp[10] != 'T' ||
+        timestamp[13] != ':' || timestamp[16] != ':' || timestamp[19] != 'Z') {
+        return std::nullopt;
+    }
+    const auto decimal = [&](std::size_t first, std::size_t count) {
+        int result = 0;
+        for (const auto digit : timestamp.substr(first, count)) {
+            if (digit < '0' || digit > '9') {
+                return -1;
+            }
+            result = 10 * result + (digit - '0');
+        }
+        return result;
+    };
+    const int year = decimal(0, 4);
+    const int month = decimal(5, 2);
+    const int day = decimal(8, 2);
+    const int hour = decimal(11, 2);
+    const int minute = decimal(14, 2);
+    const int second = decimal(17, 2);
+    const auto date = std::chrono::year{year} / month / day;
+    if (year <= 0 || !date.ok() || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 ||
+        second > 59) {
+        return std::nullopt;
+    }
+    return std::chrono::sys_days{date} + std::chrono::hours{hour} + std::chrono::minutes{minute} +
+           std::chrono::seconds{second};
+}
+
+std::optional<Donation> read_donation(const Json& saved)
+{
+    const auto response = saved.find("answer");
+    const auto stamp = saved.find("answered_at");
+    const auto* answer = response == saved.end() ? nullptr : response->get_ptr<const std::string*>();
+    const auto* timestamp = stamp == saved.end() ? nullptr : stamp->get_ptr<const std::string*>();
+    if (!answer || !valid_donation_answer(*answer) || !timestamp) {
+        return std::nullopt;
+    }
+    const auto time = parse_utc_timestamp(*timestamp);
+    if (!time || *time > utc_now()) {
+        return std::nullopt;
+    }
+    return Donation{*answer, *timestamp, *time};
+}
+
+Json donation_settings(const std::optional<Donation>& donation)
+{
+    if (!donation) {
+        return {{"reminder_due", true}};
+    }
+    const auto month = [](UtcTime time) {
+        const std::chrono::year_month_day date{std::chrono::floor<std::chrono::days>(time)};
+        return date.year() / date.month();
+    };
+    return {{"answer", donation->answer},
+            {"answered_at", donation->answered_at},
+            {"reminder_due", month(donation->time) < month(utc_now())}};
 }
 
 bool integer_value(const Json& value, int minimum, int maximum)
@@ -144,6 +224,15 @@ class Preview {
           core_logs_(database_->directory())
     {
         data_["settings"]["session_expiry_days"] = database_->session_expiry_days();
+        const auto& stored = database_->initial_contents();
+        const auto saved_theme = stored.find("theme");
+        const auto* key = saved_theme == stored.end() ? nullptr : saved_theme->get_ptr<const std::string*>();
+        const auto preset = key ? theme::parse_preset(*key).value_or(theme::Preset::standard)
+                                : theme::Preset::standard;
+        data_["settings"]["theme"] = theme::preset_key(preset);
+        if (const auto donation = stored.find("donation"); donation != stored.end()) {
+            donation_ = read_donation(*donation);
+        }
         load_core_settings();
         if (database_->claim_waterwall_install()) {
             core_.install_if_missing();
@@ -268,7 +357,9 @@ class Preview {
 
     Json snapshot() const
     {
-        return {{"type", "snapshot"}, {"data", data_}};
+        Json snapshot = {{"type", "snapshot"}, {"data", data_}};
+        snapshot["data"]["settings"]["donation"] = donation_settings(donation_);
+        return snapshot;
     }
 
     std::string changed_snapshot(std::uint64_t& sent_revision)
@@ -450,6 +541,51 @@ class Preview {
         }
         data_["settings"]["session_expiry_days"] = selected;
         return complete("Saved session expiry for future sign-ins.");
+    }
+
+    Reply apply_theme(const Json& input)
+    {
+        const auto value = input.find("theme");
+        const auto* key = value == input.end() ? nullptr : value->get_ptr<const std::string*>();
+        const auto preset = key ? theme::parse_preset(*key) : std::nullopt;
+        if (!preset) {
+            return {false, "Choose a valid panel theme."};
+        }
+        auto& current = data_["settings"]["theme"];
+        if (current == *key) {
+            return {true, "The panel theme is already selected."};
+        }
+        try {
+            database_->save_theme(*preset);
+        } catch (const std::runtime_error&) {
+            return {false, "Could not save the panel theme in wave-db.json."};
+        }
+        current = *key;
+        return complete("Saved panel theme.");
+    }
+
+    Reply apply_donation(const Json& input)
+    {
+        const auto value = input.find("answer");
+        const auto* answer = value == input.end() ? nullptr : value->get_ptr<const std::string*>();
+        if (!answer || !valid_donation_answer(*answer)) {
+            return {false, "Choose a donation response."};
+        }
+        const auto now = utc_now();
+        const auto seconds = std::chrono::system_clock::to_time_t(now);
+        std::tm date{};
+        char timestamp[21];
+        if (!gmtime_r(&seconds, &date) ||
+            std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &date) != 20) {
+            return {false, "Could not read the UTC date for the donation response."};
+        }
+        try {
+            database_->save_donation(*answer, timestamp);
+        } catch (const std::runtime_error&) {
+            return {false, "Could not save the donation response in wave-db.json."};
+        }
+        donation_ = Donation{*answer, timestamp, now};
+        return complete("Saved donation response.");
     }
 
     Reply apply_core_settings(const Json& input)
@@ -645,6 +781,33 @@ class Preview {
                                                                    : "That Wave version is unavailable."};
     }
 
+    std::string prepare_auth_databases(std::string_view name, const Json& config,
+                                       std::vector<std::string>& created)
+    {
+        for (const auto& node : config["nodes"]) {
+            if (node["type"] != "AuthenticationServer") {
+                continue;
+            }
+            const auto& db = node["panel-settings"]["auth-db"].get_ref<const std::string&>();
+            bool new_file;
+            auto error = config_users_.prepare(name, db, new_file);
+            if (new_file) {
+                created.push_back(db);
+            }
+            if (!error.empty()) {
+                return error;
+            }
+        }
+        return {};
+    }
+
+    void remove_created_auth_databases(std::string_view name, const std::vector<std::string>& created)
+    {
+        for (const auto& db : created) {
+            config_users_.remove(name, db);
+        }
+    }
+
     Reply create_core_config(const Json& input)
     {
         const auto value = input.find("name");
@@ -652,6 +815,10 @@ class Preview {
         const auto name = text ? core_config_name(*text) : std::string_view{};
         if (name.empty()) {
             return {false, "Enter a valid config filename of up to 64 bytes."};
+        }
+        const auto add_auth_nodes = input.find("add_auth_nodes");
+        if (add_auth_nodes != input.end() && !add_auth_nodes->is_boolean()) {
+            return {false, "Choose whether to add API and authentication database nodes."};
         }
 
         auto& configs = data_["server"]["core"]["configs"];
@@ -663,11 +830,48 @@ class Preview {
         }
         auto changed = configs;
         changed.push_back({{"id", next_config_id_}, {"name", name}, {"enabled", false}, {"active", false}});
+        Json config = {{"nodes", Json::array()}};
+        if (add_auth_nodes != input.end() && *add_auth_nodes == true) {
+            std::vector<Json> existing;
+            existing.reserve(configs.size() + live_configs_.size());
+            for (const auto& row : configs) {
+                auto file = config_files_.read(row["name"].get_ref<const std::string&>());
+                if (file.error.empty()) {
+                    existing.push_back(std::move(file.config));
+                }
+            }
+            for (const auto& [id, running] : live_configs_) {
+                existing.push_back(running);
+            }
+            const auto port = available_waterwall_api_port(existing);
+            if (!port) {
+                return {false, "Could not find an available loopback TCP port in the range 49152–65535."};
+            }
+            config = make_users_starter_config(name, *port);
+            if (config.is_null()) {
+                return {false, "Could not generate credentials for the starter nodes."};
+            }
+            if (auto error = validate_config_graph(config, {}); !error.empty()) {
+                return {false, std::move(error)};
+            }
+            if (auto error = configure_auth_databases(config, {}, name, database_->directory());
+                !error.empty()) {
+                return {false, std::move(error)};
+            }
+            update_config_tabs(changed.back(), config);
+        }
         bool created;
-        if (!config_files_.create(name, false, created)) {
+        if (!config_files_.create(name, false, created, config["nodes"])) {
             return {false, "Could not create the config folder and file."};
         }
+        std::vector<std::string> created_databases;
+        if (auto error = prepare_auth_databases(name, config, created_databases); !error.empty()) {
+            remove_created_auth_databases(name, created_databases);
+            config_files_.remove(name);
+            return {false, std::move(error)};
+        }
         if (!store_configs(changed)) {
+            remove_created_auth_databases(name, created_databases);
             config_files_.remove(name);
             return {false, "Could not save the new config in wave-db.json."};
         }
@@ -856,29 +1060,13 @@ class Preview {
         }
 
         std::vector<std::string> created;
-        const auto rollback = [&] {
-            for (const auto& db : created) {
-                config_users_.remove(name, db);
-            }
-        };
-        for (const auto& node : config["nodes"]) {
-            if (node["type"] != "AuthenticationServer") {
-                continue;
-            }
-            const auto& db = node["panel-settings"]["auth-db"].get_ref<const std::string&>();
-            bool new_file;
-            auto error = config_users_.prepare(name, db, new_file);
-            if (new_file) {
-                created.push_back(db);
-            }
-            if (!error.empty()) {
-                rollback();
-                return {false, std::move(error)};
-            }
+        if (auto error = prepare_auth_databases(name, config, created); !error.empty()) {
+            remove_created_auth_databases(name, created);
+            return {false, std::move(error)};
         }
         auto saved = config_files_.save(name, contents);
         if (!saved) {
-            rollback();
+            remove_created_auth_databases(name, created);
             return {false, "Could not save the config file."};
         }
         update_config_tabs(row, config);
@@ -908,7 +1096,7 @@ class Preview {
             return {false, "Save the node with a database in its config folder before managing its users."};
         }
         auto result = config_users_.execute(action, name, db, input);
-        if (result.success && action != "get_config_users") {
+        if (result.success && workspace_mutation(action)) {
             auto reply = complete(std::move(result.message));
             reply.result = std::move(result.result);
             return reply;
@@ -935,8 +1123,8 @@ class Preview {
             return change_core_config(action, input);
         }
         if (action == "get_core_config" || action == "save_core_config" || action == "get_config_users" ||
-            action == "create_config_user" || action == "edit_config_user" ||
-            action == "delete_config_user") {
+            action == "get_config_user_password" || action == "create_config_user" ||
+            action == "edit_config_user" || action == "delete_config_user") {
             return edit_core_config(action, input);
         }
         if (action == "clear_logs") {
@@ -949,6 +1137,12 @@ class Preview {
         }
         if (action == "apply_session_settings") {
             return apply_session_settings(input);
+        }
+        if (action == "apply_theme") {
+            return apply_theme(input);
+        }
+        if (action == "apply_donation") {
+            return apply_donation(input);
         }
         if (action == "apply_core_settings") {
             return apply_core_settings(input);
@@ -980,6 +1174,7 @@ class Preview {
     std::map<int, Json> live_configs_;
     std::uint64_t live_run_ = 0;
     Json data_ = make_data();
+    std::optional<Donation> donation_;
     int next_config_id_ = 1;
     std::uint64_t revision_ = 1;
     std::jthread sampler_;
