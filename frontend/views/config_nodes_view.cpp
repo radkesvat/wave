@@ -438,7 +438,29 @@ void draw_links(ImDrawList& draw, const State& state, const std::vector<Link>& e
     }
 }
 
-bool draw_graph(State& state, float height)
+void draw_graph_corners(ImDrawList& draw, const ImGuiWindow& pane)
+{
+    const auto bounds = pane.Rect();
+    const float radius =
+        std::min(pane.WindowRounding, std::min(bounds.GetWidth(), bounds.GetHeight()) / 2 - 1);
+    if (radius < 0.5f) {
+        return;
+    }
+
+    // ImGui clips child content to a rectangle. Cover the parts outside the pane's curves.
+    const auto background = packed(Color::canvas);
+    draw.PathLineTo({bounds.Min.x, bounds.Max.y});
+    draw.PathArcToFast({bounds.Min.x + radius, bounds.Max.y - radius}, radius, 6, 3);
+    draw.PathFillConcave(background);
+    draw.PathLineTo({bounds.Max.x, bounds.Max.y});
+    draw.PathArcToFast({bounds.Max.x - radius, bounds.Max.y - radius}, radius, 3, 0);
+    draw.PathFillConcave(background);
+    // The pane border was drawn before the graph.
+    draw.AddRect(bounds.Min, bounds.Max, packed(Color::divider), radius, pane.WindowBorderSize,
+                 ImDrawFlags_RoundBottom);
+}
+
+bool draw_graph(State& state, float height, const ImGuiWindow& pane)
 {
     const auto corner = ImGui::GetCursorScreenPos();
     state.canvas_origin = corner;
@@ -569,8 +591,8 @@ bool draw_graph(State& state, float height)
         draw.AddText({corner.x + (width - size.x) / 2, corner.y + (height - size.y) / 2},
                      packed(Color::secondary_text), message);
     }
+    draw_graph_corners(draw, pane);
     draw.PopClipRect();
-    draw.AddRect(corner, bottom, border);
     return edit;
 }
 
@@ -644,7 +666,9 @@ void open_dialog(State& state, State::Dialog dialog)
 void close_dialog(State& state, bool preserve_error = false)
 {
     ImGui::CloseCurrentPopup();
-    if (state.dialog == State::Dialog::confirm_import) {
+    if (state.dialog == State::Dialog::json || state.dialog == State::Dialog::edit_json) {
+        close_config_json_editor();
+    } else if (state.dialog == State::Dialog::confirm_import) {
         state.import_config = {};
     }
     state.dialog = State::Dialog::none;
@@ -779,7 +803,12 @@ bool apply_node(State& state, bool adding)
 
 bool apply_config_json(State& state)
 {
-    auto [document, needs_confirmation, error] = parse_config_json_import(state.json_text);
+    const auto text = read_config_json_editor_text();
+    if (!text) {
+        state.error = "Wave could not read the JSON editor.";
+        return false;
+    }
+    auto [document, needs_confirmation, error] = parse_config_json_import(*text);
     if (!error.empty()) {
         state.error = std::move(error);
         return false;
@@ -1391,6 +1420,22 @@ void edit_node(State& state, bool adding)
     }
 }
 
+void draw_config_json_editor(const std::string& initial_text, bool read_only)
+{
+    const auto visible = visible_canvas();
+    const auto origin = ImGui::GetCursorScreenPos();
+    const ImVec2 size{std::max(1.0f, ImGui::GetContentRegionAvail().x),
+                      std::clamp(visible.height - 200.0f, 120.0f, 420.0f)};
+    ImGui::Dummy(size);
+    const auto& window_clip = ImGui::GetCurrentWindowRead()->ClipRect;
+    const float left = std::max(visible.left, window_clip.Min.x);
+    const float top = std::max(visible.top, window_clip.Min.y);
+    const float right = std::min(visible.left + visible.width, window_clip.Max.x);
+    const float bottom = std::min(visible.top + visible.height, window_clip.Max.y);
+    show_config_json_editor(initial_text, read_only, {origin.x, origin.y, size.x, size.y},
+                            {left, top, std::max(0.0f, right - left), std::max(0.0f, bottom - top)});
+}
+
 void render_dialog(State& state, PreviewSession& session, bool reload_finished)
 {
     if (state.dialog == State::Dialog::none) {
@@ -1423,8 +1468,7 @@ void render_dialog(State& state, PreviewSession& session, bool reload_finished)
     if (state.dialog == State::Dialog::json) {
         Dialog popup(json_title, 740, {{"Close"}, {"Copy JSON"}});
         if (popup) {
-            ImGui::InputTextMultiline("##saved-json", &state.json_text, {-1, 340},
-                                      ImGuiInputTextFlags_ReadOnly);
+            draw_config_json_editor(state.json_text, true);
             const auto action = popup.footer();
             if (action == 0) {
                 close_dialog(state);
@@ -1437,12 +1481,12 @@ void render_dialog(State& state, PreviewSession& session, bool reload_finished)
     if (state.dialog == State::Dialog::edit_json) {
         bool confirm_import = false;
         {
-            Dialog popup(edit_json_title, 740, {{"Cancel"}, {"Apply nodes", !state.graph_editable}});
+            Dialog popup(edit_json_title, 740,
+                         {{"Cancel"}, {"Apply nodes", !state.graph_editable || !config_json_editor_ready()}});
             if (popup) {
-                wrapped("Paste a config.json or a nodes array. Applying replaces this config’s draft nodes.");
-                ImGui::BeginDisabled(!state.graph_editable);
-                ImGui::InputTextMultiline("##config-json", &state.json_text, {-1, 340});
-                ImGui::EndDisabled();
+                wrapped("Use Text mode to paste a config.json or nodes array. Applying replaces the draft "
+                        "nodes.");
+                draw_config_json_editor(state.json_text, !state.graph_editable);
                 if (!state.error.empty()) {
                     wrapped(state.error, Color::error);
                 }
@@ -1652,12 +1696,26 @@ State::Dialog graph_context_menu(State& state, PreviewSession& session, float wi
 
 void render_graph_pane(State& state, PreviewSession& session, bool active, bool narrow)
 {
-    const float height =
-        std::max((narrow ? 230.f : 280.f) + ImGui::GetFrameHeight(), ImGui::GetContentRegionAvail().y);
+    auto& pane = *ImGui::GetCurrentWindow();
+    const auto previous_content_max = pane.DC.CursorMaxPos;
+    const auto spacing = ImGui::GetStyle().ItemSpacing.y;
+    const auto border = pane.WindowBorderSize;
+    const ImVec2 origin{pane.InnerRect.Min.x + border, ImGui::GetCursorScreenPos().y - spacing};
+    const float width = std::max(1.f, pane.InnerRect.Max.x - border - origin.x);
+    const float height = std::max((narrow ? 230.f : 280.f) + ImGui::GetFrameHeight(),
+                                  pane.InnerRect.Max.y - border - pane.Scroll.y - origin.y);
+
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+    ImGui::PushStyleColor(ImGuiCol_Border, theme::rgba(Color::divider));
+    constexpr auto flags = ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoScrollbar |
+                           ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground;
+    const bool visible =
+        ImGui::BeginChild("Graph pane", {width, height}, ImGuiChildFlags_NavFlattened, flags);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
     auto dialog = State::Dialog::none;
-    constexpr auto flags =
-        ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
-    if (ImGui::BeginChild("Graph pane", {0, height}, ImGuiChildFlags_NavFlattened, flags)) {
+    if (visible) {
         bool fit = false;
         bool unsaved_status_below_menu = false;
         GraphStatus status;
@@ -1710,21 +1768,24 @@ void render_graph_pane(State& state, PreviewSession& session, bool active, bool 
             ImGui::EndMenuBar();
         }
         float add_canvas_top = ImGui::GetCursorScreenPos().y;
+        const float status_inset = pane.WindowPadding.x - border;
         if (unsaved_status_below_menu) {
             // The draft status can take a row above the graph once Add is confirmed.
-            const float wrap_width = ImGui::GetContentRegionAvail().x;
+            const float wrap_width = std::max(1.f, ImGui::GetContentRegionAvail().x - status_inset);
             const float status_height = ImGui::CalcTextSize(unsaved_status, nullptr, false, wrap_width).y;
             add_canvas_top = std::trunc(add_canvas_top + status_height + ImGui::GetStyle().ItemSpacing.y);
         }
         if (!status.message.empty()) {
+            ImGui::Indent(status_inset);
             wrapped(status.message, status.color);
+            ImGui::Unindent(status_inset);
         }
         const auto available = ImGui::GetContentRegionAvail();
         const float canvas_height = std::max(1.f, available.y);
         if (fit) {
             fit_graph(state, available.x, canvas_height);
         }
-        if (draw_graph(state, canvas_height)) {
+        if (draw_graph(state, canvas_height, pane)) {
             dialog = State::Dialog::edit;
         }
         if (state.dialog == State::Dialog::add) {
@@ -1736,6 +1797,12 @@ void render_graph_pane(State& state, PreviewSession& session, bool active, bool 
         }
     }
     ImGui::EndChild();
+    // Drawing into the workspace padding should not add to its scrollable area.
+    const float content_bottom = origin.y + height - std::max(0.f, pane.WindowPadding.y - border);
+    pane.DC.CursorMaxPos.x = std::max(previous_content_max.x, pane.InnerRect.Max.x - pane.WindowPadding.x);
+    pane.DC.CursorMaxPos.y = std::max(previous_content_max.y, content_bottom);
+    pane.DC.CursorPos.y = content_bottom + spacing;
+
     if (dialog != State::Dialog::none) {
         open_dialog(state, dialog);
     }

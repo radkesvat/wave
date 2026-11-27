@@ -12,7 +12,8 @@ See **Panel Controls** there for the WaterWall process state.
 - Emscripten SDK 7.0.1
 - Network access on the first build to fetch Dear ImGui v1.93.0, ImPlot v1.1,
   nlohmann/json v3.12.0,
-  xterm.js 6.0.0, its Fit Addon 0.11.0, and the SDK's SDL2 port.
+  xterm.js 6.0.0, its Fit Addon 0.11.0, vanilla-jsoneditor 3.13.1,
+  lossless-json 4.3.4, and the SDK's SDL2 port.
   [ImPlot release](https://github.com/epezent/implot/releases/tag/v1.1) [xterm.js](https://www.npmjs.com/package/@xterm/xterm/v/6.0.0) [Fit Addon](https://www.npmjs.com/package/@xterm/addon-fit/v/0.11.0)
 
 The SDK supplies the Clang-based `em++` driver and the Emscripten CMake toolchain.
@@ -57,9 +58,9 @@ or configure with `cmake --preset web-debug -DWAVE_ENABLE_UI_DEMOS=ON`.
 Run the native backend to serve either frontend build. Pass
 `--site-dir build/web-debug/site` to use the debug build. [Native backend](#native-backend)
 
-Each preset writes `index.html`, `index.js`, `index.wasm`, the console's
-JavaScript and stylesheet, and third-party license notices to its own
-`site/` directory. Add `--verbose` to a build command
+Each preset writes `index.html`, `index.js`, `index.wasm`, the console and
+JSON editor assets, and third-party license notices to its own `site/`
+directory. Add `--verbose` to a build command
 to show the compile and link commands. When switching SDK versions, add
 `--fresh` to the configure command to reset CMake's cached compiler and toolchain.
 
@@ -442,9 +443,10 @@ skips ports already assigned to conflicting listeners in saved configs.
 #### Nodes and AuthenticationServer users
 
 Select a config in the sidebar and open the **Nodes** tab. Use the graph's
-**Nodes** menu to add, edit, or delete WaterWall 1.6.0 nodes. New nodes appear
-at the center of the visible graph at the current pan and zoom. Right-click
-the graph for **Add node**, **Save**, and **Fit graph**. Right-click a node
+**Nodes** menu to add, edit, or delete WaterWall 1.6.0 nodes. The graph fills
+the workspace below the toolbar and follows its rounded bottom corners.
+New nodes appear at the center of the visible graph at the current pan and
+zoom. Right-click the graph for **Add node**, **Save**, and **Fit graph**. Right-click a node
 for its **Edit node** and **Delete node** actions. Drag nodes to move them and
 use the connection ports or the next node selector to link them. Double-click
 a node card to open its editor. The graph labels links
@@ -463,14 +465,21 @@ a chain. Unconnected adapters show both ports so you can attach either side.
 Roll the mouse wheel up to zoom in around the pointer and down to zoom out.
 Use **View** to zoom or fit the graph. Select **Save** at the start of the
 menu bar to write `config.json`. Choose **Config → View saved JSON** to see
-the saved file. Wave writes coordinates and each node's custom JSON
-preference into its `panel-settings` object. WaterWall ignores that object.
+the saved configuration in read-only **Text** mode. Select formatted JSON
+directly, or use **Copy JSON** to copy the full saved configuration.
+Wave writes coordinates and each node's custom JSON preference into its
+`panel-settings` object. WaterWall ignores that object.
 
-Use **Config → Edit JSON** to edit the current draft or paste an existing `config.json`
-or a JSON array of nodes. **Apply nodes** replaces the draft's nodes and keeps
-the destination config's top-level settings. Review the graph, then select
-**Save**. For imported AuthenticationServer nodes, Wave keeps any existing
-local user database and assigns a local database path to each new node.
+Use **Config → Edit JSON** to edit the current draft in **Text**, which also
+accepts a pasted `config.json` or JSON array of nodes. Both dialogs offer
+**Level 2**, **Level 3**, and **Level 4** in **Text** and **Tree** to fold
+containers at the chosen depth, counting the root as level 1. Press
+**Ctrl+Shift+Space** to move keyboard focus between the JSON editor and the
+dialog controls. **Apply nodes**
+replaces the draft's nodes and keeps the destination config's top-level
+settings. Review the graph, then select **Save**. For imported AuthenticationServer
+nodes, Wave keeps any existing local user database and assigns a local database
+path to each new node.
 
 Pasted configs with WaterWall variables, `//` comments, or top-level `commits`
 metadata require confirmation. **Resolve and save** replaces unquoted `$name$`

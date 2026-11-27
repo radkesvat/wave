@@ -32,6 +32,36 @@ configure_file("${xterm_fit_SOURCE_DIR}/lib/addon-fit.mjs" "${CMAKE_BINARY_DIR}/
 configure_file("${xterm_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/site/licenses/xterm.txt" COPYONLY)
 configure_file("${xterm_fit_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/site/licenses/xterm-addon-fit.txt" COPYONLY)
 
+# Local browser bundles for the config JSON editor and its precision-preserving parser.
+FetchContent_Declare(vanilla_jsoneditor
+    URL https://registry.npmjs.org/vanilla-jsoneditor/-/vanilla-jsoneditor-3.13.1.tgz
+    URL_HASH SHA256=342ae9cdf66ca505559ee0ce01451f0aa9851abe9c621bfd37b0a45e6ca84f84
+)
+FetchContent_Declare(lossless_json
+    URL https://registry.npmjs.org/lossless-json/-/lossless-json-4.3.4.tgz
+    URL_HASH SHA256=fbd483fdbb243aae96fd8e3a47ca6efa060ca67ec9aa5595d99a4ce25203805c
+)
+FetchContent_MakeAvailable(vanilla_jsoneditor lossless_json)
+configure_file(json-editor.js "${CMAKE_BINARY_DIR}/site/json-editor.js" COPYONLY)
+# These aliases belong to the pinned 3.13.1 standalone bundle. Text folding needs
+# the CodeMirror effects from the same instance as the editor.
+file(READ "${vanilla_jsoneditor_SOURCE_DIR}/standalone.js" wave_vanilla_jsoneditor_bundle)
+file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/site/json-editor/vanilla-jsoneditor.js" CONTENT [=[
+@wave_vanilla_jsoneditor_bundle@
+export { DG as EditorView, mX as ensureSyntaxTree, WX as foldNodeProp, HX as foldEffect,
+         JX as unfoldEffect, GX as foldState };
+]=] @ONLY)
+configure_file("${vanilla_jsoneditor_SOURCE_DIR}/themes/jse-theme-dark.css"
+    "${CMAKE_BINARY_DIR}/site/json-editor/jse-theme-dark.css" COPYONLY)
+configure_file("${lossless_json_SOURCE_DIR}/lib/umd/lossless-json.js"
+    "${CMAKE_BINARY_DIR}/site/json-editor/lossless-json.js" COPYONLY)
+configure_file("${vanilla_jsoneditor_SOURCE_DIR}/LICENSE.md"
+    "${CMAKE_BINARY_DIR}/site/licenses/vanilla-jsoneditor.txt" COPYONLY)
+configure_file("${PROJECT_SOURCE_DIR}/doc/licenses/vanilla-jsoneditor-third-party.txt"
+    "${CMAKE_BINARY_DIR}/site/licenses/vanilla-jsoneditor-third-party.txt" COPYONLY)
+configure_file("${lossless_json_SOURCE_DIR}/LICENSE.md"
+    "${CMAKE_BINARY_DIR}/site/licenses/lossless-json.txt" COPYONLY)
+
 set(WAVE_STARTUP_CANVAS 080C10)
 set(WAVE_STARTUP_TEXT EAEBFF)
 set(wave_shell "${CMAKE_CURRENT_BINARY_DIR}/shell.html")

@@ -123,6 +123,24 @@
         overflow: hidden;
       }
 
+      #wave-json-editor {
+        position: absolute;
+        overflow: hidden;
+        box-sizing: border-box;
+        background: var(--jse-background-color);
+        overscroll-behavior: contain;
+      }
+
+      #wave-json-editor-status { padding: .5rem; }
+      #wave-json-editor-mount { height: 100%; }
+
+      #wave-json-editor .wave-json-fold-level {
+        width: auto;
+        min-width: 3.75rem;
+        margin-inline: 3px;
+        white-space: nowrap;
+      }
+
       .startup-message {
         position: absolute;
         inset: 0;
@@ -159,6 +177,9 @@
         </div>
         <div id="wave-console-terminal"></div>
       </section>
+      <section id="wave-json-editor" tabindex="-1" aria-keyshortcuts="Control+Shift+Space" hidden>
+        <div id="wave-json-editor-status" role="status">Loading JSON editor…</div>
+      </section>
     </main>
     <script>
       var Module = (() => {
@@ -172,6 +193,8 @@
         const configTabs = document.getElementById("config-tabs");
         const textInput = document.getElementById("wave-text-input");
         const terminalPanel = document.getElementById("wave-console");
+        const jsonEditorPanel = document.getElementById("wave-json-editor");
+        const jsonEditorStatus = document.getElementById("wave-json-editor-status");
         const themeColor = document.querySelector('meta[name="theme-color"]');
         const pageLinks = new Map();
         const headerControlIds = new Map();
@@ -183,6 +206,9 @@
         let consolePosition = "";
         let consoleLoading;
         let consoleView;
+        let jsonEditorModule;
+        let jsonEditorSession;
+        let jsonEditorPosition = "";
         let appearance;
         startup.hidden = false;
 
@@ -366,6 +392,7 @@
             textInput.value = "";
             return;
           }
+          if (!jsonEditorPanel.hidden) return;
           const bounds = canvas.getBoundingClientRect();
           textInput.style.left = Math.max(0, Math.min(innerWidth - 2, bounds.left + x)) + "px";
           textInput.style.top = Math.max(0, Math.min(innerHeight - 2, bounds.top + y)) + "px";
@@ -480,6 +507,22 @@
             terminalPanel.style.setProperty(property, color);
           }
           consoleView?.setAppearance(palette);
+
+          jsonEditorPanel.classList.toggle("jse-theme-dark", !palette.light);
+          const jsonEditorColors = {
+            "--jse-background-color": palette.terminal,
+            "--jse-text-color": palette.primaryText,
+            "--jse-menu-color": palette.primaryText,
+            "--jse-theme-color": palette.toolbar,
+            "--jse-theme-color-highlight": palette.buttonHover,
+            "--jse-panel-background": palette.toolbar,
+            "--jse-main-border": `1px solid ${palette.highContrast ? palette.controlBorder : palette.divider}`,
+            "--jse-edit-outline": `2px solid ${palette.focus}`
+          };
+          for (const [property, color] of Object.entries(jsonEditorColors)) {
+            jsonEditorPanel.style.setProperty(property, color);
+          }
+          jsonEditorSession?.view?.refresh();
         }
 
         function updateConsole(active, x, y, width, height) {
@@ -503,12 +546,103 @@
           });
         }
 
+        function closeConfigJsonEditor() {
+          const session = jsonEditorSession;
+          if (!session) return;
+          const hadFocus = jsonEditorPanel.contains(document.activeElement);
+          jsonEditorSession = undefined;
+          jsonEditorPanel.hidden = true;
+          session.view?.destroy();
+          session.target.remove();
+          if (hadFocus) canvas.focus({ preventScroll: true });
+        }
+
+        function openConfigJsonEditor(text, readOnly) {
+          closeConfigJsonEditor();
+          const label = readOnly ? "Saved configuration JSON" : "Edit configuration JSON";
+          const target = document.createElement("div");
+          target.id = "wave-json-editor-mount";
+          const session = { target, readOnly: Boolean(readOnly) };
+          jsonEditorSession = session;
+          jsonEditorPanel.setAttribute("aria-label", label);
+          jsonEditorPanel.append(target);
+          jsonEditorStatus.textContent = "Loading JSON editor…";
+          jsonEditorStatus.hidden = false;
+          setTextInput(false);
+
+          jsonEditorModule ??= import("./json-editor.js");
+          jsonEditorModule.then(({ createConfigJsonEditor }) => {
+            if (jsonEditorSession !== session) return;
+            session.view = createConfigJsonEditor(target, text, session.readOnly, label);
+            jsonEditorStatus.hidden = true;
+            if (!jsonEditorPanel.hidden && document.activeElement === canvas) session.view.focus();
+          }).catch(() => {
+            if (jsonEditorSession === session) {
+              jsonEditorStatus.textContent = "Could not load the JSON editor. Reload Wave to retry.";
+            }
+          });
+        }
+
+        function positionConfigJsonEditor(left, top, width, height, clipLeft, clipTop, clipRight, clipBottom, readOnly) {
+          const session = jsonEditorSession;
+          if (!session) return false;
+          readOnly = Boolean(readOnly);
+          if (session.readOnly !== readOnly) {
+            session.readOnly = readOnly;
+            session.view?.setReadOnly(readOnly);
+          }
+          const right = left + width;
+          const bottom = top + height;
+          const visible = Math.min(right, clipRight) > Math.max(left, clipLeft) &&
+              Math.min(bottom, clipBottom) > Math.max(top, clipTop);
+          if (jsonEditorPanel.hidden === visible) {
+            if (!visible && jsonEditorPanel.contains(document.activeElement)) canvas.focus({ preventScroll: true });
+            jsonEditorPanel.hidden = !visible;
+          }
+          if (visible) {
+            const clip = [clipTop - top, right - clipRight, bottom - clipBottom, clipLeft - left]
+              .map(length => Math.max(0, length));
+            const position = `${left},${top},${width},${height},${clip}`;
+            if (position !== jsonEditorPosition) {
+              Object.assign(jsonEditorPanel.style, {
+                left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px`,
+                clipPath: clip.some(Boolean) ? `inset(${clip.map(length => `${length}px`).join(" ")})` : "none"
+              });
+              jsonEditorPosition = position;
+            }
+          }
+          return Boolean(session.view);
+        }
+
+        function configJsonEditorText() {
+          try {
+            return jsonEditorSession?.view?.getText() ?? null;
+          } catch {
+            return null;
+          }
+        }
+
+        document.addEventListener("keydown", event => {
+          if (jsonEditorPanel.hidden || !event.ctrlKey || !event.shiftKey ||
+              event.altKey || event.metaKey || event.code !== "Space") return;
+          if (jsonEditorPanel.contains(document.activeElement)) {
+            canvas.focus({ preventScroll: true });
+          } else if (document.activeElement === canvas && jsonEditorSession?.view) {
+            jsonEditorSession.view.focus();
+          } else {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+        }, { capture: true });
+
         window.addEventListener("error", showStartupError, true);
         window.addEventListener("unhandledrejection", showStartupError);
         return {
           basePath, canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
           updateConfigLinks, updateConfigTabs,
           panelFocus, setTextInput, installTextInput, copyText, applyAppearance, updateConsole,
+          openConfigJsonEditor, positionConfigJsonEditor, configJsonEditorText, closeConfigJsonEditor,
           onAbort: showStartupError
         };
       })();

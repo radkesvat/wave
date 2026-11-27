@@ -29,6 +29,10 @@ before(async () => {
         ['/index.js', 'index.js', 'text/javascript; charset=utf-8'],
         ['/index.wasm', 'index.wasm', 'application/wasm'],
         ['/console.js', 'console.js', 'text/javascript; charset=utf-8'],
+        ['/json-editor.js', 'json-editor.js', 'text/javascript; charset=utf-8'],
+        ['/json-editor/vanilla-jsoneditor.js', 'json-editor/vanilla-jsoneditor.js', 'text/javascript; charset=utf-8'],
+        ['/json-editor/lossless-json.js', 'json-editor/lossless-json.js', 'text/javascript; charset=utf-8'],
+        ['/json-editor/jse-theme-dark.css', 'json-editor/jse-theme-dark.css', 'text/css; charset=utf-8'],
         ['/terminal/xterm.js', 'terminal/xterm.js', 'text/javascript; charset=utf-8'],
         ['/terminal/addon-fit.js', 'terminal/addon-fit.js', 'text/javascript; charset=utf-8'],
         ['/terminal/xterm.css', 'terminal/xterm.css', 'text/css; charset=utf-8'],
@@ -121,7 +125,7 @@ async function mockPreview(page, data, gate = Promise.resolve()) {
                 }
                 send({ action: request.action, request_id: request.request_id, ok, feedback, result, feedback_in_logs_only });
             };
-            actions.push({ request, reply });
+            actions.push({ request, raw, reply });
             events.emit('action');
         });
         await gate;
@@ -372,30 +376,51 @@ async function tlsApplyRow(page, afterFields) {
     return Math.floor((row[0] + row[1]) / 2);
 }
 
+async function graphToolbar(page, x = 600, top = 100, bottom = 180) {
+    const [row] = await verticalRuns(page, x, top, bottom, [26, 23, 28], 18);
+    assert.ok(row, 'Expected the Nodes toolbar.');
+    return row;
+}
+
 async function saveGraphChanges(page) {
-    await click(page, 224, 137);
+    const [top, bottom] = await graphToolbar(page);
+    await click(page, 214, (top + bottom) / 2);
 }
 
 async function graphMenuItem(page, menu, row) {
-    const x = { nodes: 279, config: 335, view: 385 }[menu];
-    await click(page, x, 137);
-    await click(page, x, 169 + row * 23);
+    const x = { nodes: 269, config: 325, view: 375 }[menu];
+    const [top, bottom] = await graphToolbar(page);
+    await click(page, x, (top + bottom) / 2);
+    await click(page, x, bottom + 18 + row * 23);
 }
 
-async function graphCanvasTop(page, x = 600, top = 155, bottom = 320) {
+async function graphCanvasBounds(page, x = 600, top = 100, bottom = 320) {
     const deadline = Date.now() + timeout;
     do {
-        const [border] = await verticalRuns(page, x, top, bottom, [138, 132, 149]);
-        if (border) return border[0];
+        const bounds = await page.evaluate(({ x, top, bottom }) => {
+            const canvas = document.getElementById('canvas').getBoundingClientRect();
+            // A zero-step wheel zoom checks the hit area without moving the camera.
+            const overGraph = (x, y) => Module['_wave_zoom_node_graph'](x - canvas.left, y - canvas.top, 0);
+            let graphTop = top;
+            while (graphTop < bottom && !overGraph(x, graphTop)) graphTop++;
+            if (graphTop === bottom) return null;
+
+            let left = x;
+            let right = x;
+            let graphBottom = graphTop;
+            while (overGraph(left - 1, graphTop)) left--;
+            while (overGraph(right, graphTop)) right++;
+            while (graphBottom < innerHeight && overGraph(x, graphBottom)) graphBottom++;
+            return { left, top: graphTop, right, bottom: graphBottom };
+        }, { x, top, bottom });
+        if (bounds) return bounds;
         await settleCanvas(page);
     } while (Date.now() < deadline);
-    assert.fail('Expected the top edge of the graph canvas.');
+    assert.fail('Expected the graph canvas.');
 }
 
-async function desktopGraphBounds(page) {
-    const [topEdge, bottomEdge] = await verticalRuns(page, 600, 155, 600, [138, 132, 149]);
-    assert.ok(topEdge && bottomEdge, 'Expected both edges of the graph canvas.');
-    return { left: 199, top: topEdge[0], right: desktop.width - 21, bottom: bottomEdge[1] };
+async function graphCanvasTop(page, x, top, bottom) {
+    return (await graphCanvasBounds(page, x, top, bottom)).top;
 }
 
 function graphCenter({ left, top, right, bottom }) {
@@ -410,14 +435,17 @@ function assertNodePosition(position, { x, y }) {
 async function openConfigJsonEditor(page) {
     await graphMenuItem(page, 'config', 0);
     await status(page, /Edit configuration JSON\./);
+    await page.locator('#wave-json-editor .cm-content').waitFor({ timeout });
 }
 
 async function selectConfigJsonText(page) {
-    const { top, bottom } = await dialogFrame(page);
-    await click(page, 640, Math.floor((top + bottom) / 2));
-    await page.locator('#wave-text-input').waitFor({ state: 'visible', timeout });
+    const editor = page.locator('#wave-json-editor');
+    const text = editor.locator('.cm-content');
+    if (!await text.isVisible()) {
+        await editor.getByRole('button', { name: 'text', exact: true }).click({ timeout });
+    }
+    await text.click({ timeout });
     await page.keyboard.press('Control+a');
-    await settleCanvas(page);
 }
 
 async function pasteConfigJson(page, value) {
@@ -1830,7 +1858,7 @@ test('uses the sidebar and creates, toggles, and deletes a config on touch', asy
         assertRequest(loaded.request, { action: 'get_core_config', id: 2 });
         loaded.reply({ result: { config: { name: 'Lab', nodes: [] }, revision: 'loaded', editable: true } });
         await status(page, /^Wave Config Lab\..*0 nodes\./);
-        const canvasTop = () => graphCanvasTop(page, 180, 376 + donationSlotHeight, 475 + donationSlotHeight);
+        const canvasTop = () => graphCanvasTop(page, 180, 345 + donationSlotHeight, 475 + donationSlotHeight);
         const initialCanvasTop = await canvasTop();
 
         const toggleStates = [true, false, true];
@@ -1963,6 +1991,25 @@ test('edits a WaterWall node graph and reopens the saved JSON', async () => {
         loaded.reply({ result: { config, revision: 'loaded', editable: true } });
         await status(page, /Wave Config Lab graph. Nodes tab. Nodes. 1 node\./);
 
+        const canvas = await graphCanvasBounds(page);
+        assert.equal(canvas.left, 189, 'The graph starts immediately inside the left pane border.');
+        assert.equal(canvas.right, desktop.width - 11, 'The graph reaches the right pane border.');
+        assert.equal(canvas.bottom, desktop.height - 221, 'The graph reaches the bottom pane border.');
+        const [toolbarTop] = await graphToolbar(page);
+        for (const x of [canvas.left + 1, canvas.right - 2]) {
+            assert.ok(await rectangleContainsColor(page, { x, y: toolbarTop + 3, width: 1, height: 5 },
+                [26, 23, 28]), 'The toolbar reaches both pane edges.');
+            assert.ok(await rectangleContainsColor(page, { x, y: canvas.top + 40, width: 1, height: 56 },
+                [61, 58, 67]), 'The grid reaches both pane edges.');
+        }
+        assert.ok(await rectangleContainsColor(page, {
+            x: 600, y: canvas.bottom - 2, width: 28, height: 1,
+        }, [61, 58, 67]), 'The grid reaches the pane bottom.');
+        for (const x of [canvas.left, canvas.right - 2]) {
+            assert.equal(await rectangleColorCount(page, { x, y: canvas.bottom - 1, width: 2, height: 2 },
+                [8, 12, 16]), 4, 'The grid and outline curve away from the pane corners.');
+        }
+
         await saveGraphChanges(page);
         assert.equal(preview.actions.length, 1, 'Save stays idle while the graph is clean.');
         assert.ok(await graphTop() < 195, 'The compact menu leaves room for the graph.');
@@ -1987,7 +2034,6 @@ test('edits a WaterWall node graph and reopens the saved JSON', async () => {
         assert.equal(nodeHeight(await nodeSpan()), originalHeight);
         assert.equal(preview.actions.length, 1, 'Zooming does not send configuration changes.');
 
-        const canvas = await desktopGraphBounds(page);
         const center = graphCenter(canvas);
         await menuItem('nodes', 0);
         await status(page, /Add node\./);
@@ -2025,7 +2071,7 @@ test('edits a WaterWall node graph and reopens the saved JSON', async () => {
         await page.mouse.up();
         await settleCanvas(page);
         await status(page, /Selected inlet. Type TcpListener/);
-        await click(page, 437, canvasTop + 93);
+        await click(page, canvas.left + 26 + 148 + 64, canvasTop + 93);
         await click(page, center.x, center.y);
         await status(page, /Selected inlet. Type TcpListener. Next discard\./);
 
@@ -2101,7 +2147,8 @@ test('edits a WaterWall node graph and reopens the saved JSON', async () => {
         const branchTop = await graphTop();
         await click(page, 530, branchTop + 52);
         await status(page, /Selected splitter\. Type PacketSplitStream\..*Up uplink\..*Down downlink\./);
-        const branchArrow = await verticalRuns(page, 894, branchTop + 145, branchTop + 210, [255, 195, 106]);
+        const branchArrow = await verticalRuns(page, canvas.left + 695, branchTop + 145, branchTop + 210,
+            [255, 195, 106]);
         assert.ok(branchArrow.length, 'The graph draws a split branch into the downlink.');
 
         await click(page, 930, branchTop + 76);
@@ -2132,10 +2179,116 @@ test('edits a WaterWall node graph and reopens the saved JSON', async () => {
 
         await menuItem('config', 1);
         await status(page, /Saved configuration JSON\./);
+        const viewer = page.locator('#wave-json-editor');
+        const text = viewer.locator('.cm-content');
+        const level2 = viewer.getByRole('button', { name: 'Level 2', exact: true });
+        const level3 = viewer.getByRole('button', { name: 'Level 3', exact: true });
+        const level4 = viewer.getByRole('button', { name: 'Level 4', exact: true });
+        const nodesLine = text.locator('.cm-line').filter({ hasText: /^\s*"nodes": \[/ });
+        const nodesFold = nodesLine.locator('.cm-foldPlaceholder');
+        const inletLine = text.locator('.cm-line').filter({ hasText: /^\s*"name": "inlet"/ });
+        const settingsFold = text.locator('.cm-line:has(.cm-foldPlaceholder)')
+            .filter({ hasText: /^\s*"settings": \{/ }).first();
+        await text.waitFor({ timeout });
+        const foldButtons = await Promise.all([level2, level3, level4].map(button => button.boundingBox({ timeout })));
+        assert.ok(foldButtons.every(box => box && box.width >= 60), 'Fold buttons have wider click targets.');
+        for (let index = 1; index < foldButtons.length; index++) {
+            const previous = foldButtons[index - 1];
+            assert.ok(foldButtons[index].x - (previous.x + previous.width) >= 6,
+                'Adjacent fold buttons leave at least six pixels between them.');
+        }
+        await level2.click({ timeout });
+        await nodesFold.waitFor({ timeout });
+        await level3.click({ timeout });
+        await nodesLine.waitFor({ timeout });
+        await nodesFold.waitFor({ state: 'hidden', timeout });
+        await text.locator('.cm-line:has(.cm-foldPlaceholder)')
+            .filter({ hasText: /^\s*\{/ }).first().waitFor({ timeout });
+        await inletLine.waitFor({ state: 'hidden', timeout });
+        await level4.click({ timeout });
+        await inletLine.waitFor({ timeout });
+        await settingsFold.waitFor({ timeout });
+        await level2.click({ timeout });
+        await nodesFold.waitFor({ timeout });
+
         await page.evaluate(() => navigator.clipboard.writeText(''));
         await confirmDialog(page, activate, 740);
         await page.waitForFunction(async () => (await navigator.clipboard.readText()).length > 0);
         assert.deepEqual(JSON.parse(await page.evaluate(() => navigator.clipboard.readText())), document);
+
+        await viewer.getByRole('button', { name: 'tree', exact: true }).click({ timeout });
+        const inletValue = viewer.locator('.jse-value').getByText('inlet', { exact: true });
+        const nodesArray = viewer.locator('.jse-json-node[data-path="%2Fnodes"]');
+        const firstNode = viewer.locator('.jse-json-node[data-path="%2Fnodes%2F0"]');
+        const firstNodeSettings = viewer.locator('.jse-json-node[data-path="%2Fnodes%2F0%2Fsettings"]');
+        await level2.click({ timeout });
+        await nodesArray.waitFor({ timeout });
+        assert.doesNotMatch(await nodesArray.getAttribute('class'), /\bjse-expanded\b/);
+        await level3.click({ timeout });
+        await firstNode.waitFor({ timeout });
+        assert.match(await nodesArray.getAttribute('class'), /\bjse-expanded\b/);
+        assert.doesNotMatch(await firstNode.getAttribute('class'), /\bjse-expanded\b/);
+        await level4.click({ timeout });
+        await firstNodeSettings.waitFor({ timeout });
+        assert.match(await firstNode.getAttribute('class'), /\bjse-expanded\b/);
+        assert.doesNotMatch(await firstNodeSettings.getAttribute('class'), /\bjse-expanded\b/);
+        await level2.click({ timeout });
+        await firstNode.waitFor({ state: 'hidden', timeout });
+        await viewer.getByTitle('Expand all', { exact: true }).click({ timeout });
+        await inletValue.dblclick({ timeout });
+        assert.equal(await viewer.getByRole('textbox', { name: 'Edit value', exact: true }).count(), 0,
+            'Tree mode displays saved values without allowing edits.');
+
+        await page.evaluate(() => navigator.clipboard.writeText(''));
+        await selectConfigJsonText(page);
+        assert.equal(await viewer.locator('.cm-content').isEditable(), false, 'The saved text is read-only.');
+        await page.keyboard.press('Control+c');
+        await page.waitForFunction(async () => (await navigator.clipboard.readText()).length > 0);
+        assert.deepEqual(JSON.parse(await page.evaluate(() => navigator.clipboard.readText())), document,
+            'Text mode makes the full saved JSON selectable.');
+    } finally {
+        await page.close();
+    }
+});
+
+test('edits config values in the JSON tree without rounding large integers', async () => {
+    const page = await browser.newPage({ viewport: desktop, permissions: ['clipboard-read', 'clipboard-write'] });
+    const data = fixture('stopped');
+    const config = { name: 'JSON editor fixture', nodes: [{ name: 'before', type: 'BlackHole' }] };
+    data.server.core.configs = [{ id: 7, name: config.name, enabled: false, active: false }];
+    const preview = await mockPreview(page, data);
+    const editor = page.locator('#wave-json-editor');
+    try {
+        await page.goto(url);
+        await page.getByRole('link', { name: config.name, exact: true }).focus();
+        await page.keyboard.press('Enter');
+        const loaded = await preview.action(0);
+        loaded.reply({ result: { config, revision: 'loaded', editable: true } });
+        await status(page, /Nodes tab\. Nodes\. 1 node\./);
+
+        await openConfigJsonEditor(page);
+        await page.evaluate(() => navigator.clipboard.writeText(
+            '[{"name":"before","type":"BlackHole","settings":{"bytes":18446744073709551615}}]'));
+        await selectConfigJsonText(page);
+        await page.keyboard.press('Control+v');
+        await editor.locator('.cm-content').getByText('18446744073709551615', { exact: true }).waitFor({ timeout });
+        await editor.getByRole('button', { name: 'tree', exact: true }).click({ timeout });
+        await editor.locator('.jse-value').getByText('before', { exact: true }).dblclick({ timeout });
+        const value = editor.getByRole('textbox', { name: 'Edit value', exact: true });
+        await value.fill('after', { timeout });
+        await value.press('Enter', { timeout });
+        await editor.getByText('after', { exact: true }).waitFor({ timeout });
+        await confirmDialog(page, (x, y) => click(page, x, y), 740);
+        await editor.waitFor({ state: 'hidden', timeout });
+        await status(page, /1 node\..*Unsaved changes\./);
+        assert.equal(preview.actions.length, 1, 'Applying the tree edit updates the draft.');
+
+        await saveGraphChanges(page);
+        const saved = await preview.action(1);
+        assert.equal(saved.request.action, 'save_core_config');
+        assert.equal(saved.request.config.nodes[0].name, 'after');
+        assert.match(saved.raw, /"bytes":18446744073709551615[,}]/,
+            'The original unsigned 64-bit integer survives Text to Tree, Apply nodes, and Save.');
     } finally {
         await page.close();
     }
@@ -2166,7 +2319,7 @@ test('uses the graph context menu and centers new nodes after panning and zoomin
         assertRequest(loaded.request, { action: 'get_core_config', id: 17 });
         loaded.reply({ result: { config, revision: 'loaded', editable: true } });
         await status(page, /Wave Config Menu fixture\. Nodes tab\. Nodes\. 1 node\./);
-        const canvas = await desktopGraphBounds(page);
+        const canvas = await graphCanvasBounds(page);
         const center = graphCenter(canvas);
         await page.evaluate(() => {
             document.addEventListener('contextmenu', event => {
@@ -2265,7 +2418,14 @@ test('centers a new node in the visible compact graph after the draft status app
     const config = { name: 'Compact graph', nodes: [] };
     data.server.core.configs = [{ id: 18, name: config.name, enabled: false, active: false }];
     const preview = await mockPreview(page, data);
-    const graphTop = () => graphCanvasTop(page, 58, 345 + donationSlotHeight, 430 + donationSlotHeight);
+    const graphLeft = 11;
+    const graphTop = async () => {
+        // The header menu can still block hit testing while the sidebar link has focus.
+        const [grid] = await verticalRuns(page, graphLeft, 320 + donationSlotHeight, 430 + donationSlotHeight,
+            [61, 58, 67], 18);
+        assert.ok(grid, 'Expected the grid at the left edge of the compact pane.');
+        return grid[0];
+    };
     try {
         await page.goto(url);
         await page.locator('#menu').focus();
@@ -2302,10 +2462,12 @@ test('centers a new node in the visible compact graph after the draft status app
         assert.ok(Math.abs(cardCenterY - centerY) <= 1,
             `Expected the card center at y=${centerY}, got y=${cardCenterY}.`);
 
-        await click(page, 47, 327 + donationSlotHeight);
+        const [toolbarTop, toolbarBottom] = await graphToolbar(page, 300, 285 + donationSlotHeight,
+            375 + donationSlotHeight);
+        await click(page, graphLeft + 25, (toolbarTop + toolbarBottom) / 2);
         const saved = await preview.action(1);
         const position = saved.request.config.nodes[0]['panel-settings'];
-        assertNodePosition(position, { x: viewport.width / 2 - 21 - 74, y: centerY - top - 29 });
+        assertNodePosition(position, { x: viewport.width / 2 - graphLeft - 74, y: centerY - top - 29 });
         assertRequest(saved.request, { action: 'save_core_config', id: 18, revision: 'loaded', config: {
             ...config, nodes: [{ name: 'Compact center', type: 'BlackHole', settings: {}, 'panel-settings': position }],
         } });
@@ -2431,6 +2593,7 @@ test('reviews a WaterWall import with variables or comments before saving', asyn
         await pasteConfigJson(page, '[// Fixture comment\n{"name":"discarded-a","type":"BlackHole"},'
             + '{"name":"discarded-b","type":"BlackHole"}]');
         await status(page, review);
+        await page.locator('#wave-json-editor').waitFor({ state: 'hidden', timeout });
         assert.equal(preview.actions.length, 1, 'The review does not save the import.');
         await activate(683, (await dialogFrame(page)).bottom - 25);
         await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
@@ -2466,7 +2629,8 @@ test('reviews a WaterWall import with variables or comments before saving', asyn
             ],
         };
         assertRequest(saved.request, { action: 'save_core_config', id: 8, revision: 'before-import', config: document });
-        await status(page, /Wave Config Import fixture\..*1 node\./);
+        await status(page, /Wave Config Import fixture\..*1 node\..*Operation in progress\./);
+        await page.locator('#wave-json-editor').waitFor({ state: 'hidden', timeout });
         saved.reply({ feedback: 'Saved Import fixture.', feedback_in_logs_only: true,
             result: { config: document, revision: 'after-import', editable: true } });
         await status(page, /Wave Config Import fixture\..*2 nodes\..*Latest log: Saved Import fixture\./);
@@ -2487,7 +2651,7 @@ test('shows only the connected side of each packet adapter and both sides before
     const config = { name: 'Port fixture', nodes };
     data.server.core.configs = [{ id: 9, name: config.name, enabled: false, active: false }];
     const preview = await mockPreview(page, data);
-    const graphLeft = 199;
+    const graphLeft = 189;
     const cardWidth = 148;
     const ports = async (node, top, expected) => {
         const { x, y } = node['panel-settings'];

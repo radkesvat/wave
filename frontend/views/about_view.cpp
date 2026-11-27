@@ -315,6 +315,10 @@ void render_about(AboutViewState& state, PreviewSession& session, std::string_vi
     ImGui::TextLinkOpenURL("ImPlot (MIT)", "/licenses/implot.txt");
     ImGui::TextLinkOpenURL("xterm.js (MIT)", "/licenses/xterm.txt");
     ImGui::TextLinkOpenURL("xterm.js Fit addon (MIT)", "/licenses/xterm-addon-fit.txt");
+    ImGui::TextLinkOpenURL("vanilla-jsoneditor (ISC)", "/licenses/vanilla-jsoneditor.txt");
+    ImGui::TextLinkOpenURL("vanilla-jsoneditor third-party notices",
+                           "/licenses/vanilla-jsoneditor-third-party.txt");
+    ImGui::TextLinkOpenURL("lossless-json (MIT)", "/licenses/lossless-json.txt");
 }
 
 std::string describe_about(const AboutViewState& state, const PreviewSession& session)

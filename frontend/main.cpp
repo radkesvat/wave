@@ -1,3 +1,4 @@
+#include "browser_ui.h"
 #include "dialog.h"
 #include "panel.h"
 #include "preview_session.h"
@@ -405,6 +406,7 @@ struct Application {
         read_browser_viewport(&browser_viewport.x, &browser_viewport.y);
         const int viewport_width = static_cast<int>(browser_viewport.x);
         if (!fit_canvas(viewport_width)) {
+            wave::finish_config_json_editor_frame();
             return;
         }
 
@@ -423,6 +425,7 @@ struct Application {
         ImGui::NewFrame();
         const auto previous_preset = panel.appearance.preset;
         wave::render_panel(panel, session, browser_viewport, browser_panel_focus());
+        wave::finish_config_json_editor_frame();
         if (panel.appearance.preset != previous_preset) {
             theme_choice = panel.appearance.preset;
         }

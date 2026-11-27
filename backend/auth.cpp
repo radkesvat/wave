@@ -41,6 +41,10 @@ constexpr SiteAsset site_assets[] = {
     {"/terminal/xterm.js", "text/javascript; charset=utf-8"},
     {"/terminal/addon-fit.js", "text/javascript; charset=utf-8"},
     {"/terminal/xterm.css", "text/css; charset=utf-8"},
+    {"/json-editor.js", "text/javascript; charset=utf-8"},
+    {"/json-editor/vanilla-jsoneditor.js", "text/javascript; charset=utf-8"},
+    {"/json-editor/jse-theme-dark.css", "text/css; charset=utf-8"},
+    {"/json-editor/lossless-json.js", "text/javascript; charset=utf-8"},
     {"/licenses/wave.txt", "text/plain; charset=utf-8"},
     {"/licenses/dear-imgui.txt", "text/plain; charset=utf-8"},
     {"/licenses/poppins.txt", "text/plain; charset=utf-8"},
@@ -49,6 +53,9 @@ constexpr SiteAsset site_assets[] = {
     {"/licenses/implot.txt", "text/plain; charset=utf-8"},
     {"/licenses/xterm.txt", "text/plain; charset=utf-8"},
     {"/licenses/xterm-addon-fit.txt", "text/plain; charset=utf-8"},
+    {"/licenses/vanilla-jsoneditor.txt", "text/plain; charset=utf-8"},
+    {"/licenses/vanilla-jsoneditor-third-party.txt", "text/plain; charset=utf-8"},
+    {"/licenses/lossless-json.txt", "text/plain; charset=utf-8"},
 };
 
 enum class Access { missing, entry, authenticated, websocket, base_path_setup };
