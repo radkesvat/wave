@@ -1098,6 +1098,7 @@ class Preview {
         const auto& source = schematic_field(input, "source");
         const auto& revision = schematic_field(input, "schematic_revision");
         const auto& run = schematic_field(input, "run_id");
+        const auto run_id = schematic_text(run);
         const auto& generation = schematic_field(input, "database_generation");
         const bool live = source == "live";
         std::optional<UsersRosterScope> scope;
@@ -1110,7 +1111,7 @@ class Preview {
             const auto& node_name = node.get_ref<const std::string&>();
             scope = roster_scope(id, node_name, live);
             if (sub.id == subscription && sub.target && scope && *scope == sub.target->scope &&
-                scope->run == run && scope->generation == schematic_text(generation)) {
+                scope->run == run_id && scope->generation == schematic_text(generation)) {
                 return;
             }
             if (!live) {
@@ -1118,7 +1119,7 @@ class Preview {
                 scope = roster_scope(id, node_name, false);
             }
         }
-        if (!scope || scope->run != run || scope->generation != schematic_text(generation) ||
+        if (!scope || scope->run != run_id || scope->generation != schematic_text(generation) ||
             (sub.id == subscription && sub.target && sub.target->scope != *scope)) {
             release_users_roster(sub);
             sub.id = subscription;
@@ -2239,7 +2240,7 @@ class Preview {
         }
         auto& status = data_["server"]["core"];
         const auto& available = status["available_versions"];
-        if (std::ranges::find(available, target) == available.end()) {
+        if (std::ranges::find(available, target, schematic_text) == available.end()) {
             return {false, "That WaterWall version is unavailable."};
         }
         status.erase("update_error");
@@ -2762,7 +2763,8 @@ class Preview {
         }
         if (operation == Op::create) {
             if (const auto embedded = request.fields.find("id"); embedded != request.fields.end()) {
-                if (!embedded->is_string() || (input.contains("user_id") && request.id != *embedded)) {
+                if (!embedded->is_string() ||
+                    (input.contains("user_id") && request.id != schematic_text(*embedded))) {
                     return {false, "Supply one valid account ID. The two ID fields must agree when both are present."};
                 }
                 request.id = embedded->get_ref<const std::string&>();

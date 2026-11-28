@@ -48,7 +48,6 @@ while (($#)); do
     esac
 done
 
-[[ $EUID -ne 0 ]] || fail 'Run the installer as your regular user with sudo access.'
 [[ $(uname -s) == Linux ]] || fail 'Wave release packages require Linux.'
 architecture=$(uname -m)
 case $architecture in
@@ -58,14 +57,24 @@ case $architecture in
     *) fail "Unsupported Linux architecture $architecture." ;;
 esac
 
-for dependency in curl python3 flock sudo systemctl systemd-escape journalctl; do
+dependencies=(curl python3 flock systemctl systemd-escape journalctl)
+admin=()
+if (( EUID == 0 )); then
+    dependencies+=(setpriv useradd userdel nologin)
+    default_bin=/usr/local/bin
+else
+    dependencies+=(sudo)
+    admin=(sudo --)
+    [[ ${HOME:-} == /* ]] || fail 'Set HOME to your absolute home directory.'
+    default_bin=$HOME/.local/bin
+fi
+for dependency in "${dependencies[@]}"; do
     command -v "$dependency" >/dev/null || fail "Install $dependency and rerun the installer."
 done
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || fail 'Install Python 3.9 or later and rerun the installer.'
 systemctl show --property=Version --value >/dev/null 2>&1 || fail 'Wave requires a running systemd system manager.'
 
-[[ ${HOME:-} == /* ]] || fail 'Set HOME to your absolute home directory.'
-bin_dir=${XDG_BIN_HOME:-$HOME/.local/bin}
+bin_dir=${XDG_BIN_HOME:-$default_bin}
 [[ $bin_dir == /* && ! $bin_dir =~ [[:cntrl:]] ]] || fail 'Use an absolute command directory.'
 bin_dir=$(realpath -m -- "$bin_dir")
 
@@ -95,16 +104,18 @@ created_link=
 manager_target=
 unit_stage=
 created_unit=
+created_account=
 elevate=()
+as_service=()
 
 cleanup() {
     if [[ -n $created_unit ]]; then
-        sudo -- systemctl disable -- "$unit" || :
-        sudo -- rm -f -- "$created_unit" || :
-        sudo -- systemctl daemon-reload || :
+        "${admin[@]}" systemctl disable -- "$unit" || :
+        "${admin[@]}" rm -f -- "$created_unit" || :
+        "${admin[@]}" systemctl daemon-reload || :
     fi
     if [[ -n $unit_stage ]]; then
-        sudo -- rm -f -- "$unit_stage" || :
+        "${admin[@]}" rm -f -- "$unit_stage" || :
     fi
     if [[ -n $created_link && $(readlink -- "$created_link" 2>/dev/null || :) == "$manager_target" ]]; then
         rm -f -- "$created_link"
@@ -112,6 +123,9 @@ cleanup() {
     if [[ -n $pending_directory && -d $pending_directory ]]; then
         find "$pending_directory" -xdev -mindepth 1 -delete || :
         "${elevate[@]}" rmdir -- "$pending_directory" || :
+    fi
+    if [[ -n $created_account ]]; then
+        userdel -- "$created_account" || :
     fi
     rm -rf -- "$work"
 }
@@ -213,6 +227,20 @@ name_available() {
     [[ ! -e $1 && ! -L $1 && ! -e $bin_dir/$2 && ! -L $bin_dir/$2 ]] && ! command -v "$2" >/dev/null
 }
 
+trusted_root_path() {
+    local directory=$1 info owner mode
+    while :; do
+        if [[ -e $directory ]]; then
+            [[ -d $directory ]] || return 1
+            info=$(stat -c '%u:%a' -- "$directory") || return 1
+            IFS=: read -r owner mode <<< "$info"
+            [[ $owner == 0 && $((8#$mode & 8#022)) == 0 ]] || return 1
+        fi
+        [[ $directory == / ]] && return 0
+        directory=$(dirname -- "$directory")
+    done
+}
+
 if [[ -z $instance ]]; then
     default_name=wave
     number=2
@@ -248,22 +276,19 @@ fi
 
 directory=$parent
 while [[ $directory != / ]]; do
-    if [[ -x $directory/wave-backend && -f $directory/site/index.wasm ]]; then
+    if [[ ( -x $directory/wave-backend && -f $directory/site/index.wasm ) ||
+          -f $directory/.wave-run/service-user ]]; then
         fail "Choose a directory outside the existing Wave installation at $directory."
     fi
     directory=$(dirname -- "$directory")
 done
 
-if [[ ! -w $parent ]]; then
-    # Keep privileged operations below a directory chain trusted by root.
-    directory=$parent
-    while :; do
-        IFS=: read -r owner mode < <(stat -c '%u:%a' -- "$directory")
-        [[ $owner == 0 && $((8#$mode & 8#022)) == 0 ]] || fail "Choose a writable parent directory instead of $parent."
-        [[ $directory == / ]] && break
-        directory=$(dirname -- "$directory")
-    done
-    elevate=(sudo --)
+if (( EUID == 0 )); then
+    trusted_root_path "$parent" || fail "Choose a root-owned installation parent such as /opt."
+    trusted_root_path "$bin_dir" || fail "Choose a root-owned command directory such as /usr/local/bin."
+elif [[ ! -w $parent ]]; then
+    trusted_root_path "$parent" || fail "Choose a writable parent directory instead of $parent."
+    elevate=("${admin[@]}")
 fi
 
 staging=$("${elevate[@]}" mktemp -d -- "${parent%/}/.wave-install.XXXXXXXX") \
@@ -274,8 +299,13 @@ if ((${#elevate[@]})); then
 fi
 # Clear any setgid bit inherited from the parent before creating instance files.
 chmod 00700 -- "$staging"
+data=$staging
+if (( EUID == 0 )); then
+    data=$staging/.wave-data
+    mkdir -m 0700 -- "$data"
+fi
 
-python3 - "$work/$asset" "$work/SHA256SUMS" "$staging" <<'PY' || fail 'Release verification or extraction failed.'
+python3 - "$work/$asset" "$work/SHA256SUMS" "$data" <<'PY' || fail 'Release verification or extraction failed.'
 from pathlib import Path
 import hashlib
 import re
@@ -319,16 +349,37 @@ with zipfile.ZipFile(asset) as archive:
     archive.extractall(destination)
 PY
 
-chmod 0700 -- "$staging/wave-backend" "$staging/wave-manager"
-backend=$staging/wave-backend
-if ! built_version=$("$backend" --version); then
+chmod 0700 -- "$data/wave-backend" "$data/wave-manager"
+backend=$data/wave-backend
+service_user=$EUID
+service_options=
+if (( EUID == 0 )); then
+    if ! grep -Fxq '# Supports root installation' -- "$data/wave-manager"; then
+        fail "Wave $version predates root installation support. Choose a newer Wave release."
+    fi
+    suffix=${staging##*.}
+    service_user=wave-${suffix,,}
+    useradd --system --user-group --no-create-home --home-dir "$instance/.wave-data" \
+        --shell "$(command -v nologin)" -- "$service_user" || fail 'Could not create the Wave service account.'
+    created_account=$service_user
+    service_uid=$(id -u -- "$service_user")
+    service_gid=$(id -g -- "$service_user")
+    [[ $service_uid != 0 && $service_gid != 0 ]] || fail 'The Wave service account must be unprivileged.'
+    as_service=(setpriv --reuid "$service_uid" --regid "$service_gid" --clear-groups --no-new-privs --reset-env --)
+    "${as_service[@]}" test -x "$parent" || fail 'Choose an installation parent the service account can access, such as /opt.'
+    chgrp -- "$service_gid" "$staging" "$data" "$backend" "$data/wave-manager"
+    chmod 00750 -- "$staging" "$data"
+    chmod 0750 -- "$backend" "$data/wave-manager"
+    service_options=$'NoNewPrivileges=true\n'
+fi
+if ! built_version=$("${as_service[@]}" "$backend" --version); then
     fail 'The packaged backend could not run. Check the documented Linux and library requirements.'
 fi
 [[ $built_version == "${version#v}" ]] || fail "The packaged backend version does not match $version."
 
 if [[ -z $port ]]; then
     default_port=2045
-    until "$backend" --check-port "$default_port" >/dev/null 2>&1; do
+    until "${as_service[@]}" "$backend" --check-port "$default_port" >/dev/null 2>&1; do
         ((default_port < 65535)) || fail 'No loopback listener port was available.'
         ((default_port += 1))
     done
@@ -341,22 +392,33 @@ fi
 if [[ ! $port =~ ^[1-9][0-9]{0,4}$ ]] || ((port > 65535)); then
     fail 'Enter a port between 1 and 65535.'
 fi
-"$backend" --check-port "$port" >/dev/null || fail "The panel cannot use loopback port $port."
+"${as_service[@]}" "$backend" --check-port "$port" >/dev/null || fail "The panel cannot use loopback port $port."
 
-if [[ $name != wave-manager ]]; then
+if [[ $data/wave-manager != "$staging/$name" ]]; then
     [[ ! -e $staging/$name ]] || fail "The name $name is reserved by the Wave package."
-    mv -T -- "$staging/wave-manager" "$staging/$name"
+    mv -T -- "$data/wave-manager" "$staging/$name"
 fi
-printf '{"admin":[],"listen":{"host":"127.0.0.1","port":%s}}\n' "$port" > "$staging/wave-db.json"
+printf '{"admin":[],"listen":{"host":"127.0.0.1","port":%s}}\n' "$port" > "$data/wave-db.json"
 
 mkdir -p -- "$bin_dir"
+if (( EUID == 0 )); then
+    trusted_root_path "$bin_dir" || fail "Choose a root-owned command directory such as /usr/local/bin."
+fi
 manager_target=$instance/$name
 link=$bin_dir/$name
 mkdir -m 0700 -- "$staging/.wave-run"
 printf '%s\n' "$link" > "$staging/.wave-run/command-link"
 printf '%s\n' "$unit" > "$staging/.wave-run/systemd-unit"
 # A default ACL can give new files permissions that the umask would have removed.
-chmod 0600 -- "$staging/wave-db.json" "$staging/.wave-run/command-link" "$staging/.wave-run/systemd-unit"
+chmod 0600 -- "$data/wave-db.json" "$staging/.wave-run/command-link" "$staging/.wave-run/systemd-unit"
+if (( EUID == 0 )); then
+    printf '%s\n' "$service_user" > "$staging/.wave-run/service-user"
+    chmod 0600 -- "$staging/.wave-run/service-user"
+    mkdir -m 0700 -- "$data/.wave-run"
+    chmod 00700 -- "$data"
+    chmod 0700 -- "$backend"
+    chown -R --no-dereference -- "$service_uid:$service_gid" "$data"
+fi
 
 quote_systemd_word() {
     local value=${1//\\/\\\\}
@@ -374,8 +436,8 @@ RequiresMountsFor=$(quote_systemd_word "$instance")
 
 [Service]
 Type=exec
-User=$EUID
-UMask=0077
+User=$service_user
+${service_options}UMask=0077
 ExecStart=:/bin/bash $(quote_systemd_word "$manager_target") __run-service
 StandardOutput=journal
 StandardError=journal
@@ -395,19 +457,20 @@ created_link=$link
 [[ ! -e $staging ]] || fail "The directory $instance is already in use."
 pending_directory=$instance
 
-unit_stage=$(sudo -- mktemp -- /etc/systemd/system/.wave-unit.XXXXXXXX) \
+unit_stage=$("${admin[@]}" mktemp -- /etc/systemd/system/.wave-unit.XXXXXXXX) \
     || fail 'Could not prepare the systemd service file.'
-sudo -- install -m 0644 -o root -g root -- "$work/$unit" "$unit_stage" \
+"${admin[@]}" install -m 0644 -o root -g root -- "$work/$unit" "$unit_stage" \
     || fail 'Could not write the systemd service file.'
-sudo -- ln -T -- "$unit_stage" "$unit_path" || fail "Could not register $unit."
+"${admin[@]}" ln -T -- "$unit_stage" "$unit_path" || fail "Could not register $unit."
 created_unit=$unit_path
-sudo -- rm -- "$unit_stage"
+"${admin[@]}" rm -- "$unit_stage"
 unit_stage=
-sudo -- systemctl enable -- "$unit" || fail "Could not enable $unit at boot."
+"${admin[@]}" systemctl enable -- "$unit" || fail "Could not enable $unit at boot."
 
 pending_directory=
 created_link=
 created_unit=
+created_account=
 
 printf 'Wave %s is installed in %s.\n' "$version" "$instance"
 printf 'Systemd service %s is enabled at boot.\n' "$unit"

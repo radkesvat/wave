@@ -4,7 +4,7 @@ Wave is a web panel for configuring and managing WaterWall on Linux.
 
 ## Install
 
-Run this in a terminal as your regular user. Wave publishes packages for Linux x86-64 and ARM64.
+Run this in a terminal as root or as a regular user with sudo access. Wave publishes packages for Linux x86-64 and ARM64.
 
 ```bash
 ( installer=$(mktemp) && trap 'rm -f -- "$installer"' EXIT && curl -q --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent.com/radkesvat/wave/main/scripts/install.sh -o "$installer" && bash "$installer" )

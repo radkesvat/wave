@@ -5,19 +5,23 @@ contains the native backend, the WebAssembly site, the instance manager, and
 license notices. The release workflow builds and tests both packages on
 Ubuntu 24.04. Use that runtime baseline or a compatible glibc-based system
 with systemd, OpenSSL 3, and libstdc++. The installer uses Bash, `curl`,
-Python 3.9 or later, `flock`, and `sudo`. Run it as your regular
-Linux user with sudo access. [Installation command](../README.md#install)
+Python 3.9 or later, and `flock`. Run it as root or as a regular user with
+`sudo` access. Root installations require Wave v0.0.2-beta or later and use
+`useradd`, `userdel`, `nologin`, and `setpriv`.
+[Installation command](../README.md#install)
 
 ## Install an instance
 
-1. Enter an exact tag, such as `v0.0.1-beta`, or press Enter for the latest
+1. Enter an exact tag, such as `v0.0.2-beta`, or press Enter for the latest
    stable package. If only a beta is available, the interactive installer
    offers it for confirmation.
 2. Choose the instance directory. The default is the first available name
    among `/opt/wave`, `/opt/wave2`, `/opt/wave3`, and so on. A custom absolute
    path must have an existing parent on persistent storage outside other Wave
-   installations. The installer uses `sudo` to register the service and to
-   create the instance when the parent directory requires it.
+   installations. When run as a regular user, the installer uses `sudo` to
+   register the service and to create the instance when the parent directory
+   requires it. For root installations, use root-owned parent directories the
+   service account can traverse, such as `/opt`.
 3. Choose a port. The installer suggests the first available loopback port
    starting at `2045`. Each running instance needs its own port.
 4. Start Wave when prompted, then open the printed setup URL. Wave listens on
@@ -31,11 +35,16 @@ the desired address in the instance's `wave-db.json` while Wave is stopped.
 
 Each instance owns its own `wave-db.json`, `configs/`, `waterwall_bin/`, and
 WaterWall logs beside `wave-backend`. Panel logs go to the systemd journal.
-Systemd runs Wave as the installing user and starts each enabled instance
-after a reboot. The installer prints the service name and registers a matching
-command link in `~/.local/bin` by default, or in `XDG_BIN_HOME` if set. It
-prints the full command path if that directory is outside your `PATH`.
-`--no-start` defers the initial start while leaving the service enabled at boot.
+Regular-user installations run Wave as that user and put the command link in
+`~/.local/bin` by default. Root installations create a dedicated unprivileged
+system account for each instance and place the backend and its writable files
+in `.wave-data/` under the instance directory. The command link goes in
+`/usr/local/bin` by default and is managed from the root account.
+
+Set `XDG_BIN_HOME` to override the command directory. For root installations,
+it must be in a root-owned directory tree. The installer prints the full command
+path if that directory is outside your `PATH`. Systemd starts each enabled
+instance after a reboot. `--no-start` defers the initial start.
 
 The installer also accepts flags for automated or offline use. Download the
 release's `install.sh`, `SHA256SUMS`, and the ZIP for your architecture to the
@@ -45,8 +54,8 @@ WaterWall offline.
 [WaterWall versions and offline provisioning](building.md#panel-controls-and-versioning)
 
 ```bash
-bash install.sh --yes --version v0.0.1-beta --from-dir "$PWD" \
-  --path "$HOME/wave-test" --port 2045 --no-start
+bash install.sh --yes --version v0.0.2-beta --from-dir "$PWD" \
+  --path /opt/wave-test --port 2045 --no-start
 ```
 
 ## Manage an instance
@@ -65,8 +74,14 @@ instance directory for other installs, such as `wave2 status`.
 | `wave logs core` | Shows recent WaterWall entries from the files configured by the selected release and core settings. |
 | `wave uninstall` | Offers time to back up the workspace, then stops and removes the confirmed instance, its systemd service, and its command link. |
 
-The manager uses `sudo` for systemd lifecycle actions and panel journal access.
-Start WaterWall from Panel Controls when needed after Wave starts.
+When run as a regular user, the manager uses `sudo` for systemd lifecycle
+actions and panel journal access. For a root installation, run the manager as
+root. Uninstalling removes the instance's service account.
+
+Panel Controls starts WaterWall under the Wave service account. If WaterWall
+must run as root, manage it separately with a root-owned executable and
+configuration.
+
 Use the panel to edit the base path, TLS, and administrator. If saved listener
 settings need a restart, compare `wave settings` with the active URL from
 `wave status`. Before uninstalling, open **Panel Controls → Backup** and save
@@ -77,12 +92,12 @@ TLS certificates or config dependencies you want to keep.
 ## Package a release
 
 Set the Wave version and channel in `CMakeLists.txt` and use the matching tag,
-such as `v0.0.1-beta`. The **Wave release packages** GitHub Actions workflow
+such as `v0.0.2-beta`. The **Wave release packages** GitHub Actions workflow
 builds the web site once and uses native x86-64 and ARM64 runners for the two
 backends. The smoke tests check the packaged musl notice, installation under
 inherited directory permissions, boot enablement, the setup page, and the
-served WebAssembly. They also check manager commands and verify that WaterWall
-can finish shutting down during a service stop or restart.
+served WebAssembly. They also check root and regular-user management and
+verify that WaterWall can finish shutting down during a service stop or restart.
 
 A manual workflow run produces a downloadable `release-bundle` artifact. A
 version-tag push also stages a draft GitHub Release after both smoke tests

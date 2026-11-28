@@ -189,11 +189,12 @@ bool allows_user_operation(const Json& client, std::string_view config, std::str
                            Operation operation)
 {
     const auto& allow = field(client, "allow");
+    const Json operation_name = waterwall_users_operation_name(operation);
     return allow.is_array() && std::ranges::any_of(allow, [&](const Json& entry) {
                const auto& operations = field(entry, "operations");
                return field(entry, "config") == config && field(entry, "node") == node &&
                       operations.is_array() &&
-                      std::ranges::find(operations, waterwall_users_operation_name(operation)) != operations.end();
+                      std::ranges::find(operations, operation_name) != operations.end();
            });
 }
 

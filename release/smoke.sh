@@ -189,3 +189,6 @@ node "$(dirname -- "${BASH_SOURCE[0]}")/smoke-core.cjs" "$first_install" "$first
 printf 'wave\n' | wave uninstall
 [[ ! -e $first_install && ! -L $XDG_BIN_HOME/wave ]] || fail 'Uninstall left the first instance or command link.'
 check_removed_service "$first_unit"
+
+sudo -n -- /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    /bin/bash "$(dirname -- "${BASH_SOURCE[0]}")/smoke-root.sh" "$assets" "$tag"
