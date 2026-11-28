@@ -113,7 +113,13 @@ EM_JS(void, read_browser_viewport, (float* width, float* height), {
 
 EM_JS(void, scroll_to_top, (), { window.scrollTo(0, 0); });
 
-EM_JS(void, show_text_input, (bool active, float x, float y), { Module['setTextInput'](active, x, y); });
+EM_JS(void, show_text_input, (bool active, float x, float y, float line_height), {
+    Module['setTextInput'](active, x, y, line_height);
+});
+
+EM_JS(void, update_keyboard_state, (bool manual, bool pressed), {
+    Module['updateKeyboardState'](manual, pressed);
+});
 
 EM_JS(void, copy_text, (const char* text), { Module['copyText'](UTF8ToString(text)); });
 
@@ -234,7 +240,7 @@ struct Application {
         SDL_StartTextInput();
         auto& platform = ImGui::GetPlatformIO();
         platform.Platform_SetImeDataFn = [](ImGuiContext*, ImGuiViewport*, ImGuiPlatformImeData* data) {
-            show_text_input(data->WantTextInput, data->InputPos.x, data->InputPos.y);
+            show_text_input(data->WantTextInput, data->InputPos.x, data->InputPos.y, data->InputLineHeight);
         };
         platform.Platform_GetClipboardTextFn = [](ImGuiContext* context) {
             return paste_target && paste_target == context->ActiveId ? pending_paste.c_str()
@@ -461,6 +467,7 @@ struct Application {
         ImGui::NewFrame();
         const auto previous_preset = panel.appearance.preset;
         wave::render_panel(panel, session, browser_viewport, browser_panel_focus());
+        update_keyboard_state(panel.mini_keyboard_open, ImGui::IsMouseDown(ImGuiMouseButton_Left));
         wave::finish_config_json_editor_frame();
         if (panel.appearance.preset != previous_preset) {
             theme_choice = panel.appearance.preset;
@@ -616,6 +623,32 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wave_input_text(const char* text, bool past
     } else {
         io.AddInputCharactersUTF8(text);
     }
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void wave_text_input_key(int key_code)
+{
+    const auto* input = ImGui::GetInputTextState(ImGui::GetActiveID());
+    if (!input || (input->Flags & ImGuiInputTextFlags_ReadOnly)) {
+        return;
+    }
+
+    ImGuiKey key;
+    switch (key_code) {
+    case 0:
+        ImGui::ClearActiveID();
+        return;
+    case 8:
+        key = ImGuiKey_Backspace;
+        break;
+    case 13:
+        key = ImGuiKey_Enter;
+        break;
+    default:
+        return;
+    }
+    auto& io = ImGui::GetIO();
+    io.AddKeyEvent(key, true);
+    io.AddKeyEvent(key, false);
 }
 
 int main()

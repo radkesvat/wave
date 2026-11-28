@@ -436,6 +436,41 @@ test('shows the Tools demo section only when enabled in the build', async () => 
     }
 });
 
+test('opens the Mini keyboard from desktop Tools and copies the composed text', async () => {
+    const page = await workspace.browser.newPage({ viewport: desktop, permissions: ['clipboard-read', 'clipboard-write'] });
+    try {
+        await mockPreview(page, fixture());
+        await page.goto(workspace.url);
+        await waitForServerStatus(page);
+        const keyboard = page.locator('#wave-keyboard');
+        assert.equal(await keyboard.isVisible(), false);
+        await page.getByRole('button', { name: 'Tools', exact: true }).focus();
+        await page.keyboard.press('Enter');
+        await page.locator('#tools[aria-expanded="true"]').waitFor({ timeout });
+        await click(page, 230, 103);
+        await keyboard.waitFor({ timeout });
+        assert.equal(await page.locator('#wave-text-input').evaluate(input => input === document.activeElement), true);
+
+        for (const name of ['Shift', 'W', 'a']) {
+            await keyboard.getByRole('button', { name, exact: true }).click({ timeout });
+        }
+        await page.evaluate(() => navigator.clipboard.writeText(''));
+        const frame = await dialogFrame(page);
+        const [leftEdge] = await horizontalRuns(page, frame.top + 10, 0, desktop.width, [138, 132, 149]);
+        assert.ok(leftEdge, 'The scratch dialog has a visible border.');
+        const copyX = leftEdge[0] + 18;
+        const [copy] = await verticalRuns(page, copyX, frame.top + 40, frame.bottom - 45, [43, 39, 48], 20);
+        assert.ok(copy, 'The scratch dialog keeps its Copy button.');
+        await page.mouse.move(copyX, (copy[0] + copy[1]) / 2);
+        await page.mouse.down();
+        await settleCanvas(page);
+        await page.mouse.up();
+        await page.waitForFunction(async () => await navigator.clipboard.readText() === 'Wa', undefined, { timeout });
+    } finally {
+        await page.close();
+    }
+});
+
 test('loads workspace pages without passive spinners', async () => {
     const page = await workspace.browser.newPage({ viewport: desktop });
     const data = fixture('stopped');

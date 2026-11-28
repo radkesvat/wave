@@ -19,7 +19,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstring>
 #include <format>
 #include <limits>
 #include <numbers>
@@ -670,46 +669,13 @@ const char* dialog_title(PanelDialog dialog)
 
 void mini_keyboard(PanelState& state)
 {
-    ImGui::TextWrapped("Compose text with the keys below, then copy it into a preview field.");
+    state.mini_keyboard_open = true;
+    ImGui::TextWrapped("Type text, then copy it into a panel field.");
+    if (ImGui::IsWindowAppearing()) {
+        ImGui::SetKeyboardFocusHere();
+    }
     ImGui::SetNextItemWidth(-1);
     ImGui::InputText("##scratch", state.input_sample, sizeof(state.input_sample));
-    constexpr float key_gap = 4;
-    const float key_width = std::max(1.0f, std::floor((ImGui::GetContentRegionAvail().x - 9 * key_gap) / 10));
-    const auto append = [&state](char c) {
-        const auto used = std::strlen(state.input_sample);
-        if (used + 1 < sizeof(state.input_sample)) {
-            state.input_sample[used] = c;
-            state.input_sample[used + 1] = 0;
-        }
-    };
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {3, ImGui::GetStyle().FramePadding.y});
-    for (const std::string_view row : {"1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"}) {
-        for (std::size_t i = 0; i < row.size(); ++i) {
-            if (i != 0) {
-                ImGui::SameLine(0, key_gap);
-            }
-            const char label[]{row[i], 0};
-            if (ImGui::Button(label, {key_width, 29})) {
-                append(row[i]);
-            }
-        }
-    }
-    ImGui::PopStyleVar();
-    if (ImGui::Button("Space")) {
-        append(' ');
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Backspace")) {
-        const auto used = std::strlen(state.input_sample);
-        if (used > 0) {
-            std::size_t start = used - 1;
-            while (start > 0 && (static_cast<unsigned char>(state.input_sample[start]) & 0xc0) == 0x80) {
-                --start;
-            }
-            state.input_sample[start] = 0;
-        }
-    }
-    ImGui::SameLine();
     if (ImGui::Button("Copy")) {
         ImGui::SetClipboardText(state.input_sample);
     }
@@ -952,6 +918,7 @@ float panel_height(float viewport_width, const PanelState& state)
 void render_panel(PanelState& state, PreviewSession& session, ImVec2 browser_viewport, int browser_focus)
 {
     state.console = {};
+    state.mini_keyboard_open = false;
     state.config_nav_scroll_bounds = {};
     state.settings.scroll_bounds = {};
     state.settings.core.scroll_bounds = {};

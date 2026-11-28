@@ -96,6 +96,13 @@ workspace. Open workspaces receive the saved preset automatically.
 **High contrast** strengthens boundaries, secondary text, and keyboard focus
 for the current page with any theme.
 
+On phones, Wave opens its on-screen keyboard at the bottom of the browser
+when you focus a panel text field. It uses the browser's user-agent information
+to identify phones and keeps the active field above the keyboard. Use **123**
+for numbers and symbols and the down arrow to dismiss the keyboard. On desktop,
+**Tools → Mini keyboard** opens a scratch field with the same keys and a
+**Copy** button.
+
 ## Frontend tests
 
 The browser smoke tests live in `tests/frontend/`. Use Node.js 22 or later

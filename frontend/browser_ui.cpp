@@ -14,22 +14,18 @@ bool config_editor_ready = false;
 // clang-format off
 EM_JS(void, read_visible_canvas, (float* left, float* top, float* width, float* height), {
     const canvas = Module['canvas'].getBoundingClientRect();
-    const viewport = window.visualViewport;
-    const x = viewport?.offsetLeft ?? 0;
-    const y = viewport?.offsetTop ?? 0;
-    HEAPF32[left >> 2] = Math.max(0, x - canvas.left);
-    HEAPF32[top >> 2] = Math.max(0, y - canvas.top);
-    HEAPF32[width >> 2] = Math.max(0, Math.min(x + (viewport?.width ?? innerWidth), canvas.right) -
-        Math.max(x, canvas.left));
-    HEAPF32[height >> 2] = Math.max(0, Math.min(y + (viewport?.height ?? innerHeight), canvas.bottom) -
-        Math.max(y, canvas.top));
+    const view = Module['contentViewport']();
+    HEAPF32[left >> 2] = Math.max(0, view.left - canvas.left);
+    HEAPF32[top >> 2] = Math.max(0, view.top - canvas.top);
+    HEAPF32[width >> 2] = Math.max(0, Math.min(view.left + view.width, canvas.right) -
+        Math.max(view.left, canvas.left));
+    HEAPF32[height >> 2] = Math.max(0, Math.min(view.top + view.height, canvas.bottom) -
+        Math.max(view.top, canvas.top));
 });
 
 EM_JS(void, reveal_canvas_item_in_document, (float top, float bottom), {
     const canvas = Module['canvas'].getBoundingClientRect();
-    const viewport = window.visualViewport;
-    const viewportTop = viewport?.offsetTop ?? 0;
-    const viewportHeight = viewport?.height ?? innerHeight;
+    const { top: viewportTop, height: viewportHeight } = Module['contentViewport']();
     if (canvas.height <= viewportHeight) return;
     const itemTop = canvas.top + top - viewportTop;
     const itemBottom = canvas.top + bottom - viewportTop;

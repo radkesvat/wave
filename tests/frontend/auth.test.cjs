@@ -200,6 +200,108 @@ test('animates the sign-in background and keeps it still with reduced motion', a
     assert.notDeepEqual(still, setup, 'The static waves remain visible.');
 });
 
+test('docks the phone keyboard and enters sign-in credentials in the focused fields', async t => {
+    assert.ok(process.env.WAVE_SITE_DIR, 'Set WAVE_SITE_DIR to a built Wave frontend.');
+    const fixture = await authFixture(t, process.env.WAVE_SITE_DIR, { encrypted: false });
+    await fixture.start();
+    const panel = fixture.origin + fixture.basePath + '/';
+    const credentials = { username: 'ada', password: 'tF6! gmq2Y' };
+    const setup = await fetch(panel + 'api/auth/setup', {
+        method: 'POST',
+        headers: { Origin: fixture.origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json' },
+        body: JSON.stringify(credentials),
+        signal: AbortSignal.timeout(timeout),
+    });
+    assert.equal(setup.status, 201);
+
+    const browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader'] });
+    t.after(() => browser.close());
+    const phoneSize = { width: 390, height: 844 };
+    const phone = await browser.newPage({ viewport: phoneSize, isMobile: true, hasTouch: true,
+        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1',
+    });
+    const keyboard = phone.locator('#wave-keyboard');
+    const input = phone.locator('#wave-text-input');
+    const key = name => keyboard.getByRole('button', { name, exact: true });
+    const press = name => key(name).tap({ timeout });
+    const fields = page => visibleInputs(page, 110, phoneSize.height - 30, 290);
+
+    await phone.goto(panel);
+    await waitForStatus(phone, 'Sign in to Wave. Welcome.');
+    assert.equal(await keyboard.isVisible(), false);
+    const tapField = async index => {
+        const positions = await fields(phone);
+        assert.equal(positions.length, 2);
+        await phone.touchscreen.tap(positions[index].x, positions[index].y);
+    };
+    await tapField(0);
+    await keyboard.waitFor({ timeout });
+    assert.equal(await input.getAttribute('inputmode'), 'none');
+    const docked = async ({ width, height }) => {
+        await settleCanvas(phone);
+        const dock = await keyboard.boundingBox();
+        assert.ok(Math.abs(dock.x) <= 1 && Math.abs(dock.width - width) <= 1,
+            'The phone keyboard spans the viewport.');
+        assert.ok(dock.y > 0 && Math.abs(dock.y + dock.height - height) <= 1,
+            'The phone keyboard reaches the bottom of the viewport.');
+        return dock;
+    };
+    const dock = await docked(phoneSize);
+    await expectEntryTitleStrip(phone, 'Welcome');
+    assert.ok((await entryDialogFrame(phone)).bottom <= dock.y,
+        'The sign-in form and its footer stay above the keyboard.');
+    const [q, a, shift, backspace, space] = await Promise.all(
+        ['q', 'a', 'Shift', 'Backspace', 'Space'].map(name => key(name).boundingBox()));
+    assert.ok(a.x > q.x && a.y > q.y, 'The home row is inset.');
+    assert.ok(shift.width > q.width && backspace.width > q.width, 'The edge keys are wider than letter keys.');
+    assert.ok(space.width > 3 * q.width, 'The space bar spans multiple letter keys.');
+
+    const landscape = { width: phoneSize.height, height: phoneSize.width };
+    await phone.setViewportSize(landscape);
+    await docked(landscape);
+    const landscapeKey = await key('q').boundingBox();
+    assert.ok(landscapeKey.height >= 24 && landscapeKey.height < q.height,
+        'Landscape keys fit the shorter viewport and remain tappable.');
+    await phone.setViewportSize(phoneSize);
+    await docked(phoneSize);
+
+    await press('a');
+    await press('x');
+    await press('Backspace');
+    assert.equal(await input.evaluate(element => element === document.activeElement), true);
+    await press('Hide keyboard');
+    await keyboard.waitFor({ state: 'hidden', timeout });
+    await tapField(0);
+    await keyboard.waitFor({ timeout });
+    await press('d');
+    await press('a');
+    await press('Return');
+    await keyboard.waitFor({ state: 'hidden', timeout });
+
+    await tapField(1);
+    for (const name of ['t', 'Shift', 'F', '123', '6', '!', 'ABC', 'Space', 'g', 'm', 'q', '123', '2', 'ABC', 'Shift', 'Y']) {
+        await press(name);
+    }
+    const signIn = phone.waitForResponse('**/api/auth/sign-in', { timeout });
+    const frame = await entryDialogFrame(phone);
+    await phone.touchscreen.tap(phoneSize.width - 64, frame.bottom - 29);
+    const reply = await signIn;
+    assert.deepEqual(reply.request().postDataJSON(), credentials);
+    assert.equal(reply.status(), 204);
+    await waitForStatus(phone, /Wave Server Status.*CPU/);
+    await keyboard.waitFor({ state: 'hidden', timeout });
+    await phone.close();
+
+    const desktop = await browser.newPage({ viewport: phoneSize, hasTouch: true });
+    await desktop.goto(panel);
+    await waitForStatus(desktop, 'Sign in to Wave. Welcome.');
+    const [username] = await fields(desktop);
+    await desktop.touchscreen.tap(username.x, username.y);
+    await desktop.locator('#wave-text-input').waitFor({ timeout });
+    assert.equal(await desktop.locator('#wave-keyboard').isVisible(), false,
+        'A narrow desktop browser keeps its regular text input.');
+});
+
 test('sets a panel base path, authenticates an administrator and closes the terminal on sign-out', async t => {
     assert.ok(process.env.WAVE_SITE_DIR, 'Set WAVE_SITE_DIR to a built Wave frontend.');
     const fixture = await authFixture(t, process.env.WAVE_SITE_DIR, { encrypted: false, basePath: null });

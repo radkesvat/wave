@@ -69,6 +69,7 @@ struct PanelState {
     bool tools_open = false;
     theme::Appearance appearance;
     bool metrics_open = false;
+    bool mini_keyboard_open = false;
 #ifdef WAVE_ENABLE_UI_DEMOS
     bool imgui_demo_open = false;
     bool implot_demo_open = false;

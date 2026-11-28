@@ -28,7 +28,10 @@
 
       body { margin: 0; }
 
-      main { position: relative; }
+      main {
+        position: relative;
+        padding-bottom: var(--keyboard-inset, 0px);
+      }
 
       #scrollbar-probe {
         position: fixed;
@@ -44,8 +47,8 @@
         display: block;
         visibility: hidden;
         width: 100%;
-        height: max(100vh, var(--panel-height, 0px));
-        height: max(100dvh, var(--panel-height, 0px));
+        height: max(calc(100vh - var(--keyboard-inset, 0px)), var(--panel-height, 0px));
+        height: max(calc(100dvh - var(--keyboard-inset, 0px)), var(--panel-height, 0px));
         outline: none;
         touch-action: pinch-zoom;
       }
@@ -72,6 +75,73 @@
         font-size: 16px;
         pointer-events: none;
       }
+
+      #wave-keyboard {
+        position: fixed;
+        z-index: 1;
+        box-sizing: border-box;
+        padding: 6px max(5px, env(safe-area-inset-right))
+                 max(6px, env(safe-area-inset-bottom)) max(5px, env(safe-area-inset-left));
+        border-top: 1px solid var(--keyboard-border);
+        background: var(--keyboard-background);
+        background: color-mix(in srgb, var(--keyboard-background) 98%, transparent);
+        touch-action: manipulation;
+        user-select: none;
+      }
+
+      #wave-keyboard-keys {
+        display: grid;
+        gap: var(--keyboard-gap);
+        max-width: 620px;
+        margin: auto;
+        --keyboard-gap: clamp(3px, 1vw, 7px);
+        --keyboard-key-width: calc((100% - 9 * var(--keyboard-gap)) / 10);
+      }
+
+      .wave-keyboard-row {
+        display: flex;
+        justify-content: center;
+        gap: var(--keyboard-gap);
+      }
+
+      .wave-keyboard-row button {
+        display: grid;
+        place-items: center;
+        flex: 0 0 var(--keyboard-key-width);
+        box-sizing: border-box;
+        min-width: 0;
+        height: var(--keyboard-row-height);
+        padding: 0;
+        border: 1px solid var(--keyboard-border);
+        border-radius: 6px;
+        background: var(--keyboard-key);
+        color: inherit;
+        font: 500 clamp(1rem, 4.8vw, 1.4rem) / 1 system-ui, sans-serif;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .wave-keyboard-row .keyboard-modifier {
+        flex: 1 1 0;
+        background: var(--keyboard-modifier);
+      }
+
+      .wave-keyboard-row .keyboard-action {
+        flex: 0 0 calc(1.45 * var(--keyboard-key-width));
+      }
+
+      .wave-keyboard-row .keyboard-action,
+      .wave-keyboard-row .keyboard-compact {
+        font-size: .85rem;
+      }
+
+      .wave-keyboard-row .keyboard-space {
+        flex: 1 1 0;
+        font-size: .85rem;
+      }
+
+      .wave-keyboard-row button:active,
+      .wave-keyboard-row button[aria-pressed="true"] { background: var(--keyboard-pressed); }
+      .wave-keyboard-row button:focus-visible { outline: 2px solid var(--keyboard-focus); }
 
       #wave-console {
         position: absolute;
@@ -181,6 +251,9 @@
         <div id="wave-json-editor-status" role="status">Loading JSON editor…</div>
       </section>
     </main>
+    <section id="wave-keyboard" aria-label="On-screen keyboard" hidden>
+      <div id="wave-keyboard-keys"></div>
+    </section>
     <script>
       var Module = (() => {
         const basePath = location.pathname.slice(0, location.pathname.lastIndexOf("/"));
@@ -208,6 +281,12 @@
         const navigation = document.getElementById("navigation");
         const configTabs = document.getElementById("config-tabs");
         const textInput = document.getElementById("wave-text-input");
+        const keyboard = document.getElementById("wave-keyboard");
+        const keyboardKeys = document.getElementById("wave-keyboard-keys");
+        const visual = window.visualViewport;
+        const agent = navigator.userAgent;
+        const phone = /iPhone|iPod|Windows Phone|Android.*Mobile/i.test(agent) ||
+          (navigator.userAgentData?.mobile === true && !/iPad|Android/i.test(agent));
         const terminalPanel = document.getElementById("wave-console");
         const jsonEditorPanel = document.getElementById("wave-json-editor");
         const jsonEditorStatus = document.getElementById("wave-json-editor-status");
@@ -226,6 +305,15 @@
         let jsonEditorSession;
         let jsonEditorPosition = "";
         let appearance;
+        let manualKeyboard = false;
+        let canvasPressed = false;
+        let keyboardInset = 0;
+        let keyboardLayout = "letters";
+        let keyboardShift = 0;
+        let shiftTime = 0;
+        let textCaretBottom;
+        let revealCaretFrame = 0;
+        if (phone) textInput.inputMode = "none";
         startup.hidden = false;
 
         if (CSS.supports("selector(::-webkit-scrollbar-thumb)")) {
@@ -330,7 +418,8 @@
         }
 
         function usesDocumentScroll(event, bounds = canvas.getBoundingClientRect()) {
-          return bounds.height > innerHeight && event.clientX < bounds.right - 34 &&
+          const height = keyboard.hidden ? innerHeight : contentViewport().height;
+          return bounds.height > height && event.clientX < bounds.right - 34 &&
               !Module['_wave_scroll_window_at'](event.clientX - bounds.left, event.clientY - bounds.top);
         }
 
@@ -401,22 +490,168 @@
           Module['_wave_tap_panel'](event.clientX - bounds.left, event.clientY - bounds.top);
         });
 
-        function setTextInput(active, x, y) {
+        function contentViewport() {
+          return {
+            left: visual?.offsetLeft ?? 0,
+            top: visual?.offsetTop ?? 0,
+            width: visual?.width ?? innerWidth,
+            height: Math.max(0, (visual?.height ?? innerHeight) - keyboardInset)
+          };
+        }
+
+        function positionKeyboard() {
+          if (keyboard.hidden) return;
+          const { left, top, width } = contentViewport();
+          const height = visual?.height ?? innerHeight;
+          Object.assign(keyboard.style, {
+            left: `${left}px`, width: `${width}px`, bottom: `${innerHeight - top - height}px`
+          });
+          keyboard.style.setProperty("--keyboard-row-height", `${Math.max(24, Math.min(54, Math.floor(height * .075)))}px`);
+          keyboardInset = keyboard.getBoundingClientRect().height;
+          document.documentElement.style.setProperty("--keyboard-inset", `${keyboardInset}px`);
+        }
+
+        function revealTextCaret() {
+          if (keyboard.hidden || textCaretBottom === undefined || revealCaretFrame) return;
+          revealCaretFrame = requestAnimationFrame(() => {
+            revealCaretFrame = 0;
+            if (keyboard.hidden || textCaretBottom === undefined) return;
+            const bottom = canvas.getBoundingClientRect().top + textCaretBottom;
+            const viewport = contentViewport();
+            const overlap = bottom + 8 - (viewport.top + viewport.height);
+            if (overlap > 0) window.scrollBy(0, overlap);
+          });
+        }
+
+        function resizeKeyboard() {
+          positionKeyboard();
+          revealTextCaret();
+        }
+
+        window.addEventListener("resize", resizeKeyboard);
+        visual?.addEventListener("resize", resizeKeyboard);
+        visual?.addEventListener("scroll", positionKeyboard);
+
+        function updateKeyboard() {
+          const show = !textInput.hidden && (phone || manualKeyboard);
+          if (show === !keyboard.hidden) return;
+          // A canvas button can take focus on press and must stay in place through release.
+          if (!show && canvasPressed) return;
+          keyboard.hidden = !show;
+          if (show) {
+            keyboardLayout = "letters";
+            keyboardShift = 0;
+            renderKeyboard();
+            resizeKeyboard();
+          } else {
+            keyboardInset = 0;
+            document.documentElement.style.removeProperty("--keyboard-inset");
+          }
+        }
+
+        function updateKeyboardState(manual, pressed) {
+          manual = Boolean(manual);
+          pressed = Boolean(pressed);
+          if (manualKeyboard === manual && canvasPressed === pressed) return;
+          if (manualKeyboard !== manual) {
+            manualKeyboard = manual;
+            textInput.inputMode = phone || manual ? "none" : "";
+          }
+          canvasPressed = pressed;
+          updateKeyboard();
+        }
+
+        const layouts = {
+          letters: ["qwertyuiop", "asdfghjkl", "zxcvbnm"],
+          numbers: ["1234567890", "@#$%&-+()", "*\"':;!?"],
+          symbols: ["[]{}<>^=|~", "`_\\/€£¥×÷", "©®°§,¢±"]
+        };
+
+        function renderKeyboard() {
+          const rows = Array.from({ length: 4 }, () => {
+            const row = document.createElement("div");
+            row.className = "wave-keyboard-row";
+            return row;
+          });
+          const add = (row, value, label = value, name = label, classes = "") => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.tabIndex = -1;
+            button.textContent = label;
+            button.dataset.key = value;
+            button.className = classes;
+            button.setAttribute("aria-label", name);
+            rows[row].append(button);
+            return button;
+          };
+
+          const letters = keyboardLayout === "letters";
+          if (letters) {
+            add(2, "shift", keyboardShift === 2 ? "⇪" : "⇧", "Shift", "keyboard-modifier")
+              .setAttribute("aria-pressed", String(keyboardShift !== 0));
+          } else {
+            const label = keyboardLayout === "numbers" ? "#+=" : "123";
+            add(2, "symbols", label, label, "keyboard-modifier keyboard-compact");
+          }
+          for (const [row, keys] of layouts[keyboardLayout].entries()) {
+            for (const key of keyboardShift && letters ? keys.toUpperCase() : keys) add(row, key);
+          }
+          add(2, "delete", "⌫", "Backspace", "keyboard-modifier");
+          add(3, "layout", letters ? "123" : "ABC", letters ? "123" : "ABC", "keyboard-modifier keyboard-action");
+          add(3, " ", "space", "Space", "keyboard-space");
+          add(3, ".");
+          add(3, "enter", "return", "Return", "keyboard-modifier keyboard-action");
+          add(3, "hide", "⌄", "Hide keyboard", "keyboard-modifier keyboard-action");
+          keyboardKeys.replaceChildren(...rows);
+        }
+
+        function setTextInput(active, x, y, lineHeight) {
           if (!active) {
             if (document.activeElement === textInput) canvas.focus({ preventScroll: true });
             textInput.hidden = true;
             textInput.value = "";
+            textCaretBottom = undefined;
+            updateKeyboard();
             return;
           }
           if (!jsonEditorPanel.hidden) return;
           const bounds = canvas.getBoundingClientRect();
           textInput.style.left = Math.max(0, Math.min(innerWidth - 2, bounds.left + x)) + "px";
           textInput.style.top = Math.max(0, Math.min(innerHeight - 2, bounds.top + y)) + "px";
+          textCaretBottom = y + lineHeight;
           textInput.hidden = false;
           if (document.activeElement !== textInput) textInput.focus({ preventScroll: true });
+          updateKeyboard();
+          revealTextCaret();
         }
 
         function installTextInput(send) {
+          // Tapping a key must leave the current canvas field focused.
+          keyboard.addEventListener("pointerdown", event => event.preventDefault());
+          keyboard.addEventListener("click", event => {
+            const key = event.target.closest("button")?.dataset.key;
+            if (!key || textInput.hidden) return;
+            switch (key) {
+            case "hide": Module['_wave_text_input_key'](0); return;
+            case "delete": Module['_wave_text_input_key'](8); return;
+            case "enter": Module['_wave_text_input_key'](13); return;
+            case "shift": {
+              const now = performance.now();
+              keyboardShift = keyboardShift === 0 ? 1 : keyboardShift === 1 && now - shiftTime < 350 ? 2 : 0;
+              shiftTime = now;
+              break;
+            }
+            case "layout": keyboardLayout = keyboardLayout === "letters" ? "numbers" : "letters"; break;
+            case "symbols": keyboardLayout = keyboardLayout === "numbers" ? "symbols" : "numbers"; break;
+            default:
+              send(key);
+              if (keyboardShift !== 1) return;
+              keyboardShift = 0;
+              break;
+            }
+            renderKeyboard();
+          });
+
           function forwardKey(event) {
             if (event.isComposing || ((event.ctrlKey || event.metaKey) && event.code === "KeyV")) return;
             const forwarded = new KeyboardEvent(event.type, event);
@@ -507,6 +742,17 @@
             colorScheme: palette.light ? "light" : "dark"
           });
           themeColor.content = palette.canvas;
+          const keyboardColors = {
+            "--keyboard-background": palette.toolbar,
+            "--keyboard-border": palette.highContrast ? palette.controlBorder : palette.divider,
+            "--keyboard-key": palette.buttonFace,
+            "--keyboard-modifier": palette.terminal,
+            "--keyboard-pressed": palette.buttonHover,
+            "--keyboard-focus": palette.focus
+          };
+          for (const [property, color] of Object.entries(keyboardColors)) {
+            keyboard.style.setProperty(property, color);
+          }
           const terminalColors = {
             "--terminal-background": palette.terminal,
             "--terminal-border": palette.highContrast ? palette.controlBorder : palette.divider,
@@ -762,7 +1008,8 @@
           basePath, followPanelLocation, panelLocationPending,
           canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
           updateConfigLinks, updateConfigTabs,
-          panelFocus, setTextInput, installTextInput, copyText, applyAppearance, updateConsole,
+          panelFocus, setTextInput, updateKeyboardState, contentViewport, installTextInput, copyText,
+          applyAppearance, updateConsole,
           openConfigJsonEditor, positionConfigJsonEditor, configJsonEditorText, closeConfigJsonEditor,
           startBackupRequest, chooseWorkspaceBackup, backupRequestPending, takeWorkspaceBackupReply,
           clearWorkspaceBackupRequest,
