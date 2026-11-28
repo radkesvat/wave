@@ -244,7 +244,7 @@
               "path": "/limit/bandwidth/up",
               "label": "Upload bandwidth (bytes/s)",
               "hint": "Unlimited",
-              "help": "Bandwidth limits are rates for each direction. Enter 1048576 for 1 MiB/s."
+              "help": "Bandwidth limits are rates for each direction. Enter 1000000 for 1 MB/s."
             },
             {
               "path": "/limit/bandwidth/down",

@@ -56,7 +56,11 @@ test('edits WaterWall user access and limits and creates a user with an exact ID
         limit: { traffic: { up: '9875654321', down: '1000', total: '18446744073709551615' } },
         stats: { traffic: { up: '20', down: '30' } },
     };
-    const preview = await mockPreview(page, data);
+    const schematic = structuredClone(workspace.waterwallSchematic);
+    const uploadBandwidth = schematic.ui.users.limit_groups.flatMap(group => group.fields)
+        .find(field => field.path === '/limit/bandwidth/up');
+    uploadBandwidth.help = 'Bandwidth limits are rates for each direction. Enter 1048576 for 1 MiB/s.';
+    const preview = await mockPreview(page, data, Promise.resolve(), schematic);
     const selector = { config_id: 11, node: 'staff', ...offlineScope, roster: true };
     const passwordSelector = { action: 'get_config_user_password', config_id: 11, node: 'staff',
         user_id: user.id, ...offlineScope };
@@ -125,6 +129,8 @@ test('edits WaterWall user access and limits and creates a user with an exact ID
 
         await click(page, 370, 166);
         await status(page, /Edit user\. Limits section\./);
+        await page.mouse.move(409, 441);
+        await status(page, 'Bandwidth limits are rates for each direction. Enter 1000000 for 1 MB/s.');
         assert.equal(await readUserField(page, 300, 298), '9.875');
         assert.equal(await readUserField(page, 820, 298), '0.000');
         for (const invalid of ['10.5312', '18446744073.710']) {
@@ -584,7 +590,7 @@ test('sorts combined traffic exactly across the 64-bit boundary and keeps missin
                 await click(page, 320, 222 + 38 * index);
                 await status(page, new RegExp(`Selected account ${id} is enabled`));
                 if (id === 1) {
-                    await status(page, /Traffic usage 32\.0 EiB\. Avg upload speed Unavailable\. Avg download speed Unavailable\./);
+                    await status(page, /Traffic usage 36\.9 EB\. Avg upload speed Unavailable\. Avg download speed Unavailable\./);
                 }
             }
             await status(page, /Traffic usage Unavailable\./);
@@ -616,31 +622,31 @@ for (const source of ['live', 'offline']) {
             await status(page, /3 users/);
             await click(page, 320, 222);
             await status(page, unavailable);
-            await report(2, [row('1', '6000', '2000'), row('2', '5000', '1000')]);
-            await status(page, /Traffic usage 7\.8 KiB\. Avg upload speed Unavailable\. Avg download speed Unavailable\./);
-            await report(3, [row('1', '6500', '2000'), row('2', '5000', '3000')]);
-            await status(page, /Traffic usage 8\.3 KiB/);
+            await report(2, [row('1', '6000000', '2000000'), row('2', '5000', '1000')]);
+            await status(page, /Traffic usage 8\.0 MB\. Avg upload speed Unavailable\. Avg download speed Unavailable\./);
+            await report(3, [row('1', '2006000000', '2000000'), row('2', '5000', '2001000')]);
+            await status(page, /Traffic usage 2\.0 GB/);
             if (source === 'offline') {
                 await status(page, unavailable);
                 return;
             }
-            await status(page, /Avg upload speed 250 B\/s\. Avg download speed 0 B\/s\./);
+            await status(page, /Avg upload speed 1\.0 GB\/s\. Avg download speed 0 B\/s\./);
 
             await click(page, rosterColumnX.uploadSpeed, 194);
             await status(page, /Sorted by Avg upload speed ascending/);
             await click(page, 320, 298);
             await status(page, /Selected account 3 .*Avg upload speed Unavailable\./);
             await click(page, 320, 222);
-            await status(page, /Selected account 2 .*Avg upload speed 0 B\/s\. Avg download speed 1000 B\/s\./);
-            await report(4, [{ ...row('2', '5000', '3000'), enabled: false }]);
-            await status(page, /Selected account 2 is disabled.*Avg download speed 1000 B\/s\./);
+            await status(page, /Selected account 2 .*Avg upload speed 0 B\/s\. Avg download speed 1\.0 MB\/s\./);
+            await report(4, [{ ...row('2', '5000', '2001000'), enabled: false }]);
+            await status(page, /Selected account 2 is disabled.*Avg download speed 1\.0 MB\/s\./);
             await click(page, rosterColumnX.downloadSpeed, 194);
             await status(page, /Sorted by Avg download speed ascending/);
             await click(page, 320, 222);
             await status(page, /Selected account 1 /);
 
-            await report(5, [row('1', '6500', '6000'), row('2', '5600', '3000')]);
-            await status(page, /Traffic usage 12\.2 KiB/);
+            await report(5, [row('1', '2006000000', '502000000'), row('2', '5600', '2001000')]);
+            await status(page, /Traffic usage 2\.5 GB/);
             await click(page, 320, 222);
             await status(page, /Selected account 2 .*Avg upload speed 150 B\/s\. Avg download speed 0 B\/s\./);
             await preview.rosterFrame(subscription, { event: 'state', state: 'stale', message: 'Fixture outage.' });

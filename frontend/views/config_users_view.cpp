@@ -311,6 +311,10 @@ void edit_number(ConfigUsersState& state, const NumberField& field)
 {
     std::string saved_quota_help;
     auto help = field.help;
+    // Existing installations can still use a cached schematic with the old example.
+    if (help == "Bandwidth limits are rates for each direction. Enter 1048576 for 1 MiB/s.") {
+        help = "Bandwidth limits are rates for each direction. Enter 1000000 for 1 MB/s.";
+    }
     if (field.gigabytes) {
         const auto bytes = parse_unsigned(number_text(state.selected_user, field.path));
         if (bytes && *bytes % bytes_per_megabyte != 0) {
@@ -1295,10 +1299,10 @@ void render_editor(ConfigUsersState& state, PreviewSession& session, int config_
 
 std::string format_bytes(double bytes)
 {
-    constexpr std::array units{"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"};
+    constexpr std::array units{"B", "kB", "MB", "GB", "TB", "PB", "EB"};
     std::size_t unit = 0;
-    while (unit + 1 < units.size() && bytes >= 1024) {
-        bytes /= 1024;
+    while (unit + 1 < units.size() && bytes >= 1'000) {
+        bytes /= 1'000;
         ++unit;
     }
     return unit == 0 ? std::format("{} B", std::round(bytes * 10) / 10) : std::format("{:.1f} {}", bytes, units[unit]);

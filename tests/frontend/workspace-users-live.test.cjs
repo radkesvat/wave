@@ -496,7 +496,7 @@ test('keeps account options bound to a reordered row and prevents saving a remov
         await click(page, rosterColumnX.options, 226);
         await status(page, new RegExp(`Selected account ${user.id} is enabled`));
         await delta([{ ...user, stats: { traffic: { up: '300', down: '700' } } }], { total: 2 });
-        await status(page, new RegExp(`Selected account ${user.id} is enabled\\..*Traffic usage 1000 B`));
+        await status(page, new RegExp(`Selected account ${user.id} is enabled\\..*Traffic usage 1\\.0 kB`));
         await click(page, rosterColumnX.options + 40, 244);
         const details = await next('get_live_config_user', { ...run, user_id: user.id });
         details.reply({ result: { user, if_match: '59'.repeat(24) } });

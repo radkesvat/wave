@@ -616,9 +616,10 @@ directly. A `get-user` grant is enough to view it. Save or cancel pending
 account edits before using **Change password** when that action is granted.
 Add `list-users` to enable browsing and name search.
 
-**Traffic usage** shows total charged upload and download combined. It can
-be sorted locally, including for large imported accounts. A missing counter
-makes the total unavailable. To clear one user's usage, stop WaterWall, open
+**Traffic usage** shows total charged upload and download combined in decimal
+units, where 1 MB is 1,000,000 bytes and 1 GB is 1,000 MB. It can be sorted
+locally, including for large imported accounts. A missing counter makes the
+total unavailable. To clear one user's usage, stop WaterWall, open
 **Options → Reset traffic** on that user's row, and confirm. Wave sets both
 charged counters to zero. The account keeps its configured quota and expiry.
 WaterWall 1.6.0 has no live API operation for this reset.
@@ -626,8 +627,9 @@ WaterWall 1.6.0 has no live API operation for this reset.
 **Avg upload speed** and **Avg download speed** show estimated charged bytes
 per second. Each live tab times two consecutive changes to an account's
 counters, then divides the bytes added in each direction by that interval.
-Estimates can vary slightly across viewers. For example, 6 MiB of new upload over 60 seconds gives
-102.4 KiB/s. WaterWall batches usage and can apply quota multipliers.
+Estimates can vary slightly across viewers. For example, 6 MB of new upload
+over 60 seconds gives 100.0 kB/s. WaterWall batches usage and can apply quota
+multipliers.
 Accounts with longer reporting intervals can take several minutes to show
 their first estimate. Hover over a speed to see its interval and the age of
 the last update. Both columns
@@ -670,7 +672,8 @@ Existing IDs, creation and first-use times, and recorded statistics are shown fo
 reference. The inline switch fills the fixed-width **Enable** column when the
 schematic defines the control and the source permits editing.
 
-The editor shows traffic quotas and recorded traffic in decimal GB.
+The editor shows traffic quotas in decimal GB and uses the roster's decimal
+units for recorded traffic and estimated speeds.
 Enter up to three decimal places for quotas. `10.531` GB is 10 GB and 531 MB.
 WaterWall stores the charged byte count. Saved values with finer precision
 retain their exact byte count until the field is changed. Bandwidth limits
