@@ -17,3 +17,29 @@ a reboot.
 
 - [Installation and management](doc/installing.md)
 - [Build from source](doc/building.md)
+
+## Screenshots
+
+**VLESS configuration**
+
+![VLESS server node graph with live WaterWall logs](doc/screenshots/vless-configuration.png)
+
+**User management**
+
+![AuthenticationServer user roster with account controls and traffic usage](doc/screenshots/authentication-users.png)
+
+**Configuration graph**
+
+![Zoomed-out view of a WaterWall configuration with multiple branches](doc/screenshots/configuration-graph.png)
+
+**Saved configuration JSON**
+
+![Saved WaterWall configuration open in the JSON viewer](doc/screenshots/saved-configuration-json.png)
+
+**Browser console**
+
+![GNU nano running in Wave's browser console](doc/screenshots/browser-console.png)
+
+**Sign-in**
+
+![Wave sign-in form](doc/screenshots/sign-in.png)
