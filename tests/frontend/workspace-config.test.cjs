@@ -539,7 +539,7 @@ test('previews restored panel settings and opens sign-in at the restored base pa
         await status(page, /Panel base path \/restored\/wave\. Administrator restored-admin\./);
         await status(page, /Restoring replaces panel settings and administrator credentials\./);
         await status(page, /All active Wave sessions will be signed out\./);
-        await status(page, /Restart Wave to apply the restored listener and TLS settings\./);
+        await status(page, /Wave will restart the panel to apply the restored listener and TLS settings\./);
         assert.equal(page.url(), workspace.url, 'The preview keeps the current panel open until confirmation.');
         const applying = page.waitForRequest(applyUrl, { timeout });
         const navigating = page.waitForRequest(restoredUrl.href, { timeout });
@@ -548,6 +548,66 @@ test('previews restored panel settings and opens sign-in at the restored base pa
         assert.ok((await navigating).isNavigationRequest());
         await page.waitForURL(signInUrl.href, { timeout });
     } finally {
+        await page.close();
+    }
+});
+
+test('waits for the restored panel listener and opens its new address after Apply', async () => {
+    const page = await workspace.browser.newPage({ viewport: coreDesktop });
+    const preview = await mockPreview(page, fixture('stopped'));
+    const basePath = '/restored/wave';
+    const restart = { protocol: 'https:', hostname: 'restored.example.test', port: 2443 };
+    const target = `https://${restart.hostname}:${restart.port}${basePath}/`;
+    const applyGate = Promise.withResolvers();
+    const probeGate = Promise.withResolvers();
+    const applyUrl = new URL('api/backup/apply', workspace.url).href;
+    await page.route(new URL('api/backup/prepare', workspace.url).href, route => route.fulfill({
+        status: 200, json: {
+            ok: true, token: 'panel-restore-token', current_waterwall_version: '1.6.0', waterwall_version: '1.6.0',
+            wave_version: '0.0.1-beta', panel_settings: { base_path: basePath, administrator: 'restored-admin',
+                restart_required: true },
+            configs: [], replaced_configs: [], removed_configs: [],
+        },
+    }));
+    await page.route(applyUrl, async route => {
+        await applyGate.promise;
+        await route.fulfill({ status: 200, json: { ok: true, base_path: basePath, restart } });
+    });
+    await page.route(target + 'sign-in', async route => {
+        await probeGate.promise;
+        await route.fulfill({ status: 200 });
+    });
+    await page.route(target, route => route.fulfill({ contentType: 'text/html', body: '<title>Restored panel</title>' }));
+    try {
+        await page.goto(workspace.url);
+        await waitForServerStatus(page);
+        await click(page, 675, await backupButtonsRow(page));
+        await status(page, /Restore backup/);
+        await chooseBackupFile(page, Buffer.from('Backup ZIP'));
+        await status(page, /Wave will restart the panel/);
+        const applying = page.waitForRequest(applyUrl, { timeout });
+        await confirmDialog(page, (x, y) => click(page, x, y));
+        await applying;
+        preview.notifyBasePath(basePath);
+        await preview.disconnectBoth();
+        await settleCanvas(page);
+        assert.equal(page.url(), workspace.url, 'The applying tab waits for the restored listener address.');
+        assert.ok(await page.evaluate(() => Module.backupRequestPending('apply')),
+            'Revoking the previous session does not interrupt Apply.');
+
+        const probing = page.waitForRequest(target + 'sign-in', { timeout });
+        applyGate.resolve();
+        assert.equal((await probing).isNavigationRequest(), false);
+        const transition = page.locator('#startup');
+        await transition.waitFor({ timeout });
+        assert.equal(await transition.textContent(), 'Restarting Wave…');
+        assert.equal(page.url(), workspace.url, 'The browser waits for the restored listener to respond.');
+        probeGate.resolve();
+        await page.waitForURL(target, { timeout });
+        assert.equal(await page.title(), 'Restored panel');
+    } finally {
+        applyGate.resolve();
+        probeGate.resolve();
         await page.close();
     }
 });

@@ -777,18 +777,22 @@ executable or known external file dependencies, including databases required
 by Router rules, before confirmation. It preserves disabled drafts and warns
 when the selected release lacks one of their node types. Supply host-specific
 files separately. Restore preview shows the restored administrator and base
-path, and reports TLS problems to resolve before restarting. ZIPs contain the
-Wave administrator's password hash and may contain WaterWall credentials, so
-store them privately and use HTTPS for remote access.
+path, and reports problems loading the restored TLS files.
+ZIPs contain the Wave administrator's password hash and may contain WaterWall
+credentials, so store them privately and use HTTPS for remote access.
 [Authentication and HTTPS](authentication.md)
 
 Confirm to apply the restored configuration files, core settings, and selected
 WaterWall release together with any included panel settings. A version 2 restore
 replaces the administrator credentials, signs out existing sessions, generates
 a fresh JWT signing key, and switches to the restored base path. Sign in there
-with the administrator credentials from the backup. The listener address, port,
-and TLS changes take effect after Wave restarts. A version 1 backup restores the
-WaterWall workspace and keeps the destination panel settings and sessions.
+with the administrator credentials from the backup. If the listener address, port,
+or TLS settings change, Wave restarts its panel listener. The initiating browser
+opens the restored path and port using the TLS domain for HTTPS or its current
+hostname for HTTP. If the port is unavailable or Wave cannot load the TLS
+files, the restore saves the settings, keeps the previous listener active, and
+reports the error in Logs. A version 1 backup restores the WaterWall workspace
+and keeps the destination panel settings and sessions.
 Wave keeps unrelated files in the config folders, including
 the files of configs removed from the workspace registry. Wave recovers an
 interrupted restore at startup before opening the workspace. Keep the config

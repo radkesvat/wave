@@ -509,7 +509,7 @@ struct PanelDatabase::Impl {
     PanelSettings settings{};
     std::string base_path;
     int session_expiry_days = default_session_expiry_days;
-    bool tls_activation_pending = false;
+    bool listener_restart_pending = false;
 };
 
 PanelDatabase::PanelDatabase(const char* executable, const fs::path& site_dir, bool check_only)
@@ -524,8 +524,9 @@ const fs::path& PanelDatabase::directory() const
     return impl_->directory;
 }
 
-const PanelSettings& PanelDatabase::settings() const
+PanelSettings PanelDatabase::settings() const
 {
+    std::lock_guard lock(impl_->write_mutex);
     return impl_->settings;
 }
 
@@ -547,7 +548,7 @@ bool PanelDatabase::save_panel_base_path(std::string_view previous, std::string_
     }
     std::string next(path);
     std::lock_guard lock(impl_->write_mutex);
-    if (impl_->tls_activation_pending || impl_->base_path != previous) {
+    if (impl_->listener_restart_pending || impl_->base_path != previous) {
         return false;
     }
     auto current = impl_->read_existing();
@@ -595,19 +596,36 @@ Json PanelDatabase::save_tls_settings(const std::optional<TlsSettings>& tls,
     if (activation) {
         *activation = std::move(validated);
         // The acknowledgement contains the current base path. Keep it stable through the switch.
-        impl_->tls_activation_pending = static_cast<bool>(*activation);
+        impl_->listener_restart_pending = static_cast<bool>(*activation);
     }
     return std::move(saved);
 }
 
-void PanelDatabase::finish_tls_activation(std::optional<TlsSettings> tls)
+void PanelDatabase::begin_listener_restart()
 {
-    // The previous listener and its request handlers have already drained.
     std::lock_guard lock(impl_->write_mutex);
-    if (tls) {
-        impl_->settings.tls = std::move(tls);
+    impl_->listener_restart_pending = true;
+}
+
+void PanelDatabase::finish_listener_restart(std::optional<PanelSettings> settings)
+{
+    std::lock_guard lock(impl_->write_mutex);
+    if (settings) {
+        impl_->settings = std::move(*settings);
     }
-    impl_->tls_activation_pending = false;
+    impl_->listener_restart_pending = false;
+}
+
+std::unique_ptr<httplib::Server> PanelDatabase::make_listener(const PanelSettings& settings) const
+{
+    if (!settings.tls) {
+        return std::make_unique<httplib::Server>();
+    }
+#ifdef WAVE_ENABLE_AUTH
+    return make_tls_server(*settings.tls, impl_->site_dir, settings.listen_port);
+#else
+    throw std::runtime_error("TLS is enabled in wave-db.json. Build with WAVE_ENABLE_AUTH=ON to use it.");
+#endif
 }
 
 int PanelDatabase::session_expiry_days() const
@@ -760,19 +778,22 @@ void PanelDatabase::validate_panel_backup(const Json& panel) const
     }
 }
 
+PanelSettings PanelDatabase::panel_backup_listener_settings(const Json& panel) const
+{
+    const auto& listen = panel.at("listen");
+    return {listen.at("host").get<std::string>(), listen.at("port").get<int>(), load_tls(panel)};
+}
+
 std::string PanelDatabase::panel_backup_tls_error(const Json& panel) const
 {
-#ifdef WAVE_ENABLE_AUTH
     try {
-        if (const auto tls = load_tls(panel)) {
-            make_tls_server(*tls, impl_->site_dir, panel.at("listen").at("port").get<int>());
+        const auto settings = panel_backup_listener_settings(panel);
+        if (settings.tls) {
+            make_listener(settings);
         }
     } catch (const std::runtime_error& error) {
         return error.what();
     }
-#else
-    (void)panel;
-#endif
     return {};
 }
 

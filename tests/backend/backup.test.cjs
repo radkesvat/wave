@@ -3,8 +3,11 @@ const { execFile } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
 const { once } = require('node:events');
 const { chown, mkdir, readFile, readdir, readlink, stat, unlink, writeFile } = require('node:fs/promises');
+const { request: requestHttps } = require('node:https');
+const { connect, createServer } = require('node:net');
 const { dirname, join } = require('node:path');
 const { test } = require('node:test');
+const { setTimeout: delay } = require('node:timers/promises');
 const { promisify } = require('node:util');
 const { crc32, inflateRawSync } = require('node:zlib');
 const { authFixture, fixtureSession, nextPreviewSnapshot, openPreview, requestPreview, seedCore, timeout } =
@@ -14,7 +17,8 @@ const { bundledSchematicFile, schematicFile, tlsFixture } = require('./tls_fixtu
 const archiveVersion = '1.6.1';
 
 function call(fixture, route, { session, body, type = 'application/json', headers = {}, ...options } = {}) {
-    return fetch(`${fixture.origin}${fixture.basePath}${route}`, {
+    const url = `${fixture.origin}${fixture.basePath}${route}`;
+    const requestOptions = {
         ...(body === undefined ? {} : { method: 'POST', body }),
         headers: {
             ...(session ? { Cookie: session } : {}),
@@ -23,6 +27,27 @@ function call(fixture, route, { session, body, type = 'application/json', header
         },
         signal: AbortSignal.timeout(timeout),
         ...options,
+    };
+    if (!url.startsWith('https://')) return fetch(url, requestOptions);
+    return new Promise((resolve, reject) => {
+        const request = requestHttps(url, { ...requestOptions, ca: fixture.ca, lookup: fixture.lookup, agent: false },
+            async response => {
+                try {
+                    const chunks = [];
+                    for await (const chunk of response) chunks.push(chunk);
+                    const headers = new Headers();
+                    for (let i = 0; i < response.rawHeaders.length; i += 2) {
+                        headers.append(response.rawHeaders[i], response.rawHeaders[i + 1]);
+                    }
+                    resolve(new Response(chunks.length ? Buffer.concat(chunks) : null, {
+                        status: response.statusCode, headers,
+                    }));
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        request.on('error', reject);
+        request.end(body === undefined ? undefined : Buffer.from(body));
     });
 }
 
@@ -39,6 +64,48 @@ async function readReply(response, ok) {
     assert.equal(reply.ok, ok);
     if (!ok) assert.ok(reply.error);
     return reply;
+}
+
+const auth = (fixture, action, credentials) => call(fixture, `/api/auth/${action}`, {
+    body: JSON.stringify(credentials),
+});
+
+async function signIn(fixture, credentials, setup = false) {
+    if (setup) assert.equal((await auth(fixture, 'setup', credentials)).status, 201);
+    const response = await auth(fixture, 'sign-in', credentials);
+    assert.equal(response.status, 204);
+    return response.headers.get('set-cookie').split(';', 1)[0];
+}
+
+async function downloadBackup(fixture, session) {
+    const response = await call(fixture, '/api/backup', { session });
+    assert.equal(response.status, 200);
+    return Buffer.from(await response.arrayBuffer());
+}
+
+async function waitForListener(fixture) {
+    const deadline = Date.now() + timeout;
+    for (;;) {
+        try {
+            const response = await call(fixture, '/sign-in');
+            assert.equal(response.status, 200);
+            return;
+        } catch (error) {
+            const networkCode = error.cause?.code ?? error.code;
+            if (!['ECONNREFUSED', 'ECONNRESET', 'UND_ERR_SOCKET'].includes(networkCode) ||
+                Date.now() >= deadline) throw error;
+            await delay(20);
+        }
+    }
+}
+
+async function assertListenerClosed(fixture) {
+    const socket = connect({ host: fixture.bindHost, port: Number(new URL(fixture.origin).port) });
+    try {
+        await assert.rejects(once(socket, 'connect', { signal: AbortSignal.timeout(timeout) }), { code: 'ECONNREFUSED' });
+    } finally {
+        socket.destroy();
+    }
 }
 
 async function provisionRelease(fixture) {
@@ -371,15 +438,6 @@ test('backs up and restores Wave panel settings and administrator credentials wi
     const newPath = '/archived/wave';
     const sourceCredentials = { username: 'source-admin', password: 'backup source test passphrase 9Qf4W' };
     const oldCredentials = { username: 'destination-admin', password: 'backup destination test passphrase 6Kn7X' };
-    const auth = (fixture, action, credentials) => call(fixture, `/api/auth/${action}`, {
-        body: JSON.stringify(credentials),
-    });
-    async function signIn(fixture, credentials, setup = false) {
-        if (setup) assert.equal((await auth(fixture, 'setup', credentials)).status, 201);
-        const response = await auth(fixture, 'sign-in', credentials);
-        assert.equal(response.status, 204);
-        return response.headers.get('set-cookie').split(';', 1)[0];
-    }
 
     let tls = { enabled: false, domain: source.hostname,
         certificate_chain: join(source.cwd, 'saved certificate.pem'), private_key: join(source.cwd, 'saved key.pem') };
@@ -455,7 +513,8 @@ test('backs up and restores Wave panel settings and administrator credentials wi
         administrator: sourceCredentials.username, base_path: newPath, restart_required: true,
     });
     if (tls.enabled) {
-        assert.match(proposal.missing_dependencies.join('\n'), /panel TLS.*Cannot read the TLS private key PEM/i);
+        assert.match(proposal.missing_dependencies.join('\n'),
+            /current listener.*restored TLS settings.*Cannot read the TLS private key PEM/i);
     }
     assert.equal(await readFile(destination.database, 'utf8'), before);
     await nextPreviewSnapshot(destinationView.socket, frame => !frame.data.server.core.checking_updates);
@@ -497,6 +556,119 @@ test('backs up and restores Wave panel settings and administrator credentials wi
     assert.equal(initial.settings.donation.answered_at, sourceDb.donation.answered_at);
     assert.equal(initial.settings.tls.enabled, tls.enabled);
     assert.equal(initial.settings.tls.restart_required, tls.enabled);
+});
+
+test('restarts the panel on the restored HTTPS port and can restore an ephemeral HTTP listener', async t => {
+    const source = await authFixture(t, undefined, { encrypted: false, basePath: '/archived/secure' });
+    const sourceCredentials = { username: 'source-admin', password: 'backup source test passphrase 9Qf4W' };
+    const destinationCredentials = { username: 'destination-admin', password: 'backup destination test passphrase 6Kn7X' };
+    await source.start();
+    const sourceSession = await signIn(source, sourceCredentials, true);
+    const sourceView = await openPreview(t, source.origin, sourceSession, source.basePath);
+    if (!sourceView.initial.settings.tls.supported) {
+        t.skip('Wave was built without HTTPS support.');
+        return;
+    }
+    const { ca, chainPath, keyPath } = await tlsFixture(source.cwd);
+    const tls = { enabled: true, domain: source.hostname, certificate_chain: chainPath, private_key: keyPath };
+    const saved = await requestPreview(sourceView.socket, 'apply_tls_settings', { settings: tls });
+    assert.equal(saved.ok, true, saved.feedback);
+    const httpsBackup = await downloadBackup(source, sourceSession);
+    const httpsPort = Number(new URL(source.origin).port);
+    const destination = await authFixture(t, undefined, { encrypted: false, basePath: '/previous/http' });
+    assert.notEqual(new URL(destination.origin).port, String(httpsPort));
+    await destination.start();
+    const pid = destination.pid;
+    const oldSession = await signIn(destination, destinationCredentials, true);
+    const plainEntries = readZip(await downloadBackup(destination, oldSession));
+    const plainManifest = JSON.parse(plainEntries.get('manifest.json'));
+    plainManifest.panel_settings.listen.port = httpsPort;
+    const httpBackup = withManifest(plainEntries, plainManifest);
+    plainManifest.panel_settings.listen.port = 0;
+    const ephemeralBackup = withManifest(plainEntries, plainManifest);
+    const destinationView = await openPreview(t, destination.origin, oldSession, destination.basePath);
+    if (destinationView.initial.server.core.checking_updates) {
+        await nextPreviewSnapshot(destinationView.socket, frame => !frame.data.server.core.checking_updates);
+    }
+    await source.stop();
+
+    const proposal = await readReply(await prepare(destination, oldSession, httpsBackup), true);
+    assert.equal(proposal.panel_settings.restart_required, true);
+    assert.deepEqual(await readReply(await apply(destination, oldSession, proposal.token), true), {
+        ok: true, base_path: source.basePath, restart: { protocol: 'https:', hostname: tls.domain, port: httpsPort },
+    });
+    const secure = { ...destination, ca, basePath: source.basePath, origin: `https://${tls.domain}:${httpsPort}` };
+    await waitForListener(secure);
+    assert.equal(destination.pid, pid);
+    await assertListenerClosed(destination);
+    assert.equal((await call(secure, '/api/session', { session: oldSession })).status, 401);
+    const secureSession = await signIn(secure, sourceCredentials);
+    assert.match(secureSession, /^__Host-wave_session=/);
+    const secureIdentity = await (await call(secure, '/api/session', { session: secureSession })).json();
+    assert.equal(secureIdentity.username, sourceCredentials.username);
+    const workspace = await call(secure, '/api/workspace', { session: secureSession,
+        headers: { 'X-Wave-Session': secureIdentity.session_id } });
+    assert.equal(workspace.status, 200);
+    assert.equal((await workspace.json()).data.settings.tls.restart_required, false);
+    const savedDb = JSON.parse(await readFile(destination.database, 'utf8'));
+    assert.deepEqual(savedDb.tls, tls);
+    assert.equal(savedDb.listen.port, httpsPort);
+    assert.equal(savedDb['panel-base-path'], source.basePath);
+
+    const downgrade = await readReply(await prepare(secure, secureSession, httpBackup), true);
+    assert.equal(downgrade.panel_settings.restart_required, true);
+    assert.deepEqual(await readReply(await apply(secure, secureSession, downgrade.token), true), {
+        ok: true, base_path: destination.basePath, restart: { protocol: 'http:', port: httpsPort },
+    });
+    const plain = { ...destination, origin: `http://${destination.bindHost}:${httpsPort}` };
+    await waitForListener(plain);
+    assert.equal(destination.pid, pid);
+    const plainSession = await signIn(plain, destinationCredentials);
+    assert.match(plainSession, /^wave_session=/);
+    const { initial } = await openPreview(t, plain.origin, plainSession, plain.basePath);
+    assert.equal(initial.settings.tls.enabled, false);
+    assert.equal(initial.settings.tls.restart_required, false);
+
+    const ephemeral = await readReply(await prepare(plain, plainSession, ephemeralBackup), true);
+    assert.equal(ephemeral.panel_settings.restart_required, true);
+    const reply = await readReply(await apply(plain, plainSession, ephemeral.token), true);
+    const httpPort = reply.restart?.port;
+    assert.ok(Number.isInteger(httpPort) && httpPort > 0 && httpPort !== httpsPort);
+    assert.deepEqual(reply, { ok: true, base_path: plain.basePath, restart: { port: httpPort } });
+    const assigned = { ...plain, origin: `http://${destination.bindHost}:${httpPort}` };
+    await waitForListener(assigned);
+    assert.equal(destination.pid, pid);
+    await assertListenerClosed(plain);
+    await signIn(assigned, destinationCredentials);
+    assert.equal(JSON.parse(await readFile(destination.database, 'utf8')).listen.port, 0);
+});
+
+test('keeps the restored workspace reachable when the restored port is occupied', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false, basePath: '/original/path' });
+    await fixture.start();
+    const session = await fixtureSession(fixture);
+    const entries = readZip(await downloadBackup(fixture, session));
+    const manifest = JSON.parse(entries.get('manifest.json'));
+    const occupied = createServer();
+    occupied.listen(0, fixture.bindHost);
+    await once(occupied, 'listening');
+    t.after(() => new Promise(resolve => occupied.close(resolve)));
+    const port = occupied.address().port;
+    const basePath = '/restored/path';
+    manifest.panel_settings.listen.port = port;
+    manifest.panel_settings['panel-base-path'] = basePath;
+    const { token } = await readReply(await prepare(fixture, session, withManifest(entries, manifest)), true);
+    assert.deepEqual(await readReply(await apply(fixture, session, token), true), { ok: true, base_path: basePath });
+
+    const restored = { ...fixture, basePath };
+    assert.equal((await call(restored, '/api/session', { session })).status, 401);
+    const signedIn = await fixtureSession(restored, { setup: false });
+    const { initial } = await openPreview(t, fixture.origin, signedIn, basePath);
+    assert.ok(initial.logs.some(entry => entry.level === 'error' && /could not.*(?:bind|start)|port.*use/i.test(entry.message)),
+        'The logs explain why the restored listener settings are pending.');
+    const db = JSON.parse(await readFile(fixture.database, 'utf8'));
+    assert.equal(db.listen.port, port);
+    assert.equal(db['panel-base-path'], basePath);
 });
 
 test('preserves empty rosters and byte-exact AuthenticationServer recovery pairs in ZIPs', async t => {

@@ -376,7 +376,12 @@ struct Reply {
 
 struct WorkspaceReply {
     std::string payload;
-    std::optional<PanelTlsActivation> tls_activation;
+    std::optional<PanelListenerRestart> listener_restart;
+};
+
+struct RestoreReply {
+    Json data = {{"ok", true}};
+    std::optional<PanelListenerRestart> listener_restart;
 };
 
 struct CoreCatalogResult {
@@ -470,8 +475,8 @@ struct UsersRosterPoll {
 
 class Preview {
   public:
-    explicit Preview(std::shared_ptr<PanelDatabase> database)
-        : database_(std::move(database)), config_files_(database_->directory()),
+    Preview(std::shared_ptr<PanelDatabase> database, PreparePanelRestart prepare_restart)
+        : database_(std::move(database)), prepare_restart_(std::move(prepare_restart)), config_files_(database_->directory()),
           config_users_(database_->directory()),
           core_(std::make_unique<WaterWall>(database_->directory(), waterwall_version())),
           core_logs_(database_->directory()),
@@ -554,7 +559,7 @@ class Preview {
             }
             if (const auto error = database_->panel_backup_tls_error(*panel); !error.empty()) {
                 backup.missing_dependencies.push_back(
-                    "Resolve the restored panel TLS settings before restarting Wave. " + error);
+                    "The current listener will stay active if Wave cannot load the restored TLS settings. " + error);
             }
             restored_panel = {{"base_path", panel->at(panel_base_path_key)},
                               {"administrator", panel->at("admin").front().at("username")},
@@ -600,11 +605,11 @@ class Preview {
         return result;
     }
 
-    std::string restore_workspace_backup(std::string_view token, std::string_view session, AuthStore& store)
+    RestoreReply restore_workspace_backup(std::string_view token, std::string_view session, AuthStore& store)
     {
         std::lock_guard lock(mutex_);
-        if (tls_activation_pending_) {
-            throw WorkspaceBackupBusy("Wait for Wave to activate HTTPS before restoring a backup.");
+        if (listener_restart_pending_) {
+            throw WorkspaceBackupBusy("Wait for the panel listener to restart before restoring a backup.");
         }
         expire_workspace_backup();
         if (!pending_backup_ || pending_backup_->token != token || pending_backup_->session != session) {
@@ -628,12 +633,38 @@ class Preview {
         }
         auto candidate = std::make_unique<WaterWall>(database_->directory(), version);
         const auto panel = backup.manifest.find("panel_settings");
-        std::string restored_path;
+        RestoreReply reply;
+        std::string listener_error;
+        const auto active = database_->settings();
+        if (panel != backup.manifest.end() && panel_restore_needs_restart(*panel, active)) {
+            try {
+                auto settings = database_->panel_backup_listener_settings(*panel);
+                auto listener = database_->make_listener(settings);
+                reply.listener_restart.emplace(prepare_restart_(std::move(listener), std::move(settings)));
+            } catch (const std::runtime_error& error) {
+                listener_error = error.what();
+            }
+        }
         try {
             if (panel == backup.manifest.end()) {
                 apply_workspace_backup(*database_, backup, pending.token);
             } else {
-                restored_path = panel->at(panel_base_path_key).get<std::string>();
+                const auto& restored_path = panel->at(panel_base_path_key).get_ref<const std::string&>();
+                reply.data["base_path"] = restored_path;
+                if (const auto& restart = reply.listener_restart) {
+                    auto destination = Json::object();
+                    if (const auto& tls = restart->settings.tls) {
+                        destination["protocol"] = "https:";
+                        destination["hostname"] = tls->domain;
+                    } else if (active.tls) {
+                        destination["protocol"] = "http:";
+                    }
+                    if (!restart->bind_after_stop || restart->settings.tls || active.tls) {
+                        destination["port"] = restart->port;
+                    }
+                    reply.data["restart"] = std::move(destination);
+                    database_->begin_listener_restart();
+                }
                 if (!store.restore_admin(panel->at("admin"), session, restored_path, [&](const Json& auth_state) {
                         apply_workspace_backup(*database_, backup, pending.token, auth_state);
                     })) {
@@ -641,6 +672,9 @@ class Preview {
                 }
             }
         } catch (...) {
+            if (reply.listener_restart) {
+                database_->finish_listener_restart(std::nullopt);
+            }
             std::error_code error;
             workspace_recovery_required_ = std::filesystem::exists(database_->directory() / ".wave-restore", error) ||
                                            static_cast<bool>(error);
@@ -651,10 +685,11 @@ class Preview {
             auto& settings = data_["settings"];
             settings["session_expiry_days"] = panel->at("session_expiry_days");
             settings["theme"] = panel->at("theme");
-            settings["tls"] = panel_tls_settings(panel->at("tls"), database_->settings().tls);
+            settings["tls"] = panel_tls_settings(panel->at("tls"), active.tls);
             donation_ = read_donation(panel->at("donation"));
-            if (panel_restore_needs_restart(*panel, database_->settings())) {
-                log("warning", "Restart Wave to apply the restored listener and TLS settings.");
+            if (!listener_error.empty()) {
+                log("error", "Could not activate the restored panel listener. Wave kept the previous listener. " +
+                                 listener_error);
             }
         }
         saved_core_settings_ = std::move(backup.manifest.at("core_settings"));
@@ -672,8 +707,9 @@ class Preview {
         workspace_restored_ = true;
         sync_core();
         log("success", "Restored the WaterWall workspace backup.");
+        listener_restart_pending_ = reply.listener_restart.has_value();
         ++revision_;
-        return restored_path;
+        return reply;
     }
 
     std::string overview()
@@ -714,21 +750,21 @@ class Preview {
         return handle_message(message, sent_revision, sent_schematic, nullptr, session);
     }
 
-    void finish_tls_activation(bool applied)
+    void finish_listener_restart(bool applied)
     {
         std::lock_guard lock(mutex_);
-        tls_activation_pending_ = false;
+        listener_restart_pending_ = false;
         if (applied) {
             data_["settings"]["tls"]["restart_required"] = false;
-            log("info", "Panel HTTPS is active.");
+            log("info", database_->settings().tls ? "Panel HTTPS is active." : "Panel HTTP is active.");
         } else {
-            log("error", "Could not start the HTTPS listener. Wave resumed HTTP with the saved TLS settings pending.");
+            log("error", "Could not restart the panel listener. Wave resumed the previous listener with the saved settings pending.");
         }
         ++revision_;
     }
 
     void serve(httplib::ws::WebSocket& socket, const std::function<bool()>& session,
-               const ActivatePanelTls& activate_tls)
+               const RestartPanel& restart_panel)
     {
         // Only this handler writes to its socket. A short read timeout lets it
         // publish shared state changes while the current browser is idle.
@@ -755,12 +791,12 @@ class Preview {
                              : handle_message(result == httplib::ws::Text ? std::string_view(message)
                                                                          : std::string_view{},
                                               sent_revision, sent_schematic, &roster, session);
-            if (frame.tls_activation) {
+            if (frame.listener_restart) {
                 // The change is saved even if the client has already disconnected.
                 if (session()) {
                     socket.send(frame.payload);
                 }
-                activate_tls(std::move(*frame.tls_activation));
+                restart_panel(std::move(*frame.listener_restart));
                 return;
             }
             if (!frame.payload.empty()) {
@@ -1542,7 +1578,7 @@ class Preview {
         const bool changes_workspace = workspace_mutation(action) &&
                                        (uses_core_schematic(action) || edits_config_registry ||
                                         action == "restore_preview_backup");
-        std::optional<PanelTlsActivation> tls_activation;
+        std::optional<PanelListenerRestart> listener_restart;
         auto reply = action.empty() ? Reply{false, "Send a JSON panel action."}
                      : too_large    ? Reply{false, "That panel request is too large."}
                      : roster_action ? Reply{false, "The account roster requires a WebSocket connection."}
@@ -1550,7 +1586,7 @@ class Preview {
                          ? Reply{false, "Restart Wave to finish workspace restore recovery."}
                      : stale        ? Reply{false, "WaterWall changed version. Reload the form and retry."}
                      : live_operation ? live_config_users(*live_operation, request, lock)
-                                      : dispatch(action, request, tls_activation);
+                                      : dispatch(action, request, listener_restart);
         if (reply.ok && changes_workspace) {
             pending_backup_.reset();
         }
@@ -1582,7 +1618,7 @@ class Preview {
             frame["request_id"] = *id;
         }
         sent_revision = revision_;
-        return {frame.dump(-1, ' ', false, Json::error_handler_t::replace), std::move(tls_activation)};
+        return {frame.dump(-1, ' ', false, Json::error_handler_t::replace), std::move(listener_restart)};
     }
 
     void add_log(std::string_view source, std::string_view timestamp, std::string_view level,
@@ -1681,10 +1717,10 @@ class Preview {
         return complete("Applied sample TLS settings.");
     }
 
-    Reply apply_tls_settings(const Json& input, std::optional<PanelTlsActivation>& activation)
+    Reply apply_tls_settings(const Json& input, std::optional<PanelListenerRestart>& activation)
     {
-        if (tls_activation_pending_) {
-            return {false, "Wave is already activating HTTPS."};
+        if (listener_restart_pending_) {
+            return {false, "The panel listener is already restarting."};
         }
         const auto values = input.find("settings");
         if (values == input.end() || !values->is_object()) {
@@ -1712,20 +1748,26 @@ class Preview {
             selected = TlsSettings{domain->get<std::string>(), chain->get<std::string>(), key->get<std::string>()};
         }
 
-        const auto& active = database_->settings();
+        auto active = database_->settings();
         const bool schedule = selected && !active.tls && activate != input.end() && *activate == true;
         std::unique_ptr<httplib::Server> listener;
         try {
             const auto saved = database_->save_tls_settings(selected, schedule ? &listener : nullptr);
-            data_["settings"]["tls"] = panel_tls_settings(saved, database_->settings().tls);
+            data_["settings"]["tls"] = panel_tls_settings(saved, active.tls);
+            if (schedule) {
+                active.tls = std::move(selected);
+                activation.emplace(prepare_restart_(std::move(listener), std::move(active)));
+            }
         } catch (const std::runtime_error& error) {
+            if (schedule) {
+                database_->finish_listener_restart(std::nullopt);
+            }
             return {false, error.what()};
         }
         if (schedule) {
-            auto authority = tls_authority(selected->domain, active.listen_port);
-            auto url = "https://" + authority + database_->panel_base_path() + '/';
-            activation.emplace(PanelTlsActivation{std::move(listener), std::move(*selected), std::move(authority)});
-            tls_activation_pending_ = true;
+            const auto url = "https://" + tls_authority(activation->settings.tls->domain, activation->port) +
+                database_->panel_base_path() + '/';
+            listener_restart_pending_ = true;
             auto reply = complete("Saved panel TLS settings. Restarting the panel on HTTPS.");
             reply.result = {{"https_url", std::move(url)}};
             return reply;
@@ -2897,7 +2939,7 @@ class Preview {
         return {result.success, std::move(result.message), false, std::move(result.result)};
     }
 
-    Reply dispatch(std::string_view action, const Json& input, std::optional<PanelTlsActivation>& tls_activation)
+    Reply dispatch(std::string_view action, const Json& input, std::optional<PanelListenerRestart>& listener_restart)
     {
         if (action == "refresh") {
             return complete("Workspace refreshed.", "info");
@@ -2938,7 +2980,7 @@ class Preview {
             return apply_settings(input);
         }
         if (action == "apply_tls_settings") {
-            return apply_tls_settings(input, tls_activation);
+            return apply_tls_settings(input, listener_restart);
         }
         if (action == "apply_session_settings") {
             return apply_session_settings(input);
@@ -2971,6 +3013,7 @@ class Preview {
     std::condition_variable_any roster_timer_;
     LinuxMetrics host_;
     std::shared_ptr<PanelDatabase> database_;
+    PreparePanelRestart prepare_restart_;
     CoreConfigFiles config_files_;
     CoreConfigUsers config_users_;
     std::unique_ptr<WaterWall> core_;
@@ -2986,7 +3029,7 @@ class Preview {
     bool manual_catalog_check_ = false;
     bool queued_catalog_check_ = false;
     bool restart_pending_ = false;
-    bool tls_activation_pending_ = false;
+    bool listener_restart_pending_ = false;
     std::string restart_error_;
     std::map<int, Json> live_configs_;
     std::map<std::pair<int, std::string>, LiveUsersAccess> live_users_access_;
@@ -3040,7 +3083,7 @@ void backup_request(const std::shared_ptr<AuthStore>& store, const httplib::Requ
 }
 
 void configure_backup_routes(httplib::Server& server, const std::shared_ptr<AuthStore>& store,
-                             const std::shared_ptr<Preview>& preview)
+                             const std::shared_ptr<Preview>& preview, const RestartPanel& restart_panel)
 {
     server.Get(panel_route(backup_download_route), [preview, store](const httplib::Request& req, httplib::Response& res) {
         backup_request(store, req, res, [&](const std::string& session) {
@@ -3082,7 +3125,8 @@ void configure_backup_routes(httplib::Server& server, const std::shared_ptr<Auth
                     });
                 });
     post_panel_json(server, panel_route(backup_apply_route),
-                    [preview, store](const httplib::Request& req, httplib::Response& res, std::string_view body) {
+                    [preview, store, restart_panel](const httplib::Request& req, httplib::Response& res,
+                                                    std::string_view body) {
                         backup_request(store, req, res, [&](const std::string& session) {
                             std::string error;
                             const auto input = parse_plain_core_config_json(body, "Invalid restore request.", error);
@@ -3091,12 +3135,12 @@ void configure_backup_routes(httplib::Server& server, const std::shared_ptr<Auth
                                 throw std::runtime_error("Choose a validated backup before restoring it.");
                             }
                             try {
-                                auto path = preview->restore_workspace_backup(token, session, *store);
-                                Json reply = {{"ok", true}};
-                                if (!path.empty()) {
-                                    reply["base_path"] = std::move(path);
+                                auto reply = preview->restore_workspace_backup(token, session, *store);
+                                backup_json(res, reply.data);
+                                if (reply.listener_restart) {
+                                    res.set_header("Connection", "close");
+                                    restart_panel(std::move(*reply.listener_restart));
                                 }
-                                backup_json(res, reply);
                             } catch (const WorkspaceBackupSessionEnded& error) {
                                 backup_error(res, 401, error.what());
                             } catch (const WorkspaceBackupBusy& error) {
@@ -3144,7 +3188,7 @@ void send_workspace_http(httplib::Response& response, std::string payload, const
 void configure_workspace_http_routes(httplib::Server& server, const std::shared_ptr<Preview>& preview,
                                      const std::shared_ptr<AuthStore>& store,
                                      const std::shared_ptr<PanelDatabase>& database,
-                                     const ActivatePanelTls& activate_tls)
+                                     const RestartPanel& restart_panel)
 {
     const auto route = panel_route(workspace_http_route);
     server.Get(route, [preview, store, database](const httplib::Request& req, httplib::Response& res) {
@@ -3162,7 +3206,7 @@ void configure_workspace_http_routes(httplib::Server& server, const std::shared_
                             session);
     });
     post_panel_json(server, route,
-                    [preview, store, database, activate_tls](const httplib::Request& req, httplib::Response& res,
+                    [preview, store, database, restart_panel](const httplib::Request& req, httplib::Response& res,
                                                              std::string_view body) {
                         const auto session = workspace_http_session(store, database, req);
                         if (!session()) {
@@ -3176,8 +3220,8 @@ void configure_workspace_http_routes(httplib::Server& server, const std::shared_
                         }
                         auto reply = preview->http_action(body, session);
                         send_workspace_http(res, std::move(reply.payload), session);
-                        if (reply.tls_activation) {
-                            activate_tls(std::move(*reply.tls_activation));
+                        if (reply.listener_restart) {
+                            restart_panel(std::move(*reply.listener_restart));
                         }
                     },
                     max_workspace_action_bytes);
@@ -3186,14 +3230,14 @@ void configure_workspace_http_routes(httplib::Server& server, const std::shared_
 } // namespace
 
 PreviewRoutes make_preview_routes(std::shared_ptr<AuthStore> store, std::shared_ptr<PanelDatabase> database,
-                                  ActivatePanelTls activate_tls)
+                                  PreparePanelRestart prepare_restart, RestartPanel restart_panel)
 {
-    const auto preview = std::make_shared<Preview>(database);
+    const auto preview = std::make_shared<Preview>(database, std::move(prepare_restart));
     return {
-        [preview, store = std::move(store), database = std::move(database), activate_tls = std::move(activate_tls)](
+        [preview, store = std::move(store), database = std::move(database), restart_panel = std::move(restart_panel)](
             httplib::Server& server) {
-            configure_backup_routes(server, store, preview);
-            configure_workspace_http_routes(server, preview, store, database, activate_tls);
+            configure_backup_routes(server, store, preview, restart_panel);
+            configure_workspace_http_routes(server, preview, store, database, restart_panel);
             server.WebSocket(panel_route("/ws/overview"),
                              [preview, store, database](const httplib::Request& req, httplib::ws::WebSocket& socket) {
                                  if (!websocket_session(store, database, req)()) {
@@ -3205,12 +3249,12 @@ PreviewRoutes make_preview_routes(std::shared_ptr<AuthStore> store, std::shared_
                                  }
                              });
             server.WebSocket(panel_route("/ws/workspace"),
-                             [preview, store, database, activate_tls](const httplib::Request& req,
+                             [preview, store, database, restart_panel](const httplib::Request& req,
                                                                      httplib::ws::WebSocket& socket) {
-                                 preview->serve(socket, websocket_session(store, database, req), activate_tls);
+                                 preview->serve(socket, websocket_session(store, database, req), restart_panel);
                              });
         },
-        [preview](bool applied) { preview->finish_tls_activation(applied); },
+        [preview](bool applied) { preview->finish_listener_restart(applied); },
     };
 }
 

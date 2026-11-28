@@ -265,14 +265,55 @@
           return openingPanelLocation;
         }
 
-        function followPanelLocation(path) {
+        function validPanelLocation(path) {
+          return typeof path === "string" && path.endsWith("/") && /^(?:\/[A-Za-z0-9_-]+)+\/$/.test(path);
+        }
+
+        function followPanelLocation(path, fromRestore = false) {
           if (openingPanelLocation) return true;
-          if (typeof path !== "string" || !/^(?:\/[A-Za-z0-9_-]+)+\/$/.test(path) || !path.endsWith("/")) {
-            return false;
+          if (!validPanelLocation(path)) return false;
+          // The sibling session notification knows the new path but only Apply knows the new origin.
+          if (!fromRestore && backupRequestPending("apply")) {
+            backupRequest.notifiedPath = path;
+            return true;
           }
           openingPanelLocation = true;
           location.replace(location.origin + path);
           return true;
+        }
+
+        function showPanelTransition(message) {
+          openingPanelLocation = true;
+          setTextInput(false);
+          canvas.style.visibility = "hidden";
+          controls.hidden = true;
+          startup.dataset.transition = "";
+          startup.textContent = message;
+          startup.hidden = false;
+        }
+
+        async function panelResponds(url) {
+          try {
+            const signIn = new URL("sign-in", url);
+            const sameOrigin = signIn.origin === location.origin;
+            const response = await fetch(signIn, {
+              mode: sameOrigin ? "same-origin" : "no-cors", credentials: "omit", cache: "no-store",
+              redirect: sameOrigin ? "error" : "follow",
+              referrerPolicy: "no-referrer", signal: AbortSignal.timeout(1500)
+            });
+            return response.ok || response.type === "opaque";
+          } catch {
+            return false;
+          }
+        }
+
+        async function waitForPanel(url, responding = true) {
+          const deadline = performance.now() + 12000;
+          while (performance.now() < deadline) {
+            if ((await panelResponds(url)) === responding) return true;
+            await new Promise(resolve => setTimeout(resolve, 350));
+          }
+          return false;
         }
 
         async function followPanelHttps(destination) {
@@ -280,38 +321,60 @@
           let target;
           try { target = new URL(destination); } catch { return; }
           if (target.protocol !== "https:" || target.username || target.password || target.search || target.hash ||
-              !/^(?:\/[A-Za-z0-9_-]+)+\/$/.test(target.pathname)) return;
-
-          openingPanelLocation = true;
-          setTextInput(false);
-          canvas.style.visibility = "hidden";
-          controls.hidden = true;
-          startup.dataset.transition = "";
-          startup.textContent = "Switching Wave to HTTPS…";
-          startup.hidden = false;
-
-          // Wait for the replacement listener. The target may have a different hostname.
-          const deadline = performance.now() + 12000;
-          while (performance.now() < deadline) {
-            try {
-              await fetch(target.href, { mode: "no-cors", credentials: "omit", cache: "no-store",
-                referrerPolicy: "no-referrer", signal: AbortSignal.timeout(1500) });
-              location.replace(target.href);
-              return;
-            } catch {}
-            await new Promise(resolve => setTimeout(resolve, 350));
-          }
-
+              !validPanelLocation(target.pathname)) return;
+          showPanelTransition("Switching Wave to HTTPS…");
           // If the original listener recovered, reload it to show the server's restart error.
-          try {
-            const old = await fetch(basePath + "/api/session", { cache: "no-store", signal: AbortSignal.timeout(1500) });
-            if (old.ok) {
-              location.reload();
-              return;
-            }
-          } catch {}
+          if (!await waitForPanel(target) && await panelResponds(location.href)) {
+            location.reload();
+            return;
+          }
           // A top-level navigation can display certificate and connectivity errors from the browser.
           location.replace(target.href);
+        }
+
+        async function navigateAfterRestore(target, previous) {
+          if (previous.protocol === "https:" && target.protocol === "http:") {
+            // The browser blocks an HTTP readiness fetch from HTTPS, but permits top-level navigation.
+            let switched = await waitForPanel(previous, false);
+            if (switched && (previous.port || "443") === (target.port || "80")) {
+              // Allow a same-port replacement or recovery to bind after the old listener drains.
+              await new Promise(resolve => setTimeout(resolve, 750));
+              switched = !await panelResponds(previous);
+            }
+            location.replace((switched ? target : previous).href);
+            return;
+          }
+          if (!await waitForPanel(target) && await panelResponds(previous)) {
+            location.replace(previous.href);
+            return;
+          }
+          location.replace(target.href);
+        }
+
+        function followRestoredPanel(path, restart) {
+          if (openingPanelLocation) return true;
+          if (!validPanelLocation(path) || !restart || typeof restart !== "object" || Array.isArray(restart)) {
+            return false;
+          }
+          const previous = new URL(path, location.origin);
+          const target = new URL(previous);
+          if (restart.protocol !== undefined) {
+            if (restart.protocol !== "http:" && restart.protocol !== "https:") return false;
+            target.protocol = restart.protocol;
+          }
+          if (restart.hostname !== undefined) {
+            if (target.protocol !== "https:" || typeof restart.hostname !== "string" ||
+                !/^[a-z0-9.-]+$/.test(restart.hostname)) return false;
+            target.hostname = restart.hostname;
+            if (target.hostname !== restart.hostname) return false;
+          }
+          if (restart.port !== undefined) {
+            if (!Number.isInteger(restart.port) || restart.port < 1 || restart.port > 65535) return false;
+            target.port = restart.port;
+          }
+          showPanelTransition("Restarting Wave…");
+          void navigateAfterRestore(target, previous);
+          return true;
         }
 
         const canvas = document.getElementById("canvas");
@@ -951,6 +1014,14 @@
           const fallback = download ? "Could not download the backup." :
             prepare ? "Could not prepare the backup for restore." : "Could not restore the backup.";
           const unconfirmed = "The restore outcome is unconfirmed. Check the workspace before trying again.";
+          const reportUnconfirmedRestore = async () => {
+            if (request.notifiedPath && await panelResponds(new URL(request.notifiedPath, location.origin)) &&
+                backupRequest === request) {
+              followPanelLocation(request.notifiedPath, true);
+            } else {
+              request.reply = { ok: false, error: unconfirmed };
+            }
+          };
           const deadline = apply ? setTimeout(() => request.abort.abort(), 30_000) : undefined;
           const options = {
             mode: "same-origin", credentials: "same-origin", cache: "no-store", redirect: "error",
@@ -964,7 +1035,7 @@
             };
             options.body = prepare ? value : JSON.stringify({ token: value });
           }
-          fetch(path, options).then(async response => {
+          request.finished = fetch(path, options).then(async response => {
             if (response.ok && download && response.headers.get("Content-Type") === "application/zip") {
               const file = await response.blob();
               if (backupRequest !== request) return;
@@ -978,18 +1049,20 @@
               return;
             }
             const reply = await response.json().catch(() => null);
+            if (backupRequest !== request) return;
             if (response.ok && !download && reply?.ok === true) {
-              if (apply && reply.base_path !== undefined) {
-                if (typeof reply.base_path !== "string" || !followPanelLocation(reply.base_path + "/")) {
-                  request.reply = { ok: false, error: unconfirmed };
-                }
+              if (apply && (reply.base_path !== undefined || reply.restart !== undefined)) {
+                const path = typeof reply.base_path === "string" ? reply.base_path + "/" : null;
+                const followed = reply.restart === undefined ? followPanelLocation(path, true) :
+                  followRestoredPanel(path, reply.restart);
+                if (!followed) await reportUnconfirmedRestore();
                 return;
               }
               request.reply = reply;
               return;
             }
             if (apply && (request.abort.signal.aborted || response.ok || response.status >= 500)) {
-              request.reply = { ok: false, error: unconfirmed };
+              await reportUnconfirmedRestore();
               return;
             }
             request.reply = {
@@ -997,8 +1070,9 @@
               error: typeof reply?.error === "string" ? reply.error : fallback,
               retryable: apply && response.status === 409 && reply?.retryable === true
             };
-          }).catch(() => {
-            request.reply = { ok: false, error: apply ? unconfirmed : fallback };
+          }).catch(async () => {
+            if (apply) await reportUnconfirmedRestore();
+            else request.reply = { ok: false, error: fallback };
           }).finally(() => clearTimeout(deadline));
         }
 
@@ -1031,6 +1105,10 @@
             !backupRequest.choosing && backupRequest.reply === undefined;
         }
 
+        function restoreApplyFinished() {
+          return backupRequestPending("apply") ? backupRequest.finished : undefined;
+        }
+
         function takeWorkspaceBackupReply() {
           if (!backupRequest?.reply) return null;
           const { operation, reply } = backupRequest;
@@ -1053,7 +1131,7 @@
           applyAppearance, updateConsole,
           openConfigJsonEditor, positionConfigJsonEditor, configJsonEditorText, closeConfigJsonEditor,
           startBackupRequest, chooseWorkspaceBackup, backupRequestPending, takeWorkspaceBackupReply,
-          clearWorkspaceBackupRequest,
+          clearWorkspaceBackupRequest, restoreApplyFinished,
           onAbort: showStartupError
         };
       })();

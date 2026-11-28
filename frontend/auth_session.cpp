@@ -62,6 +62,11 @@ EM_JS(void, monitor_session, (AuthSession* session), {
     const basePath = Module['basePath'];
     const panelUrl = basePath + '/';
     const reconnectDelay = 2000;
+    const locationPendingAfterRestore = async () => {
+        // Restore revokes this session before it replies with the new panel address.
+        await Module['restoreApplyFinished']();
+        return Module['panelLocationPending']();
+    };
     const applyIdentity = data => {
         if (data?.type !== 'session' || typeof data.username !== 'string' || !data.username ||
             typeof data.session_id !== 'string' || !data.session_id) {
@@ -83,6 +88,7 @@ EM_JS(void, monitor_session, (AuthSession* session), {
             if (finished || Module['panelLocationPending']()) return;
             finished = true;
             clearTimeout(deadline);
+            if (await locationPendingAfterRestore()) return;
             if (identified || code === 1008) Module['_wave_auth_identity'](session, 0, 0);
             if (code === 1008) {
                 location.replace(panelUrl);
@@ -95,7 +101,7 @@ EM_JS(void, monitor_session, (AuthSession* session), {
                     mode: 'same-origin', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
                     signal: AbortSignal.timeout(5000),
                 });
-                if (Module['panelLocationPending']()) return;
+                if (await locationPendingAfterRestore()) return;
                 if (response.status === 401) {
                     Module['_wave_auth_identity'](session, 0, 0);
                     location.replace(panelUrl);
@@ -107,7 +113,7 @@ EM_JS(void, monitor_session, (AuthSession* session), {
                     valid = applyIdentity(data);
                 }
             } catch {}
-            if (Module['panelLocationPending']()) return;
+            if (await locationPendingAfterRestore()) return;
             if (!valid) Module['_wave_auth_identity'](session, 0, 0);
             setTimeout(connect, reconnectDelay);
         };

@@ -19,6 +19,12 @@
 #include <string_view>
 #include <system_error>
 
+void wave::ClosePanelListener::operator()(httplib::Server* listener) const noexcept
+{
+    listener->stop();
+    delete listener;
+}
+
 namespace {
 
 struct Options {
@@ -158,22 +164,12 @@ int main(int argc, char* argv[])
         if (options.check_tls && !secure) {
             throw std::runtime_error("TLS is disabled in wave-db.json.");
         }
-        std::string authority;
-        if (secure) {
-#ifdef WAVE_ENABLE_AUTH
-            server = wave::make_tls_server(*settings.tls, options.site_dir, settings.listen_port);
-            if (options.check_tls) {
-                std::cout << "TLS configuration is valid.\n";
-                return EXIT_SUCCESS;
-            }
-            authority = wave::tls_authority(settings.tls->domain, settings.listen_port);
-#else
-            throw std::runtime_error("TLS is enabled in wave-db.json. Build with "
-                                     "WAVE_ENABLE_AUTH=ON to use it.");
-#endif
-        } else {
-            server = std::make_unique<httplib::Server>();
+        server = database->make_listener(settings);
+        if (options.check_tls) {
+            std::cout << "TLS configuration is valid.\n";
+            return EXIT_SUCCESS;
         }
+        const auto authority = secure ? wave::tls_authority(settings.tls->domain, settings.listen_port) : "";
         wave::select_waterwall_schematic(*database);
         store = std::make_shared<wave::AuthStore>(database);
         wave::configure_authenticated_routes(*server, options.site_dir, store, database, secure, authority);
@@ -183,25 +179,61 @@ int main(int argc, char* argv[])
     }
 
     configure_listener_socket(*server);
-    const auto& host = settings.listen_host;
+    const auto url_host = [&] {
+        const auto& host = settings.listen_host;
+        return host.find(':') == std::string::npos ? host : '[' + host + ']';
+    };
+    const auto endpoint = [&]() -> std::string {
+        return secure ? "the authenticated HTTPS listener on port " : url_host() + ':';
+    };
     int port = settings.listen_port;
-    const bool bound =
-        port == 0 ? (port = server->bind_to_any_port(host)) > 0 : server->bind_to_port(host, port);
-    const auto url_host = host.find(':') == std::string::npos ? host : '[' + host + ']';
-    const auto endpoint = [&] { return secure ? "the authenticated HTTPS listener on port " : url_host + ':'; };
+    const bool bound = port == 0 ? (port = server->bind_to_any_port(settings.listen_host)) > 0
+                                 : server->bind_to_port(settings.listen_host, port);
     if (!bound) {
         std::cerr << "Could not bind to " << endpoint() << settings.listen_port << '\n';
         return EXIT_FAILURE;
     }
 
-    std::optional<wave::PanelTlsActivation> tls_activation;
+    std::optional<wave::PanelListenerRestart> pending_restart;
     wave::PreviewRoutes preview;
     try {
-        preview = wave::make_preview_routes(store, database, [&](wave::PanelTlsActivation activation) {
-            // Preview accepts one activation at a time. The listener drains and joins all of
-            // its request workers before this thread consumes the activation below.
-            tls_activation.emplace(std::move(activation));
+        const auto prepare_restart = [&](std::unique_ptr<httplib::Server> listener, wave::PanelSettings next) {
+            wave::PanelListenerRestart restart{{}, std::move(next), 0, false};
+            restart.listener.reset(listener.release());
+            const auto& target = restart.settings;
+            const auto authority = target.tls ? wave::tls_authority(target.tls->domain, target.listen_port) : "";
+            wave::configure_authenticated_routes(*restart.listener, options.site_dir, store, database,
+                                                 target.tls.has_value(), authority);
+            configure_workspace_routes(*restart.listener, store, database, preview);
+            configure_listener_socket(*restart.listener);
+            restart.port = target.listen_port;
+            restart.bind_after_stop = restart.port == port;
+            // Reserve a different port before telling the browser where to reconnect.
+            if (restart.port == 0) {
+                restart.port = restart.listener->bind_to_any_port(target.listen_host);
+                if (restart.port <= 0) {
+                    throw std::runtime_error("Could not allocate a port for the restored panel listener.");
+                }
+            } else if (!restart.bind_after_stop && !restart.listener->bind_to_port(target.listen_host, restart.port)) {
+                throw std::runtime_error("Could not bind the panel listener to port " + std::to_string(restart.port) + '.');
+            }
+            return restart;
+        };
+        preview = wave::make_preview_routes(store, database, prepare_restart, [&](wave::PanelListenerRestart restart) {
+            // Preview accepts one restart at a time. The main thread joins the request workers
+            // before consuming the replacement listener.
+            pending_restart.emplace(std::move(restart));
             server->stop();
+            auto& next = *pending_restart;
+            if (next.bind_after_stop) {
+                // Open the accept queue before acknowledging the switch. If the old connections
+                // still hold the port, let the main thread retry after those workers have drained.
+                if (next.listener->bind_to_port(next.settings.listen_host, next.port)) {
+                    next.bind_after_stop = false;
+                } else {
+                    next.listener->stop();
+                }
+            }
         });
         configure_workspace_routes(*server, store, database, preview);
     } catch (const std::exception& error) {
@@ -213,40 +245,34 @@ int main(int argc, char* argv[])
         if (secure) {
             std::cout << "Authenticated HTTPS listening on port " << port << std::endl;
         } else {
-            std::cout << "Listening on http://" << url_host << ':' << port << '/' << std::endl;
+            std::cout << "Listening on http://" << url_host() << ':' << port << '/' << std::endl;
         }
         if (!server->listen_after_bind()) {
             std::cerr << "Could not serve requests on " << endpoint() << port << '\n';
             return EXIT_FAILURE;
         }
-        if (!tls_activation) {
+        if (!pending_restart) {
             return EXIT_SUCCESS;
         }
 
-        auto activation = std::move(*tls_activation);
-        tls_activation.reset();
-        try {
-            wave::configure_authenticated_routes(*activation.listener, options.site_dir, store, database, true,
-                                                 activation.authority);
-            configure_workspace_routes(*activation.listener, store, database, preview);
-            configure_listener_socket(*activation.listener);
-            if (!activation.listener->bind_to_port(host, port)) {
-                throw std::runtime_error("Could not bind the HTTPS listener on port " + std::to_string(port) + '.');
-            }
-        } catch (const std::exception& error) {
-            std::cerr << error.what() << '\n';
-            activation.listener.reset();
-            if (!server->bind_to_port(host, port)) {
-                std::cerr << "Could not resume HTTP on " << url_host << ':' << port << '\n';
+        auto restart = std::move(*pending_restart);
+        pending_restart.reset();
+        if (restart.bind_after_stop && !restart.listener->bind_to_port(restart.settings.listen_host, restart.port)) {
+            std::cerr << "Could not bind the panel listener to port " << restart.port << '\n';
+            restart.listener.reset();
+            if (!server->bind_to_port(settings.listen_host, port)) {
+                std::cerr << "Could not resume " << endpoint() << port << '\n';
                 return EXIT_FAILURE;
             }
-            database->finish_tls_activation(std::nullopt);
-            preview.finish_tls_activation(false);
+            database->finish_listener_restart(std::nullopt);
+            preview.finish_listener_restart(false);
             continue;
         }
-        database->finish_tls_activation(std::move(activation.settings));
-        server = std::move(activation.listener);
-        secure = true;
-        preview.finish_tls_activation(true);
+        settings = std::move(restart.settings);
+        port = restart.port;
+        secure = settings.tls.has_value();
+        database->finish_listener_restart(settings);
+        server.reset(restart.listener.release());
+        preview.finish_listener_restart(true);
     }
 }

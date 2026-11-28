@@ -128,6 +128,9 @@ function setupWorkspace() {
                 await connected.promise;
                 sendSnapshot(fields);
             },
+            notifyBasePath(path) {
+                identitySocket.send(JSON.stringify({ type: 'base_path', path }));
+            },
             async disconnect() {
                 await connected.promise;
                 await previewSocket.close({ code: 1011, reason: 'Fixture connection closed' });

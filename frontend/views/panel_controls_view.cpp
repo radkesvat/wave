@@ -529,7 +529,7 @@ std::string describe_restore_summary(const Json& reply)
         summary += "\nRestoring replaces panel settings and administrator credentials. "
                    "All active Wave sessions will be signed out.";
         if (bool_field(panel, "restart_required")) {
-            summary += "\nRestart Wave to apply the restored listener and TLS settings.";
+            summary += "\nWave will restart the panel to apply the restored listener and TLS settings.";
         }
     }
     const auto& configs = array_field(reply, "configs");
