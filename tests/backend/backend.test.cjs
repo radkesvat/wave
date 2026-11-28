@@ -19,7 +19,7 @@ const { bundledSchematicFile, copyBackend, coreReleaseDir, schematicFile } = req
 const sourceBackend = process.env.WAVE_BACKEND;
 const run = promisify(execFile);
 const timeout = 5000;
-const panelVersion = '0.0.3 beta';
+const panelVersion = '0.0.4 beta';
 const historyLimit = 19;
 const metricHistories = [
     ['cpu_percent', 'cpu_history', 100],

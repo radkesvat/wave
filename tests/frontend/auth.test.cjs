@@ -465,6 +465,63 @@ test('uses the phone workspace over HTTP while both sockets are unavailable and 
     assert.equal(saves.length, 2, 'Polling never replays even an unconfirmed action.');
 });
 
+test('completes remote setup with the installer link after closing the original tab', async t => {
+    assert.ok(process.env.WAVE_SITE_DIR, 'Set WAVE_SITE_DIR to a built Wave frontend.');
+    const token = 'a'.repeat(64);
+    const fixture = await authFixture(t, process.env.WAVE_SITE_DIR,
+        { encrypted: false, basePath: null, setupToken: token });
+    await fixture.start();
+
+    const browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader'] });
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport });
+    const setupLink = fixture.origin + '/#setup=' + token;
+    const basePath = '/remote-panel';
+    const baseEndpoint = '**/_wave-setup/api/auth/base-path';
+    await page.goto(fixture.origin + '/');
+    await waitForStatus(page, 'Panel base path. Setup.');
+    const denied = page.waitForResponse(baseEndpoint, { timeout });
+    await submitBasePath(page, basePath);
+    assert.equal((await denied).status(), 403);
+    await waitForStatus(page, 'Panel base path. Open the setup URL printed by the installer. Setup.');
+
+    await page.goto(setupLink);
+    await waitForStatus(page, 'Panel base path. Setup.');
+    assert.equal(new URL(page.url()).hash, '');
+    const saved = page.waitForResponse(baseEndpoint, { timeout });
+    await submitBasePath(page, basePath);
+    const savedResponse = await saved;
+    assert.equal(savedResponse.status(), 201);
+    assert.equal(await savedResponse.request().headerValue('x-wave-setup-token'), token);
+    await waitForStatus(page, 'Set up administrator. Setup.');
+    assert.equal(new URL(page.url()).pathname, basePath + '/setup');
+    await page.close();
+
+    const resumed = await browser.newPage({ viewport });
+    const setupEndpoint = '**/api/auth/setup';
+    const credentials = { username: 'installer', password: 'browser installer passphrase! 82K' };
+    await resumed.goto(fixture.origin + '/#setup=' + 'b'.repeat(64));
+    await waitForStatus(resumed, 'Set up administrator. Setup.');
+    const rejected = resumed.waitForResponse(setupEndpoint, { timeout });
+    await submitCredentials(resumed, credentials);
+    assert.equal((await rejected).status(), 403);
+    await waitForStatus(resumed, 'Set up administrator. Open the setup URL printed by the installer. Setup.');
+
+    await resumed.goto(setupLink);
+    await waitForStatus(resumed, 'Set up administrator. Setup.');
+    assert.equal(new URL(resumed.url()).hash, '');
+    await resumed.reload();
+    await waitForStatus(resumed, 'Set up administrator. Setup.');
+    const created = resumed.waitForResponse(setupEndpoint, { timeout });
+    await submitCredentials(resumed, credentials);
+    const createdResponse = await created;
+    assert.equal(createdResponse.status(), 201);
+    assert.equal(await createdResponse.request().headerValue('x-wave-setup-token'), token);
+    await waitForStatus(resumed, 'Sign in to Wave. Welcome.');
+    assert.equal(await resumed.evaluate(() => sessionStorage.getItem('wave.setupToken')), null);
+    assert.equal((await resumed.request.get(fixture.origin + '/')).status(), 404);
+});
+
 test('sets a panel base path, authenticates an administrator and closes the terminal on sign-out', async t => {
     assert.ok(process.env.WAVE_SITE_DIR, 'Set WAVE_SITE_DIR to a built Wave frontend.');
     const fixture = await authFixture(t, process.env.WAVE_SITE_DIR, { encrypted: false, basePath: null });

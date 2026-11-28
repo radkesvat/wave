@@ -59,7 +59,7 @@ from socket import socket
 
 with socket() as first, socket() as second:
     for listener in (first, second):
-        listener.bind(("127.0.0.1", 0))
+        listener.bind(("0.0.0.0", 0))
     print(first.getsockname()[1], second.getsockname()[1])
 PY
 )
@@ -70,7 +70,7 @@ curl_local() {
 
 check_setup() {
     local instance=$1 port=$2
-    local url="http://127.0.0.1:$port"
+    local url="http://127.0.0.2:$port"
     curl_local --location "$url/" --output "$work_dir/setup.html"
     cmp -- "$instance/site/index.html" "$work_dir/setup.html"
     curl_local "$url/_wave-setup/index.wasm" --output "$work_dir/setup.wasm"
@@ -78,10 +78,28 @@ check_setup() {
 }
 
 install_wave() {
-    local input=$1 instance=$2 port=$3
+    local input=$1 instance=$2 port=$3 output
     shift 3
-    bash "$assets/install.sh" --from-dir "$input" --version "$tag" --yes \
-        --path "$install_parent/$instance" --port "$port" "$@"
+    output=$(SSH_CONNECTION='198.51.100.10 12345 192.0.2.10 22' \
+        bash "$assets/install.sh" --from-dir "$input" --version "$tag" --yes \
+        --path "$install_parent/$instance" --port "$port" "$@") || return
+    python3 -c '
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as settings:
+    database = json.load(settings)
+port = int(sys.argv[2])
+token = database.get("setup_token")
+if database.get("listen") != {"host": "0.0.0.0", "port": port}:
+    raise SystemExit("Expected a wildcard setup listener.")
+if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
+    raise SystemExit("Expected an installation setup token.")
+link = f"First setup URL: http://192.0.2.10:{port}/#setup={token}"
+if link not in sys.stdin.read().splitlines():
+    raise SystemExit("The installer did not print the remote setup link.")
+' "$install_parent/$instance/wave-db.json" "$port" <<< "$output"
 }
 
 check_boot_service() {

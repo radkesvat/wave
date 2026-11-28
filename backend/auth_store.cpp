@@ -301,6 +301,19 @@ std::optional<Admin> load_admin(const Json& database)
     return admin;
 }
 
+std::string load_setup_token(const Json& database)
+{
+    const auto value = database.find(setup_token_key);
+    if (value == database.end()) {
+        return {};
+    }
+    const auto* token = value->get_ptr<const std::string*>();
+    if (!token || !is_hex(*token, secret_size)) {
+        throw std::runtime_error("Invalid setup_token in wave-db.json.");
+    }
+    return *token;
+}
+
 struct RestoredPanelPath {
     struct RevokedSession {
         std::string id;
@@ -315,7 +328,8 @@ struct RestoredPanelPath {
 
 struct AuthStore::Impl {
     explicit Impl(std::shared_ptr<PanelDatabase> input)
-        : database(std::move(input)), admin(load_admin(database->initial_contents()))
+        : database(std::move(input)), admin(load_admin(database->initial_contents())),
+          setup_token(load_setup_token(database->initial_contents()))
     {
     }
 
@@ -335,12 +349,14 @@ struct AuthStore::Impl {
             throw;
         }
         admin = std::move(next);
+        setup_token.clear();
     }
 
     std::shared_ptr<PanelDatabase> database;
     mutable std::mutex mutex;
     bool storage_failed = false;
     std::optional<Admin> admin;
+    std::string setup_token;
     std::optional<RestoredPanelPath> restored_panel_path;
     std::mutex sign_in_mutex;
     std::chrono::steady_clock::time_point retry_after{};
@@ -360,6 +376,13 @@ bool AuthStore::installed() const
     return impl_->admin.has_value();
 }
 
+bool AuthStore::setup_token_required() const
+{
+    std::lock_guard lock(impl_->mutex);
+    impl_->check_available();
+    return !impl_->admin && !impl_->setup_token.empty();
+}
+
 bool AuthStore::valid_username(std::string_view username)
 {
     return !username.empty() && username.size() <= 64 &&
@@ -375,12 +398,16 @@ bool AuthStore::valid_password_input(std::string_view password)
     return std::ranges::none_of(password, [](unsigned char byte) { return byte < 0x20 || byte == 0x7f; });
 }
 
-AuthStore::SetupResult AuthStore::setup(std::string_view username, std::string_view password)
+AuthStore::SetupResult AuthStore::setup(std::string_view username, std::string_view password,
+                                       std::string_view setup_token)
 {
     std::lock_guard lock(impl_->mutex);
     impl_->check_available();
     if (impl_->admin) {
         return SetupResult::closed;
+    }
+    if (!impl_->setup_token.empty() && !secret_equal(impl_->setup_token, setup_token)) {
+        return SetupResult::forbidden;
     }
     if (!valid_new_password_shape(password)) {
         return SetupResult::invalid_password;
@@ -531,13 +558,16 @@ AuthStore::UpdateResult AuthStore::update_admin(std::string_view token, std::str
 }
 
 AuthStore::BasePathResult AuthStore::update_panel_base_path(std::string_view token, std::string_view previous,
-                                                           std::string_view path)
+                                                           std::string_view path, std::string_view setup_token)
 {
     std::lock_guard lock(impl_->mutex);
     impl_->check_available();
     if ((!previous.empty() || impl_->admin) &&
         (!impl_->admin || impl_->admin->find_session(token) == impl_->admin->sessions.end())) {
         return BasePathResult::unauthorized;
+    }
+    if (!impl_->admin && !impl_->setup_token.empty() && !secret_equal(impl_->setup_token, setup_token)) {
+        return BasePathResult::setup_forbidden;
     }
     return impl_->database->save_panel_base_path(previous, path) ? BasePathResult::saved : BasePathResult::stale;
 }

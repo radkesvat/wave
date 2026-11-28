@@ -259,6 +259,43 @@
     <script>
       var Module = (() => {
         const basePath = location.pathname.slice(0, location.pathname.lastIndexOf("/"));
+        const setupPage = ["/base-path", "/setup"].includes(location.pathname.slice(basePath.length));
+        const setupTokenKey = "wave.setupToken";
+        const setupFragment = /^#setup=([a-f0-9]{64})$/.exec(location.hash);
+        let setupToken = setupPage ? (setupFragment?.[1] ?? "") : "";
+        if (location.hash.startsWith("#setup=")) {
+          history.replaceState(history.state, "", location.pathname + location.search);
+        }
+        try {
+          if (!setupPage) {
+            sessionStorage.removeItem(setupTokenKey);
+          } else if (setupToken) {
+            sessionStorage.setItem(setupTokenKey, setupToken);
+          } else {
+            const saved = sessionStorage.getItem(setupTokenKey);
+            if (/^[a-f0-9]{64}$/.test(saved ?? "")) setupToken = saved;
+          }
+        } catch {
+          // Keep the key available for requests from this page when storage is blocked.
+        }
+
+        function authRequestHeaders(path) {
+          const headers = { "Content-Type": "application/json", "X-Wave-CSRF": "1" };
+          if (setupToken && (path === "/api/auth/base-path" || path === "/api/auth/setup")) {
+            headers["X-Wave-Setup-Token"] = setupToken;
+          }
+          return headers;
+        }
+
+        function clearSetupToken() {
+          setupToken = "";
+          try {
+            sessionStorage.removeItem(setupTokenKey);
+          } catch {
+            // Storage can be blocked by the browser.
+          }
+        }
+
         let openingPanelLocation = false;
 
         function panelLocationPending() {
@@ -278,7 +315,16 @@
             return true;
           }
           openingPanelLocation = true;
-          location.replace(location.origin + path);
+          let destination = location.origin + path;
+          if (setupToken) {
+            try {
+              sessionStorage.setItem(setupTokenKey, setupToken);
+            } catch {
+              // Let the next setup page read the key when storage is blocked.
+              destination += "#setup=" + setupToken;
+            }
+          }
+          location.replace(destination);
           return true;
         }
 
@@ -1124,7 +1170,7 @@
         window.addEventListener("error", showStartupError, true);
         window.addEventListener("unhandledrejection", showStartupError);
         return {
-          basePath, followPanelLocation, followPanelHttps, panelLocationPending,
+          basePath, followPanelLocation, followPanelHttps, panelLocationPending, authRequestHeaders, clearSetupToken,
           canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
           updateConfigLinks, updateConfigTabs,
           panelFocus, setTextInput, updateKeyboardState, contentViewport, installTextInput, copyText,

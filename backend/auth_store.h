@@ -29,6 +29,7 @@ class AuthStore {
     enum class SetupResult {
         created,
         closed,
+        forbidden,
         invalid_password,
         weak_password
     };
@@ -48,16 +49,18 @@ class AuthStore {
     enum class BasePathResult {
         saved,
         stale,
-        unauthorized
+        unauthorized,
+        setup_forbidden
     };
 
     explicit AuthStore(std::shared_ptr<PanelDatabase> database);
     ~AuthStore();
 
     bool installed() const;
+    bool setup_token_required() const;
     static bool valid_username(std::string_view username);
     static bool valid_password_input(std::string_view password);
-    SetupResult setup(std::string_view username, std::string_view password);
+    SetupResult setup(std::string_view username, std::string_view password, std::string_view setup_token);
     SignInResult sign_in(std::string_view username, std::string_view password, IssuedSession& session);
     std::optional<Session> session(std::string_view token) const;
     std::optional<std::string> monitored_panel_path(std::string_view token, std::string_view session_id,
@@ -66,7 +69,7 @@ class AuthStore {
     UpdateResult update_admin(std::string_view token, std::string_view username,
                               std::string_view current_password, std::string_view new_password);
     BasePathResult update_panel_base_path(std::string_view token, std::string_view previous,
-                                         std::string_view path);
+                                         std::string_view path, std::string_view setup_token);
     static void validate_admin_backup(const nlohmann::json& admins);
     bool restore_admin(const nlohmann::json& admins, std::string_view session_id, std::string_view restored_base_path,
                        const std::function<void(const nlohmann::json& local_auth_state)>& commit);

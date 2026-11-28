@@ -10,8 +10,9 @@ const { fixtureSession, openPreview, panelBasePath, requestPreview, seedCore } =
 
 const run = promisify(execFile);
 const [instance, port] = process.argv.slice(2);
-const origin = `http://127.0.0.1:${port}`;
+const origin = `http://127.0.0.2:${port}`;
 const manager = join(instance, basename(instance));
+const database = join(instance, 'wave-db.json');
 const ready = join(instance, 'fixture-ready');
 const stopped = join(instance, 'fixture-stopped');
 
@@ -55,14 +56,30 @@ test('the systemd manager waits for WaterWall shutdown before stopping or restar
     await writeFile(program, fixtureProgram, { mode: 0o700 });
     await run(manager, ['start']);
 
-    const setup = await fetch(`${origin}/_wave-setup/api/auth/base-path`, {
+    const { setup_token: setupToken } = JSON.parse(await readFile(database, 'utf8'));
+    assert.ok(typeof setupToken === 'string' && /^[0-9a-f]{64}$/.test(setupToken), 'Expected a setup key.');
+    const wrongToken = (setupToken[0] === '0' ? '1' : '0') + setupToken.slice(1);
+    const postSetup = (route, body, token) => fetch(origin + route, {
         method: 'POST',
-        headers: { Origin: origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 'panel-base-path': panelBasePath }),
+        headers: {
+            Origin: origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json',
+            ...(token === undefined ? {} : { 'X-Wave-Setup-Token': token }),
+        },
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(5000),
     });
-    assert.equal(setup.status, 201);
-    const session = await fixtureSession({ origin, basePath: panelBasePath });
+    const baseRoute = '/_wave-setup/api/auth/base-path';
+    const selection = { 'panel-base-path': panelBasePath };
+    assert.equal((await postSetup(baseRoute, selection)).status, 403);
+    assert.equal((await postSetup(baseRoute, selection, wrongToken)).status, 403);
+    assert.equal((await postSetup(baseRoute, selection, setupToken)).status, 201);
+
+    const adminRoute = `${panelBasePath}/api/auth/setup`;
+    const otherAdmin = { username: 'other-admin', password: 'other admin smoke test passphrase 5Gs2n' };
+    assert.equal((await postSetup(adminRoute, otherAdmin)).status, 403);
+    assert.equal((await postSetup(adminRoute, otherAdmin, wrongToken)).status, 403);
+    const session = await fixtureSession({ origin, basePath: panelBasePath }, { setupToken });
+    assert.equal('setup_token' in JSON.parse(await readFile(database, 'utf8')), false);
     const { socket } = await openPreview(t, origin, session);
     const name = 'Shutdown fixture';
     const created = await requestPreview(socket, 'create_core_config', { name });

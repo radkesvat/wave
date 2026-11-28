@@ -96,12 +96,12 @@ void show_local_core_logs(PanelDatabase& database)
     }
 }
 
-void check_port(int port)
+void check_port(int port, const char* host)
 {
     httplib::Server server;
     server.set_socket_options([](socket_t socket) { httplib::set_socket_opt(socket, SOL_SOCKET, SO_REUSEADDR, 1); });
-    if (!server.bind_to_port("127.0.0.1", port)) {
-        throw std::runtime_error("Could not bind to 127.0.0.1:" + std::to_string(port) + '.');
+    if (!server.bind_to_port(host, port)) {
+        throw std::runtime_error("Could not bind to " + std::string(host) + ':' + std::to_string(port) + '.');
     }
     server.stop();
 }
@@ -117,12 +117,16 @@ std::optional<int> run_local_command(int argc, char* argv[])
     try {
         if (command == "--version" && argc == 2) {
             std::cout << release_version << '\n';
+#ifdef WAVE_ENABLE_AUTH
+        } else if (command == "--supports-remote-setup" && argc == 2) {
+            return EXIT_SUCCESS;
+#endif
         } else if (command == "--check-port") {
-            const auto port = argc == 3 ? positive_number(argv[2]) : std::nullopt;
+            const auto port = argc == 3 || argc == 4 ? positive_number(argv[2]) : std::nullopt;
             if (!port || *port > 65535) {
-                throw std::runtime_error("Usage: wave-backend --check-port PORT (1 through 65535)");
+                throw std::runtime_error("Usage: wave-backend --check-port PORT [HOST] (port 1 through 65535)");
             }
-            check_port(*port);
+            check_port(*port, argc == 4 ? argv[3] : "127.0.0.1");
         } else if ((command == "--local-settings" || command == "--local-core-logs") && argc == 2) {
             PanelDatabase database(argv[0], {}, true);
             if (command == "--local-settings") {

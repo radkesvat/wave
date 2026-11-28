@@ -146,6 +146,62 @@ async function assertPolicyClose(ws) {
     assert.equal(frame.payload.readUInt16BE(), 1008);
 }
 
+test('requires and consumes the first-run setup token', async t => {
+    const setupToken = randomBytes(32).toString('hex');
+    const fixture = await authFixture(t, undefined, { encrypted: false, basePath: null, setupToken });
+    const root = client(fixture);
+    const bootstrap = client(fixture, '/_wave-setup');
+    const panel = client(fixture, '/remote/setup-test');
+    const selection = { 'panel-base-path': '/remote/setup-test' };
+    const credentials = { username: 'remote-admin', password: 'private setup fixture P7g3B8' };
+    const authorized = { 'X-Wave-Setup-Token': setupToken };
+    const invalid = { 'X-Wave-Setup-Token': (setupToken[0] === '0' ? '1' : '0') + setupToken.slice(1) };
+    const duplicates = { 'X-Wave-Setup-Token': [setupToken, setupToken] };
+
+    await fixture.start();
+    assert.equal((await root.request('/')).headers.location, '/_wave-setup/base-path');
+    const bootstrapPage = await bootstrap.request('/base-path');
+    assert.equal(bootstrapPage.status, 200);
+    assert.ok(!bootstrapPage.body.includes(setupToken));
+    for (const headers of [{}, invalid, duplicates]) {
+        assert.equal((await bootstrap.post('base-path', selection, headers)).status, 403);
+    }
+    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8'))['panel-base-path'], undefined);
+    const basePath = await bootstrap.post('base-path', selection, authorized);
+    assert.equal(basePath.status, 201);
+    assert.equal(basePath.headers.location, '/remote/setup-test/');
+
+    await fixture.stop();
+    await fixture.start();
+    assert.equal((await root.request('/')).headers.location, '/remote/setup-test/setup');
+    for (const headers of [{}, invalid, duplicates]) {
+        assert.equal((await panel.post('setup', credentials, headers)).status, 403);
+    }
+    assert.equal((await panel.post('setup', { ...credentials, password: 'Password1' }, authorized)).status, 422);
+    const pending = JSON.parse(await readFile(fixture.database, 'utf8'));
+    assert.deepEqual(pending.admin, []);
+    assert.equal(pending.setup_token, setupToken);
+
+    const results = await Promise.all([panel.post('setup', credentials, authorized),
+        panel.post('setup', credentials, authorized)]);
+    assert.deepEqual(results.map(response => response.status).sort(), [201, 409]);
+    const installed = JSON.parse(await readFile(fixture.database, 'utf8'));
+    assert.equal(installed.admin[0].username, credentials.username);
+    assert.equal(installed.setup_token, undefined);
+    assert.equal((await root.request('/')).status, 404);
+    assert.equal((await panel.post('sign-in', credentials)).status, 204);
+});
+
+test('fails closed when the stored setup token is malformed', async t => {
+    for (const [name, setupToken] of [['non-string', null], ['incorrect length', 'short'],
+        ['non-hex', 'z'.repeat(64)]]) {
+        await t.test(name, async sub => {
+            const fixture = await authFixture(sub, undefined, { encrypted: false, basePath: null, setupToken });
+            await assert.rejects(fixture.start(), /Invalid setup_token in wave-db\.json/);
+        });
+    }
+});
+
 test('HTTPS verifies trust and enforces durable JWT sessions on HTTP and WebSocket routes', async t => {
     const fixture = await authFixture(t);
     const { request, post, upgrade } = client(fixture);

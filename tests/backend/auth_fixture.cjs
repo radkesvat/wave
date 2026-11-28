@@ -102,7 +102,7 @@ async function seedCore(backend, { executable = false, logs = [], observeShutdow
 }
 
 async function authFixture(t, webSite, {
-    encrypted = true, prepareCore = true, basePath = panelBasePath, runAs, managed = false,
+    encrypted = true, prepareCore = true, basePath = panelBasePath, runAs, managed = false, setupToken,
 } = {}) {
     assert.ok(process.env.WAVE_BACKEND, 'Set WAVE_BACKEND to a native Wave build.');
     const cwd = await mkdtemp(join(tmpdir(), 'wave-auth-test-'));
@@ -150,10 +150,11 @@ async function authFixture(t, webSite, {
     const tls = encrypted ? await tlsFixture(cwd) : undefined;
     const installAttempted = prepareCore ? true : undefined;
     if (tls) {
-        await writeTlsConfig(database, tls, { listen, installAttempted, basePath });
+        await writeTlsConfig(database, tls, { listen, installAttempted, basePath, setupToken });
     } else {
         await writeFile(database, JSON.stringify({
             listen, 'panel-base-path': basePath ?? undefined, waterwall_install_attempted: installAttempted,
+            setup_token: setupToken,
         }), { mode: 0o600 });
     }
     if (runAs) {
@@ -220,15 +221,15 @@ async function authFixture(t, webSite, {
 
 const previewTimeout = 5000;
 
-async function fixtureSession(fixture, { setup = true } = {}) {
+async function fixtureSession(fixture, { setup = true, setupToken } = {}) {
     const credentials = { username: 'fixture-admin', password: 'fixture core test passphrase 4Kq7v' };
-    const post = action => fetch(new URL(`${fixture.basePath}/api/auth/${action}`, fixture.origin), {
+    const post = (action, extraHeaders) => fetch(new URL(`${fixture.basePath}/api/auth/${action}`, fixture.origin), {
         method: 'POST',
-        headers: { Origin: fixture.origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json' },
+        headers: { Origin: fixture.origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json', ...extraHeaders },
         body: JSON.stringify(credentials),
         signal: AbortSignal.timeout(previewTimeout),
     });
-    if (setup) assert.equal((await post('setup')).status, 201);
+    if (setup) assert.equal((await post('setup', setupToken ? { 'X-Wave-Setup-Token': setupToken } : {})).status, 201);
     const login = await post('sign-in');
     assert.equal(login.status, 204);
     return login.headers.get('set-cookie').split(';', 1)[0];

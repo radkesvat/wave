@@ -30,7 +30,7 @@ EM_JS(void, send_auth_request, (AuthSession* session, const char* path_value, co
     const basePath = Module['basePath'];
     fetch(basePath + path, {
         method: 'POST', mode: 'same-origin', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
-        headers: { 'Content-Type': 'application/json', 'X-Wave-CSRF': '1' },
+        headers: Module['authRequestHeaders'](path),
         body: UTF8ToString(json), signal: AbortSignal.timeout(10000),
     }).then(response => {
         if (Module['panelLocationPending']()) return;
@@ -44,6 +44,7 @@ EM_JS(void, send_auth_request, (AuthSession* session, const char* path_value, co
             path === '/api/auth/sign-out' || path === '/api/auth/base-path');
         if ((response.ok && path !== '/api/auth/base-path') || sessionEnded ||
             (path === '/api/auth/setup' && response.status === 409)) {
+            if (path === '/api/auth/setup') Module['clearSetupToken']();
             location.replace(basePath + '/');
         } else {
             Module['_wave_auth_request_failed'](session, response.status);
@@ -199,6 +200,9 @@ void AuthSession::request_failed(int status)
         error_ = "Check the username and password requirements.";
     } else if (action_ == Action::base_path && status == 400) {
         error_ = base_path_format_error;
+    } else if (status == 403 &&
+               (action_ == Action::setup || (action_ == Action::base_path && page_ == Page::base_path))) {
+        error_ = "Open the setup URL printed by the installer.";
     } else if (action_ == Action::sign_in && status == 401) {
         error_ = "The username or password was rejected.";
     } else if (action_ == Action::update_administrator && status == 403) {

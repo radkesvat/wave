@@ -103,8 +103,11 @@ service account and trusted operators.
 
 ## Set the panel base path
 
-Before starting with an empty `admin` array, bind to loopback or restrict
-network access to the intended administrator. Start Wave as the service account.
+For packaged installations with a setup key, open the complete URL printed by
+the installer. Wave requires the key until the first administrator is created.
+For manual installations with an empty `admin` array and no setup key, bind to
+loopback or restrict network access to the intended administrator. Start Wave
+as the service account.
 
 ```sh
 ./build/backend-release/wave-backend --site-dir build/web-release/site

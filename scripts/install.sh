@@ -16,7 +16,7 @@ usage() {
 Usage: bash install.sh [options]
   --version TAG    Wave release tag, or latest (default)
   --path PATH      Absolute, unused installation directory (default /opt/wave, /opt/wave2, ...)
-  --port PORT      Loopback listener port (default first available from 2045)
+  --port PORT      Panel listener port (default first available from 2045)
   --from-dir DIR   Read the ZIP and SHA256SUMS from DIR for an explicit tag
   --yes            Use supplied values and defaults without prompting
   --no-start       Enable Wave at boot without starting it now
@@ -377,10 +377,19 @@ if ! built_version=$("${as_service[@]}" "$backend" --version); then
 fi
 [[ $built_version == "${version#v}" ]] || fail "The packaged backend version does not match $version."
 
+setup_token=
+listen_host=127.0.0.1
+port_host=()
+if "${as_service[@]}" "$backend" --supports-remote-setup >/dev/null 2>&1; then
+    setup_token=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+    listen_host=0.0.0.0
+    port_host=("$listen_host")
+fi
+
 if [[ -z $port ]]; then
     default_port=2045
-    until "${as_service[@]}" "$backend" --check-port "$default_port" >/dev/null 2>&1; do
-        ((default_port < 65535)) || fail 'No loopback listener port was available.'
+    until "${as_service[@]}" "$backend" --check-port "$default_port" "${port_host[@]}" >/dev/null 2>&1; do
+        ((default_port < 65535)) || fail "No panel port was available on $listen_host."
         ((default_port += 1))
     done
     port=$default_port
@@ -392,13 +401,19 @@ fi
 if [[ ! $port =~ ^[1-9][0-9]{0,4}$ ]] || ((port > 65535)); then
     fail 'Enter a port between 1 and 65535.'
 fi
-"${as_service[@]}" "$backend" --check-port "$port" >/dev/null || fail "The panel cannot use loopback port $port."
+"${as_service[@]}" "$backend" --check-port "$port" "${port_host[@]}" >/dev/null \
+    || fail "The panel cannot listen on $listen_host:$port."
 
 if [[ $data/wave-manager != "$staging/$name" ]]; then
     [[ ! -e $staging/$name ]] || fail "The name $name is reserved by the Wave package."
     mv -T -- "$data/wave-manager" "$staging/$name"
 fi
-printf '{"admin":[],"listen":{"host":"127.0.0.1","port":%s}}\n' "$port" > "$data/wave-db.json"
+if [[ -n $setup_token ]]; then
+    printf '{"admin":[],"setup_token":"%s","listen":{"host":"%s","port":%s}}\n' \
+        "$setup_token" "$listen_host" "$port" > "$data/wave-db.json"
+else
+    printf '{"admin":[],"listen":{"host":"%s","port":%s}}\n' "$listen_host" "$port" > "$data/wave-db.json"
+fi
 
 mkdir -p -- "$bin_dir"
 if (( EUID == 0 )); then
@@ -480,10 +495,31 @@ case :${PATH:-}: in
 esac
 
 if $start && { $assume_yes || confirm 'Start Wave now? [Y/n] '; }; then
-    "$manager_target" start || fail "Wave is installed. Run $name logs panel to inspect the startup failure."
+    "$manager_target" start >/dev/null || fail "Wave is installed. Run $name logs panel to inspect the startup failure."
+    printf 'Wave is listening on %s:%s.\n' "$listen_host" "$port"
 else
     printf 'Start with %q start when ready.\n' "$link"
 fi
-printf 'First setup URL: http://127.0.0.1:%s/\n' "$port"
-printf 'From another computer, forward the port with ssh -N -L 127.0.0.1:%s:127.0.0.1:%s %q@your-server\n' \
-    "$port" "$port" "$(id -un)"
+
+first_browser_host() {
+    local ssh_host address
+    local -a addresses
+    read -r _ _ ssh_host _ <<< "${SSH_CONNECTION:-}"
+    read -r -a addresses <<< "$(hostname -I 2>/dev/null || :)"
+    for address in "$ssh_host" "${addresses[@]}"; do
+        if [[ $address =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ && $address != 127.* && $address != 0.0.0.0 ]]; then
+            printf '%s\n' "$address"
+            return
+        fi
+    done
+    printf 'SERVER_IP\n'
+}
+
+if [[ -n $setup_token ]]; then
+    printf 'First setup URL: http://%s:%s/#setup=%s\n' "$(first_browser_host)" "$port" "$setup_token"
+    printf 'Open the setup link in your browser and keep it private. Use the IPv4 address you use to reach this server.\n'
+else
+    printf 'First setup URL: http://127.0.0.1:%s/\n' "$port"
+    printf 'From another computer, forward the port with ssh -N -L 127.0.0.1:%s:127.0.0.1:%s %q@your-server\n' \
+        "$port" "$port" "$(id -un)"
+fi

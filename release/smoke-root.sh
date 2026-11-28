@@ -81,7 +81,7 @@ from socket import socket
 
 with socket() as first, socket() as second:
     for listener in (first, second):
-        listener.bind(("127.0.0.1", 0))
+        listener.bind(("0.0.0.0", 0))
     print(first.getsockname()[1], second.getsockname()[1])
 PY
 )
@@ -90,7 +90,7 @@ install_wave() {
     local name=$1 port=$2
     shift 2
     bash "$assets/install.sh" --from-dir "$assets" --version "$tag" --yes \
-        --path "$work_dir/$name" --port "$port" "$@"
+        --path "$work_dir/$name" --port "$port" "$@" >/dev/null
 }
 
 check_installation() {
@@ -130,7 +130,7 @@ check_running() {
     status=$("$name" status)
     [[ $status == *"Panel URL http://127.0.0.1:$port/"* ]] || fail 'Root could not read the panel URL.'
     curl -q --fail --silent --show-error --noproxy '*' --max-time 8 \
-        "http://127.0.0.1:$port/_wave-setup/index.wasm" --output "$work_dir/setup.wasm"
+        "http://127.0.0.2:$port/_wave-setup/index.wasm" --output "$work_dir/setup.wasm"
     cmp -- "$work_dir/$name/.wave-data/site/index.wasm" "$work_dir/setup.wasm"
 }
 
@@ -142,6 +142,11 @@ if systemctl is-active --quiet "$first_unit"; then
 fi
 "$first_name" start
 check_running "$first_name" "$first_port"
+origin="http://127.0.0.2:$first_port"
+status=$(curl -q --silent --show-error --noproxy '*' --max-time 8 --output /dev/null --write-out '%{http_code}' \
+    --header "Origin: $origin" --header 'X-Wave-CSRF: 1' --header 'Content-Type: application/json' \
+    --data '{"panel-base-path":"/panel"}' "$origin/_wave-setup/api/auth/base-path")
+[[ $status == 403 ]] || fail 'The root-installed service accepted setup without a key.'
 
 install_wave "$second_name" "$second_port"
 check_installation "$second_name"

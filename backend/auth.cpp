@@ -133,6 +133,12 @@ bool exact_header(const Request& request, const char* name, std::string_view val
     return request.get_header_value_count(name) == 1 && request.get_header_value(name) == value;
 }
 
+std::string setup_token(const Request& request)
+{
+    constexpr char header[] = "X-Wave-Setup-Token";
+    return request.get_header_value_count(header) == 1 ? request.get_header_value(header) : std::string{};
+}
+
 std::string session_cookie(const Request& request)
 {
     if (request.get_header_value_count("Cookie") != 1) {
@@ -307,12 +313,14 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         const bool bootstrap = base_path.empty();
         const auto prefix = bootstrap ? panel_setup_prefix : std::string_view(base_path);
         const bool read = req.method == "GET" || req.method == "HEAD";
-        const bool setup_redirect = bootstrap && read && (raw_path == "/" || raw_path == "/panel");
-        if (!setup_redirect && !has_panel_prefix(raw_path, prefix)) {
+        const bool bootstrap_redirect = bootstrap && read && (raw_path == "/" || raw_path == "/panel");
+        const bool resume_setup = !bootstrap && read && raw_path == "/" && store->setup_token_required();
+        const bool entry_redirect = bootstrap_redirect || resume_setup;
+        if (!entry_redirect && !has_panel_prefix(raw_path, prefix)) {
             return not_found(res);
         }
-        const auto suffix = setup_redirect ? std::string_view{} : raw_path.substr(prefix.size());
-        const bool redirect = setup_redirect || (!bootstrap && read && suffix.empty());
+        const auto suffix = entry_redirect ? std::string_view{} : raw_path.substr(prefix.size());
+        const bool redirect = entry_redirect || (!bootstrap && read && suffix.empty());
         const auto access = route_access(suffix, req.method, bootstrap);
         if (!redirect && access == Access::missing) {
             return not_found(res);
@@ -324,9 +332,10 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
             return reject(res, 403);
         }
         if (redirect) {
-            const auto destination = setup_redirect ? setup_page(store->installed(),
-                                                                 store->session(session_cookie(req)).has_value())
-                                                    : "/";
+            auto destination = resume_setup ? std::string_view("/setup") : std::string_view("/");
+            if (bootstrap_redirect) {
+                destination = setup_page(store->installed(), store->session(session_cookie(req)).has_value());
+            }
             res.set_redirect(std::string(prefix).append(destination), 303);
             return Decision::Handled;
         }
@@ -394,7 +403,8 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         const auto& path = value->get_ref<const std::string&>();
         try {
             switch (store->update_panel_base_path(session_cookie(req),
-                                                  bootstrap ? std::string_view{} : std::string_view(prefix), path)) {
+                                                  bootstrap ? std::string_view{} : std::string_view(prefix), path,
+                                                  setup_token(req))) {
             case AuthStore::BasePathResult::saved:
                 break;
             case AuthStore::BasePathResult::stale:
@@ -402,6 +412,9 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
                 return;
             case AuthStore::BasePathResult::unauthorized:
                 res.status = 401;
+                return;
+            case AuthStore::BasePathResult::setup_forbidden:
+                res.status = 403;
                 return;
             }
         } catch (const std::runtime_error&) {
@@ -412,7 +425,7 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         res.status = 201;
     });
 
-    post_panel_json(server, panel_route("/api/auth/setup"), [store](const Request&, Response& res, std::string_view body) {
+    post_panel_json(server, panel_route("/api/auth/setup"), [store](const Request& req, Response& res, std::string_view body) {
         if (store->installed()) {
             res.status = 409;
             return;
@@ -424,12 +437,15 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
             res.status = 400;
             return;
         }
-        switch (store->setup(username, password)) {
+        switch (store->setup(username, password, setup_token(req))) {
         case AuthStore::SetupResult::created:
             res.status = 201;
             break;
         case AuthStore::SetupResult::closed:
             res.status = 409;
+            break;
+        case AuthStore::SetupResult::forbidden:
+            res.status = 403;
             break;
         case AuthStore::SetupResult::invalid_password:
             res.status = 400;

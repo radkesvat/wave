@@ -13,6 +13,8 @@
 
 namespace wave {
 
+inline constexpr char setup_token_key[] = "setup_token";
+
 struct PanelSettings {
     std::string listen_host;
     int listen_port;

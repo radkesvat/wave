@@ -698,7 +698,12 @@ void PanelDatabase::save_waterwall_version(std::string_view version)
 
 void PanelDatabase::save_auth(const Json& admins, const Json& auth)
 {
-    impl_->save_fields({{"admin", admins}, {"auth", auth}});
+    std::lock_guard lock(impl_->write_mutex);
+    auto current = impl_->read_existing();
+    current["admin"] = admins;
+    current["auth"] = auth;
+    current.erase(setup_token_key);
+    impl_->save(current);
 }
 
 void PanelDatabase::save_core_settings(const Json& settings)

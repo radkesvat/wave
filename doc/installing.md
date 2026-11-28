@@ -12,7 +12,7 @@ Python 3.9 or later, and `flock`. Run it as root or as a regular user with
 
 ## Install an instance
 
-1. Enter an exact tag, such as `v0.0.3-beta`, or press Enter for the latest
+1. Enter an exact tag, such as `v0.0.4-beta`, or press Enter for the latest
    stable package. If only a beta is available, the interactive installer
    offers it for confirmation.
 2. Choose the instance directory. The default is the first available name
@@ -22,16 +22,22 @@ Python 3.9 or later, and `flock`. Run it as root or as a regular user with
    register the service and to create the instance when the parent directory
    requires it. For root installations, use root-owned parent directories the
    service account can traverse, such as `/opt`.
-3. Choose a port. The installer suggests the first available loopback port
+3. Choose a port. The installer suggests the first available port
    starting at `2045`. Each running instance needs its own port.
-4. Start Wave when prompted, then open the printed setup URL. Wave listens on
-   `127.0.0.1` for initial setup. On a remote server, run the printed SSH
-   forwarding command from your computer. Choose the panel base path and create
-   the administrator in your browser. [Administrator setup](authentication.md#set-up-the-administrator)
+4. Start Wave when prompted, then open the complete setup URL from your browser.
+   Wave v0.0.4-beta and later listen on `0.0.0.0` by default. Use the server’s
+   reachable IPv4 address in the URL and keep the `#setup=…` key private.
+   Choose the panel base path and create the administrator in the same tab.
+   Earlier packages use the printed loopback or SSH forwarding instructions.
+   [Administrator setup](authentication.md#set-up-the-administrator)
 
-For direct remote access after setup, configure HTTPS and set `listen.host` to
-the desired address in the instance's `wave-db.json` while Wave is stopped.
+The first setup connection uses HTTP. Use a trusted network for setup and
+configure HTTPS for continued remote access.
 [HTTPS configuration](authentication.md#configure-tls)
+
+If you need the setup link again, the private `wave-db.json` holds the
+`setup_token` until the administrator is created. Open
+`http://SERVER_IP:PORT/#setup=TOKEN` with that value.
 
 Each instance owns its own `wave-db.json`, `configs/`, `waterwall_bin/`, and
 WaterWall logs beside `wave-backend`. Panel logs go to the systemd journal.
@@ -54,7 +60,7 @@ WaterWall offline.
 [WaterWall versions and offline provisioning](building.md#panel-controls-and-versioning)
 
 ```bash
-bash install.sh --yes --version v0.0.3-beta --from-dir "$PWD" \
+bash install.sh --yes --version v0.0.4-beta --from-dir "$PWD" \
   --path /opt/wave-test --port 2045 --no-start
 ```
 
@@ -92,10 +98,10 @@ TLS certificates or config dependencies you want to keep.
 ## Package a release
 
 Set the Wave version and channel in `CMakeLists.txt` and use the matching tag,
-such as `v0.0.3-beta`. The **Wave release packages** GitHub Actions workflow
+such as `v0.0.4-beta`. The **Wave release packages** GitHub Actions workflow
 builds the web site once and uses native x86-64 and ARM64 runners for the two
 backends. The smoke tests check the packaged musl notice, installation under
-inherited directory permissions, boot enablement, the setup page, and the
+inherited directory permissions, boot enablement, the setup key, and the
 served WebAssembly. They also check root and regular-user management and
 verify that WaterWall can finish shutting down during a service stop or restart.
 
