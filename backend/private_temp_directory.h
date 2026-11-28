@@ -33,6 +33,11 @@ class PrivateTempDirectory {
         return name_;
     }
 
+    void release()
+    {
+        name_.clear();
+    }
+
   private:
     std::string name_;
 };

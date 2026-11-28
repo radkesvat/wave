@@ -162,7 +162,12 @@ Json config_auth_nodes(const Json& config)
 std::string auth_database_name(const Json& node, std::string_view config_name,
                                const fs::path& executable_directory)
 {
-    const auto& definition = waterwall_node(text(field(node, "type")));
+    return auth_database_name(node, config_name, executable_directory, waterwall_node(text(field(node, "type"))));
+}
+
+std::string auth_database_name(const Json& node, std::string_view config_name,
+                               const fs::path& executable_directory, const Json& definition)
+{
     const auto key = schematic_text(schematic_field(definition, "database_key"));
     const auto configured = text(schematic_field(field(node, "settings"), key));
     if (configured.empty() || configured.find('\0') != std::string_view::npos) {
@@ -179,8 +184,12 @@ std::string auth_database_name(const Json& node, std::string_view config_name,
                : std::string{};
 }
 
-std::string validate_config_graph(const Json& config, const Json& previous)
+std::string validate_config_graph(const Json& config, const Json& previous, const WaterWallSchematic* schematic)
 {
+    const auto& schema = schematic ? waterwall_schematic(*schematic) : waterwall_schematic();
+    const auto definition = [&](std::string_view type) -> const Json& {
+        return schematic_field(schematic_field(schema, "nodes"), type);
+    };
     const auto& nodes = field(config, "nodes");
     if (!config.is_object() || !valid_name(field(config, "name")) || !nodes.is_array()) {
         return "The config must have a name and a nodes array.";
@@ -189,7 +198,7 @@ std::string validate_config_graph(const Json& config, const Json& previous)
         return "Config strings cannot contain a NUL character.";
     }
     for (const auto& version_key :
-         schematic_field(schematic_field(waterwall_schematic(), "config"), "version_keys")) {
+         schematic_field(schematic_field(schema, "config"), "version_keys")) {
         const auto key = schematic_text(version_key);
         if (config.contains(key) && !valid_version(config[key])) {
             return std::string(key) + " must be a nonnegative integer.";
@@ -206,11 +215,11 @@ std::string validate_config_graph(const Json& config, const Json& previous)
         if (!named.emplace(text(name), &node).second) {
             return "Duplicate node name: " + name.get<std::string>();
         }
-        if (!waterwall_node(text(type)).is_object() &&
+        if (!definition(text(type)).is_object() &&
             !std::ranges::any_of(field(previous, "nodes"), [&](const Json& existing) {
                 return field(existing, "name") == name && field(existing, "type") == type;
             })) {
-            return "WaterWall " + std::string(waterwall_version()) + " does not include node type " +
+            return "WaterWall " + std::string(text(field(schema, "version"))) + " does not include node type " +
                    type.get<std::string>() + '.';
         }
         if ((node.contains("settings") && !node["settings"].is_object()) ||
@@ -241,19 +250,20 @@ std::string validate_config_graph(const Json& config, const Json& previous)
         };
         if (const auto next = node->find("next"); next != node->end()) {
             const auto* target = find_target(*next);
-            if (!allows_node_next(type, settings) || !target ||
-                !allows_node_previous(text(field(*target, "type")))) {
+            if (!node_allows_next(definition(type), settings) || !target ||
+                !node_allows_previous(definition(text(field(*target, "type"))))) {
                 return "Invalid next node on " + std::string(name) + '.';
             }
             next_nodes.emplace(name, text(*next));
         }
         if (auto issue =
-                schematic_rules::validate(schematic_field(waterwall_node(type), "graph_rules"), settings);
+                schematic_rules::validate(schematic_field(definition(type), "graph_rules"), settings);
             !issue.empty()) {
             return std::string(name) + ": " + issue;
         }
         std::string error;
-        visit_node_links(*node, [&](const Json& container, const NodeLinkField& link, const char* key) {
+        const auto links = schematic ? node_link_fields(*schematic, type) : node_link_fields(type);
+        visit_node_links(*node, links, [&](const Json& container, const NodeLinkField& link, const char* key) {
             if (!error.empty() || !node_link_active(container, link)) {
                 return;
             }

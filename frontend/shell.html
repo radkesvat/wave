@@ -636,6 +636,104 @@
           event.stopPropagation();
         }, { capture: true });
 
+        let backupRequest;
+
+        function startBackupRequest(operation, value) {
+          const request = { operation, abort: new AbortController() };
+          backupRequest = request;
+          const download = operation === "download";
+          const prepare = operation === "prepare";
+          const apply = operation === "apply";
+          const path = basePath + "/api/backup" + (download ? "" : "/" + operation);
+          const fallback = download ? "Could not download the backup." :
+            prepare ? "Could not prepare the backup for restore." : "Could not restore the backup.";
+          const unconfirmed = "The restore outcome is unconfirmed. Check the workspace before trying again.";
+          const deadline = apply ? setTimeout(() => request.abort.abort(), 30_000) : undefined;
+          const options = {
+            mode: "same-origin", credentials: "same-origin", cache: "no-store", redirect: "error",
+            signal: request.abort.signal
+          };
+          if (!download) {
+            options.method = "POST";
+            options.headers = {
+              "Content-Type": prepare ? "application/zip" : "application/json",
+              "X-Wave-CSRF": "1"
+            };
+            options.body = prepare ? value : JSON.stringify({ token: value });
+          }
+          fetch(path, options).then(async response => {
+            if (response.ok && download && response.headers.get("Content-Type") === "application/zip") {
+              const file = await response.blob();
+              if (backupRequest !== request) return;
+              const url = URL.createObjectURL(file);
+              const link = document.createElement("a");
+              link.href = url;
+              link.download = "wave-backup.zip";
+              link.click();
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+              request.reply = { ok: true };
+              return;
+            }
+            const reply = await response.json().catch(() => null);
+            if (response.ok && !download && reply?.ok === true) {
+              request.reply = reply;
+              return;
+            }
+            if (apply && (request.abort.signal.aborted || response.ok || response.status >= 500)) {
+              request.reply = { ok: false, error: unconfirmed };
+              return;
+            }
+            request.reply = {
+              ok: false,
+              error: typeof reply?.error === "string" ? reply.error : fallback,
+              retryable: apply && response.status === 409 && reply?.retryable === true
+            };
+          }).catch(() => {
+            request.reply = { ok: false, error: apply ? unconfirmed : fallback };
+          }).finally(() => clearTimeout(deadline));
+        }
+
+        function chooseWorkspaceBackup(maxBytes) {
+          const selection = { operation: "prepare", choosing: true };
+          backupRequest = selection;
+          const input = document.createElement("input");
+          input.type = "file";
+          input.accept = ".zip,application/zip";
+          input.addEventListener("change", () => {
+            const file = input.files[0];
+            if (backupRequest !== selection || !file) return;
+            if (file.size === 0 || file.size > maxBytes) {
+              backupRequest = {
+                operation: "prepare",
+                reply: { ok: false, error: "Choose a nonempty backup ZIP up to 128 MiB." }
+              };
+              return;
+            }
+            startBackupRequest("prepare", file);
+          }, { once: true });
+          input.addEventListener("cancel", () => {
+            if (backupRequest === selection) backupRequest = undefined;
+          }, { once: true });
+          input.click();
+        }
+
+        function backupRequestPending(operation) {
+          return !!backupRequest && (!operation || backupRequest.operation === operation) &&
+            !backupRequest.choosing && backupRequest.reply === undefined;
+        }
+
+        function takeWorkspaceBackupReply() {
+          if (!backupRequest?.reply) return null;
+          const { operation, reply } = backupRequest;
+          backupRequest = undefined;
+          return JSON.stringify({ ...reply, operation });
+        }
+
+        function clearWorkspaceBackupRequest() {
+          backupRequest?.abort?.abort();
+          backupRequest = undefined;
+        }
+
         window.addEventListener("error", showStartupError, true);
         window.addEventListener("unhandledrejection", showStartupError);
         return {
@@ -643,6 +741,8 @@
           updateConfigLinks, updateConfigTabs,
           panelFocus, setTextInput, installTextInput, copyText, applyAppearance, updateConsole,
           openConfigJsonEditor, positionConfigJsonEditor, configJsonEditorText, closeConfigJsonEditor,
+          startBackupRequest, chooseWorkspaceBackup, backupRequestPending, takeWorkspaceBackupReply,
+          clearWorkspaceBackupRequest,
           onAbort: showStartupError
         };
       })();

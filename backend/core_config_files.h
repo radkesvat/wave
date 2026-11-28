@@ -11,6 +11,10 @@
 
 namespace wave {
 
+inline constexpr std::size_t max_workspace_configs = 64;
+
+std::string_view core_config_registry_error(const nlohmann::json& configs, bool exact_rows = false);
+
 struct CoreConfigDocument {
     nlohmann::json config;
     std::string revision;

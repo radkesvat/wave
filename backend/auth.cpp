@@ -1,6 +1,7 @@
 #include "auth.h"
 
 #include "auth_store.h"
+#include "backup_archive.h"
 #include "panel_base_path.h"
 #include "panel_settings.h"
 
@@ -11,6 +12,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 namespace wave {
 namespace {
@@ -27,6 +29,7 @@ constexpr std::string_view websocket_routes[] = {"/ws", panel_socket, "/ws/conso
                                                   "/ws/workspace"};
 constexpr std::string_view sign_in_route = "/api/auth/sign-in";
 constexpr std::string_view base_path_route = "/api/auth/base-path";
+constexpr std::size_t max_panel_json_bytes = 4096;
 
 struct SiteAsset {
     std::string_view path;
@@ -73,7 +76,9 @@ Access route_access(std::string_view route, std::string_view method, bool bootst
         if (route == "/api/auth/setup" || route == "/api/auth/sign-out") {
             return Access::entry;
         }
-        return route == "/api/auth/admin" ? Access::authenticated : Access::missing;
+        return route == "/api/auth/admin" || route == backup_prepare_route || route == backup_apply_route
+                   ? Access::authenticated
+                   : Access::missing;
     }
     if (method != "GET" && method != "HEAD") {
         return Access::missing;
@@ -94,7 +99,7 @@ Access route_access(std::string_view route, std::string_view method, bool bootst
     if (std::ranges::find(websocket_routes, route) != std::end(websocket_routes)) {
         return Access::websocket;
     }
-    return route == "/api/session" ? Access::authenticated : Access::missing;
+    return route == "/api/session" || route == backup_download_route ? Access::authenticated : Access::missing;
 }
 
 std::string_view setup_page(bool installed, bool authenticated)
@@ -217,6 +222,35 @@ std::function<bool()> websocket_session(const std::shared_ptr<AuthStore>& store,
     return [store, token = session_cookie(request)] { return store->session(token).has_value(); };
 }
 
+std::string authenticated_session_id(const std::shared_ptr<AuthStore>& store, const Request& request)
+{
+    const auto session = store->session(session_cookie(request));
+    return session ? session->id : std::string{};
+}
+
+void post_panel_json(Server& server, const std::string& route, PanelJsonHandler handler)
+{
+    server.Post(route, [handler = std::move(handler)](const Request& req, Response& res,
+                                                      const httplib::ContentReader& read) {
+        std::string body;
+        bool too_large = false;
+        if (!read([&](const char* data, std::size_t size) {
+                if (size > max_panel_json_bytes - body.size()) {
+                    too_large = true;
+                    return false;
+                }
+                body.append(data, size);
+                return true;
+            })) {
+            if (too_large) {
+                res.status = 413;
+            }
+            return;
+        }
+        handler(req, res, body);
+    });
+}
+
 void configure_authenticated_routes(Server& server, const std::filesystem::path& site_dir,
                                     std::shared_ptr<AuthStore> store, std::shared_ptr<PanelDatabase> database, bool secure,
                                     const std::string& authority)
@@ -225,7 +259,7 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
                                 {"Referrer-Policy", "same-origin"},
                                 {"X-Content-Type-Options", "nosniff"},
                                 {"Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'"}});
-    server.set_payload_max_length(4096);
+    server.set_payload_max_length(max_backup_archive_bytes);
 
     // The pre-routing hook checks the configured prefix before HTTP dispatch and WebSocket upgrades.
     server.set_pre_routing_handler([store, database, secure, authority](const Request& req, Response& res) {
@@ -264,15 +298,22 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         if (access == Access::websocket && !exact_header(req, "Origin", origin)) {
             return reject(res, 403);
         }
+        const auto content_type = suffix == backup_prepare_route ? "application/zip" : "application/json";
         if (!read && (!exact_header(req, "Origin", origin) || !exact_header(req, "X-Wave-CSRF", "1") ||
-                      !exact_header(req, "Content-Type", "application/json"))) {
+                      !exact_header(req, "Content-Type", content_type))) {
             return reject(res, 403);
         }
-        if (access == Access::entry || (access == Access::base_path_setup && !store->installed()) ||
-            store->session(session_cookie(req))) {
-            return Decision::Unhandled;
+        if (access != Access::entry && !(access == Access::base_path_setup && !store->installed()) &&
+            !store->session(session_cookie(req))) {
+            return reject(res, 401);
         }
-        return reject(res, 401);
+        // JSON routes also enforce their limit while reading chunked bodies.
+        const auto body_limit = suffix == backup_prepare_route ? max_backup_archive_bytes : max_panel_json_bytes;
+        if (req.get_header_value_u64("Content-Length") > body_limit ||
+            (read && req.has_header("Transfer-Encoding"))) {
+            return reject(res, 413);
+        }
+        return Decision::Unhandled;
     });
 
     const auto page = [store, secure, index = (site_dir / "index.html").string()](const Request& req, Response& res) {
@@ -302,13 +343,13 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         });
     }
 
-    server.Post(std::string(panel_setup_prefix).append(base_path_route), [database, store](const Request& req,
-                                                                                         Response& res) {
+    post_panel_json(server, std::string(panel_setup_prefix).append(base_path_route),
+                    [database, store](const Request& req, Response& res, std::string_view body) {
         if (store->installed() && !store->session(session_cookie(req))) {
             res.status = 401;
             return;
         }
-        const auto input = Json::parse(req.body, nullptr, false);
+        const auto input = Json::parse(body, nullptr, false);
         const auto value = input.find(panel_base_path_key);
         if (value == input.end() || !value->is_string() || !valid_panel_base_path(value->get_ref<const std::string&>())) {
             res.status = 400;
@@ -328,12 +369,12 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         res.status = 201;
     });
 
-    server.Post(panel_route("/api/auth/setup"), [store](const Request& req, Response& res) {
+    post_panel_json(server, panel_route("/api/auth/setup"), [store](const Request&, Response& res, std::string_view body) {
         if (store->installed()) {
             res.status = 409;
             return;
         }
-        const auto input = Json::parse(req.body, nullptr, false);
+        const auto input = Json::parse(body, nullptr, false);
         const auto username = credential(input, "username");
         const auto password = credential(input, "password");
         if (!AuthStore::valid_username(username)) {
@@ -356,8 +397,8 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
     });
 
-    server.Post(panel_route(sign_in_route), [store, secure](const Request& req, Response& res) {
-        const auto input = Json::parse(req.body, nullptr, false);
+    post_panel_json(server, panel_route(sign_in_route), [store, secure](const Request&, Response& res, std::string_view body) {
+        const auto input = Json::parse(body, nullptr, false);
         const auto username = credential(input, "username");
         const auto password = credential(input, "password");
         if (!AuthStore::valid_username(username) || !AuthStore::valid_password_input(password)) {
@@ -380,14 +421,14 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
     });
 
-    server.Post(panel_route("/api/auth/sign-out"), [store, secure](const Request& req, Response& res) {
+    post_panel_json(server, panel_route("/api/auth/sign-out"), [store, secure](const Request& req, Response& res, std::string_view) {
         store->sign_out(session_cookie(req));
         set_cookie(res, secure, {});
         res.status = 204;
     });
 
-    server.Post(panel_route("/api/auth/admin"), [store, secure](const Request& req, Response& res) {
-        const auto input = Json::parse(req.body, nullptr, false);
+    post_panel_json(server, panel_route("/api/auth/admin"), [store, secure](const Request& req, Response& res, std::string_view body) {
+        const auto input = Json::parse(body, nullptr, false);
         const auto username = credential(input, "username");
         const auto current_password = credential(input, "current_password");
         const auto new_password = input.find("password");

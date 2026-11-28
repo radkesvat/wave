@@ -300,7 +300,7 @@ inline void report_issue(std::string& issues, const std::string& message)
     issues += message;
 }
 
-inline void normalize_group(const Json& source, const Json::json_pointer& path, std::string_view name,
+inline void normalize_group(const Json& spec, const Json& source, const Json::json_pointer& path, std::string_view name,
                             Json& settings, std::string& issue)
 {
     settings = Json::object();
@@ -317,7 +317,7 @@ inline void normalize_group(const Json& source, const Json::json_pointer& path, 
         const Json* descriptor = nullptr;
         bool group_found = false;
         bool preserve_empty = false;
-        for (const auto& section : sections()) {
+        for (const auto& section : schematic_field(spec, "sections")) {
             for (const auto& group : schematic_field(section, "groups")) {
                 const auto group_path = text(group, "path", "");
                 if (group_path == child_path ||
@@ -338,7 +338,7 @@ inline void normalize_group(const Json& source, const Json::json_pointer& path, 
 
         if (group_found) {
             Json normalized;
-            normalize_group(value, child, label, normalized, issue);
+            normalize_group(spec, value, child, label, normalized, issue);
             if (!normalized.empty() || (preserve_empty && value.is_object())) {
                 settings[key] = std::move(normalized);
             }
@@ -350,7 +350,7 @@ inline void normalize_group(const Json& source, const Json::json_pointer& path, 
                 report_issue(issue, label + ' ' + expected_value(*descriptor));
             }
         } else if (const auto reason =
-                       text(schematic_field(specification(), "rejected_fields"), child_path, {});
+                       text(schematic_field(spec, "rejected_fields"), child_path, {});
                    !reason.empty()) {
             report_issue(issue, std::string(reason));
         } else if (label.size() > 80) {
@@ -501,14 +501,14 @@ inline bool valid_schematic(const Json& spec)
     });
 }
 
-inline Normalized normalize(const Json& settings)
+inline Normalized normalize(const Json& settings, const Json& spec = specification())
 {
     constexpr char size_error[] = "Core settings must fit within 16 KiB of compact JSON.";
     if (settings.dump().size() > max_bytes) {
         return {Json::object(), size_error};
     }
     Normalized result;
-    detail::normalize_group(settings, Json::json_pointer{}, {}, result.settings, result.issue);
+    detail::normalize_group(spec, settings, Json::json_pointer{}, {}, result.settings, result.issue);
     if (result.settings.dump().size() > max_bytes) {
         detail::report_issue(result.issue, size_error);
     }

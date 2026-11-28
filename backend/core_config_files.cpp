@@ -1,9 +1,14 @@
 #include "core_config_files.h"
 
+#include "core_config_name.h"
+
 #include <openssl/sha.h>
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
+#include <limits>
+#include <set>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -76,6 +81,28 @@ std::string revision_of(std::string_view contents)
 }
 
 } // namespace
+
+std::string_view core_config_registry_error(const nlohmann::json& configs, bool exact_rows)
+{
+    if (!configs.is_array() || configs.size() > max_workspace_configs) {
+        return "must be an array of up to 64 configs.";
+    }
+    std::set<std::string_view> names;
+    std::set<int> ids;
+    for (const auto& row : configs) {
+        const auto name = row.find("name");
+        const auto id = row.find("id");
+        const auto enabled = row.find("enabled");
+        const auto* text = name == row.end() ? nullptr : name->get_ptr<const std::string*>();
+        const auto value = id != row.end() && id->is_number_integer() ? id->get<std::uint64_t>() : 0;
+        if (!text || text->empty() || core_config_name(*text) != *text || value == 0 ||
+            value >= std::numeric_limits<int>::max() || enabled == row.end() || !enabled->is_boolean() ||
+            (exact_rows && row.size() != 3) || !names.insert(*text).second || !ids.insert(static_cast<int>(value)).second) {
+            return "contains an invalid or duplicate config.";
+        }
+    }
+    return {};
+}
 
 CoreConfigFiles::CoreConfigFiles(const fs::path& directory) : root_(directory / configs_directory)
 {

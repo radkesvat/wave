@@ -145,11 +145,12 @@ Replace `--dry-run --Werror` with `-i` to apply the format.
 The backend needs CMake 3.24 or newer, Ninja, host C and C++20 compilers, and
 the OpenSSL 3 development package. The first configure downloads cpp-httplib
 v0.67.0, nlohmann/json v3.12.0, utf8proc v2.12.0, the Argon2 reference implementation release
-`20190702`, and zxcvbn-c v2.7, then verifies their pinned archive checksums.
+`20190702`, zxcvbn-c v2.7, and Miniz 3.1.2, then verifies their pinned archive checksums.
 [cpp-httplib release](https://github.com/yhirose/cpp-httplib/releases/tag/v0.67.0),
 [nlohmann/json release](https://github.com/nlohmann/json/releases/tag/v3.12.0),
 [utf8proc release](https://github.com/JuliaStrings/utf8proc/releases/tag/v2.12.0),
 [zxcvbn-c release](https://github.com/tsyrogit/zxcvbn-c/releases/tag/v2.7),
+[Miniz release](https://github.com/richgel999/miniz/releases/tag/3.1.2),
 [zxcvbn-c license](licenses/zxcvbn-c.txt)
 
 On Linux, the build patches cpp-httplib so closing a WebSocket wakes a thread
@@ -171,7 +172,7 @@ If an existing backend build directory was configured from `backend/`, add
 The executable is `build/backend-release/wave-backend` or
 `build/backend-debug/wave-backend`. With Ninja Multi-Config, each configuration
 builds the executable in its own directory, such as `Debug/` or `Release/`.
-Keep the build's `licenses/utf8proc.txt` with the backend when distributing it.
+Keep the build's `licenses/utf8proc.txt` and `licenses/miniz.txt` with the backend when distributing it.
 The executable contains the default WaterWall 1.6.0 schematic. On first
 startup, Wave creates its `waterwall_bin/` cache and seeds the default
 release from that embedded copy. Rebuilding after a schematic edit updates
@@ -721,13 +722,47 @@ the client additional access. Save the config and restart WaterWall to apply
 the new grants. Wave verifies the local TCP peer belongs to its WaterWall
 process before sending credentials. [WaterWall 1.6.0 APIServer](https://github.com/radkesvat/WaterWall/blob/v1.6.0/tunnels/APIServer/description.md)
 
-**Backup** in Panel Controls downloads `wave-preview-backup.json` with the
-sample TLS domain, PEM paths, and the inactive config list. The backup contains
-config names and enabled flags. Live TLS settings are stored in `wave-db.json`.
-**Restore** replaces the inactive config list
-after confirmation, retains existing `config.json` files, and creates a
-skeleton for a restored name that lacks a folder. For deployment settings,
-see [Authentication and HTTPS](authentication.md).
+### Workspace backup and restore
+
+Stop WaterWall before using **Backup** or **Restore** in Panel Controls.
+**Backup** downloads `wave-backup.zip`. Its `manifest.json` records the backup
+format version, the selected `waterwall_version`, saved core settings, and the
+registered config IDs, names, and enabled flags. The ZIP includes each config's
+`config.json`, referenced AuthenticationServer databases, and their `.backup`
+recovery files when present. Wave preserves the saved bytes of a primary and
+recovery file when WaterWall can load the primary or recover from the backup.
+The export captures the last state saved to disk.
+
+**Restore** validates the ZIP and shows the WaterWall version and the configs
+that will be added, replaced, or removed from the workspace. The destination
+must have a valid schematic for the recorded release. Wave reports a missing
+executable or known external file dependencies, including databases required
+by Router rules, before confirmation. It preserves disabled drafts and warns
+when the selected release lacks one of their node types. Supply host-specific
+files separately. A restore uses the destination's Wave
+administrator, sessions, listener, base path, and TLS settings. ZIPs contain
+WaterWall credentials, so store them privately and use HTTPS for remote access.
+[Authentication and HTTPS](authentication.md)
+
+Confirm to apply the restored configuration files, core settings, and selected
+version together. Wave keeps unrelated files in the config folders, including
+the files of configs removed from the workspace registry. Wave recovers an
+interrupted restore at startup before opening the workspace. Keep the config
+filesystems mounted until recovery finishes. Start WaterWall from Panel
+Controls when the restored workspace is ready.
+
+You can cancel while uploading a ZIP. If a release check delays Apply, retry
+after it finishes. If the Apply response times out, check Server Status and
+Logs for the outcome before attempting another restore.
+
+The backend accepts ZIPs up to 128 MiB compressed and 128 MiB expanded, with
+at most 4096 files. Config files are limited to 256 KiB and user databases
+to 16 MiB each. The authenticated HTTP routes relative to the panel base path
+are `GET /api/backup`, `POST /api/backup/prepare` with a ZIP body, and
+`POST /api/backup/apply` with the proposal token as JSON. POST requests use
+the panel's origin and CSRF checks. A proposal expires after five minutes.
+Apply returns HTTP 409 with `retryable: true` while a valid proposal is waiting
+for a core operation to finish.
 
 The workspace snapshot reports the Wave build version in `server.version`.
 `server.checking_updates` stays true until both parts of a combined check finish.
@@ -753,7 +788,9 @@ must include its current `schematic_revision`, even if the connection has
 already received the schematic. Older clients can omit the revision while
 Wave is on its initial bundled 1.6.0 selection before the first switch.
 Selecting another release at startup also requires the revision. Requests
-use the existing `request_id` and snapshot reply for workspace actions.
+to enable, disable, or delete configs also require the current revision after
+a workspace restore, which can reuse config IDs. Workspace actions use
+the existing `request_id` and snapshot reply.
 The opt-in Users roster stream uses separate messages. [Workspace roster protocol](authentication.md#workspace-roster-stream)
 Checks, installs, and other operations that continue in the background
 acknowledge receipt and report completion in later snapshots. Stop and restart
@@ -793,7 +830,7 @@ connection closes, Server Status shows the last snapshot and offers to reconnect
 | `edit_config_user` | Offline scope, string `user_id`, changed fields in `user`, and optional `page` or `roster: true`. Set a numeric override to `null` to restore its default. |
 | `reset_config_user_traffic` | Current offline scope, decimal string `user_id`, and optional `page` or `roster: true`. Sets the saved charged upload and download counters to zero. |
 | `delete_config_user` | Offline scope, string `user_id`, and optional `page` or `roster: true` |
-| `restore_preview_backup` | Downloaded JSON object as `backup` |
+| `restore_preview_backup` | Legacy preview metadata JSON object as `backup` |
 
 Live scope consists of `config_id`, `node`, `source` set to `live`, and the
 node's `run_id` from `users_access` on the config snapshot. The legacy paged

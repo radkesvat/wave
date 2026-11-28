@@ -4,6 +4,7 @@
 #include "panel_settings.h"
 #include "preview.h"
 #include "waterwall_schematic_file.h"
+#include "workspace_backup.h"
 
 #include <httplib.h>
 
@@ -159,6 +160,7 @@ int main(int argc, char* argv[])
         } else {
             server = std::make_unique<httplib::Server>();
         }
+        wave::recover_workspace_restore(*database);
         wave::select_waterwall_schematic(*database);
         store = std::make_shared<wave::AuthStore>(database);
         wave::configure_authenticated_routes(*server, options.site_dir, store, database, secure, authority);

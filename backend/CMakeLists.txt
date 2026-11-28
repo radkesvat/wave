@@ -65,8 +65,30 @@ if(UNIX)
     target_link_libraries(wave-zxcvbn PRIVATE m)
 endif()
 
+# Miniz 3.1.2 supplies the in-memory ZIP reader and writer.
+FetchContent_Declare(miniz
+    URL https://codeload.github.com/richgel999/miniz/tar.gz/refs/tags/3.1.2
+    URL_HASH SHA256=98468f8924934b723276680f85238b6c78bf1f8b49b4459cc9b7214a20e2e9fb
+    SOURCE_SUBDIR wave-embedded
+)
+FetchContent_MakeAvailable(miniz)
+add_library(wave-miniz STATIC
+    "${miniz_SOURCE_DIR}/miniz.c"
+    "${miniz_SOURCE_DIR}/miniz_tdef.c"
+    "${miniz_SOURCE_DIR}/miniz_tinfl.c"
+    "${miniz_SOURCE_DIR}/miniz_zip.c"
+)
+include(GenerateExportHeader)
+generate_export_header(wave-miniz BASE_NAME MINIZ EXPORT_FILE_NAME "${CMAKE_CURRENT_BINARY_DIR}/miniz_export.h")
+target_include_directories(wave-miniz PUBLIC "${miniz_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_definitions(wave-miniz PUBLIC MINIZ_NO_STDIO MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+add_library(wave-backup-archive STATIC backup_archive.cpp)
+target_compile_features(wave-backup-archive PRIVATE cxx_std_20)
+target_link_libraries(wave-backup-archive PRIVATE wave-miniz)
+
 add_executable(wave-backend
     main.cpp panel_settings.cpp panel_update.cpp preview.cpp linux_metrics.cpp auth.cpp auth_store.cpp
+    workspace_backup.cpp
     waterwall.cpp waterwall_install.cpp waterwall_logs.cpp waterwall_users.cpp users_roster.cpp users_roster_stream.cpp
     core_config_files.cpp core_config_graph.cpp core_config_users.cpp console.cpp
     waterwall_schematic_file.cpp waterwall_schematic_catalog.cpp "${PROJECT_SOURCE_DIR}/common/waterwall_schematic.cpp"
@@ -80,6 +102,7 @@ set_target_properties(wave-backend PROPERTIES
 target_include_directories(wave-backend PRIVATE "${PROJECT_SOURCE_DIR}/common" "${PROJECT_BINARY_DIR}/generated")
 target_link_libraries(wave-backend PRIVATE
     httplib::httplib nlohmann_json::nlohmann_json OpenSSL::Crypto Threads::Threads wave-argon2 wave-zxcvbn wave-utf8proc
+    wave-backup-archive
 )
 if(WIN32)
     target_link_libraries(wave-backend PRIVATE advapi32)
@@ -101,3 +124,4 @@ string(REGEX REPLACE "(..)" "\\\\x\\1" schematic_bytes "${schematic_hex}")
 configure_file(bundled_waterwall_schematic.h.in
     "${PROJECT_BINARY_DIR}/generated/bundled_waterwall_schematic.h" @ONLY)
 configure_file("${utf8proc_SOURCE_DIR}/LICENSE.md" "${CMAKE_BINARY_DIR}/licenses/utf8proc.txt" COPYONLY)
+configure_file("${miniz_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/licenses/miniz.txt" COPYONLY)

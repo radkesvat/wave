@@ -1,9 +1,7 @@
 #include "panel_controls_view.h"
 
 #include "browser_ui.h"
-#include "core_config_json.h"
 #include "dialog.h"
-#include "preview_backup.h"
 #include "view_helpers.h"
 #include "waterwall_schematic.h"
 
@@ -34,10 +32,9 @@ constexpr char update_notice[] =
     "WaterWall will stay stopped. Open configuration forms will reload from their saved settings.";
 constexpr char unsaved_config_warning[] = "Unsaved node changes will be lost.";
 constexpr char managed_starter_notice[] = "Grants Wave all live user-management permissions for this config.";
-constexpr char restore_message[] =
-    "Choose a backup JSON file to replace the sample TLS settings and inactive config list.";
-constexpr char backup_selected_message[] = "Wave preview backup selected.";
-constexpr auto request_id_bytes = sizeof(",\"request_id\":18446744073709551615") - 1;
+constexpr char restore_message[] = "Choose a Wave backup ZIP.";
+constexpr char restore_confirm_message[] =
+    "Unsaved config edits will be discarded. WaterWall will stay stopped after the restore.";
 
 const Json& server_snapshot(const PreviewSession& session)
 {
@@ -72,12 +69,23 @@ bool can_edit_configs(const Json& core)
     return supports(core, "configs") && field(core, "configs").is_array();
 }
 
-bool can_use_backup(const PreviewSession& session)
+const char* backup_unavailable(const PreviewSession& session)
 {
-    const auto& settings = field(session.data(), "settings");
-    return session.ready() && can_edit_configs(field(server_snapshot(session), "core")) &&
-           std::ranges::all_of(preview_backup_tls_fields,
-                               [&](const char* key) { return field(settings, key).is_string(); });
+    if (!session.ready()) {
+        return "The workspace connection is unavailable.";
+    }
+    const auto& core = field(server_snapshot(session), "core");
+    if (!can_edit_configs(core)) {
+        return "Workspace backup and restore are unavailable.";
+    }
+    const auto state = string_field(core, "state");
+    if (state == "running") {
+        return "Stop WaterWall before backing up or restoring the workspace.";
+    }
+    if ((state != "stopped" && state != "missing") || !string_field(core, "update_target").empty()) {
+        return "Wait for the current WaterWall operation to finish.";
+    }
+    return nullptr;
 }
 
 bool can_stop(const Json& core)
@@ -190,6 +198,9 @@ bool core_transition_pending(const PreviewSession& session)
 
 bool dialog_pending(const PanelControlsState& state, const PreviewSession& session)
 {
+    if (state.dialog == ControlsDialog::restore) {
+        return backup_request_pending();
+    }
     const bool lifecycle = state.dialog == ControlsDialog::stop || state.dialog == ControlsDialog::restart;
     const bool updating = state.dialog == ControlsDialog::update && session.ready() &&
                           core_update_pending(field(server_snapshot(session), "core"));
@@ -501,78 +512,105 @@ void render_confirmation(PanelControlsState& state, PreviewSession& session, con
     }
 }
 
-void download_backup(const PreviewSession& session)
+std::string describe_restore_summary(const Json& reply)
 {
-    auto settings = Json::object();
-    for (const auto* key : preview_backup_tls_fields) {
-        settings[key] = field(field(session.data(), "settings"), key);
+    const auto version = string_field(reply, "waterwall_version");
+    const auto current = string_field(reply, "current_waterwall_version");
+    std::string summary = version == current
+                              ? std::format("WaterWall {}.", version)
+                              : std::format("WaterWall will change from {} to {}.", current, version);
+    const auto& configs = array_field(reply, "configs");
+    const auto& replaced = array_field(reply, "replaced_configs");
+    if (configs.empty()) {
+        summary += "\nThis backup contains no configs.";
     }
-    auto configs = Json::array();
-    for (const auto& config : array_field(field(server_snapshot(session), "core"), "configs")) {
-        if (!bool_field(config, "active")) {
-            configs.push_back({{"name", field(config, "name")}, {"enabled", field(config, "enabled")}});
+    for (const auto& config : configs) {
+        const auto name = string_field(config, "name");
+        const bool replaces = std::ranges::any_of(
+            replaced, [&](const Json& existing) { return string_value(existing) == name; });
+        const auto change = replaces ? "Replace" : "Add";
+        summary += std::format("\n{} {} ({}).", change, name,
+                               bool_field(config, "enabled") ? "enabled" : "disabled");
+    }
+    for (const auto& name : array_field(reply, "removed_configs")) {
+        summary += std::format("\nRemove {}.", string_value(name));
+    }
+    for (const auto* field_name : {"missing_dependencies", "compatibility_warnings"}) {
+        for (const auto& warning : array_field(reply, field_name)) {
+            summary += '\n';
+            summary += string_value(warning);
         }
     }
-    const Json backup = {{"format", preview_backup_format},
-                         {"version", preview_backup_version},
-                         {"settings", std::move(settings)},
-                         {"configs", std::move(configs)}};
-    download_preview_file("wave-preview-backup.json", backup.dump(2) + '\n', "application/json");
+    return summary;
 }
 
-void render_restore(PanelControlsState& state, PreviewSession& session)
+void update_backup_request(PanelControlsState& state, PreviewSession& session)
 {
-    if (const auto content = take_preview_json_file()) {
-        constexpr char invalid[] = "Choose a valid Wave preview backup.";
-        std::string error;
-        auto backup = parse_plain_core_config_json(*content, invalid, error);
-        Json request = {{"action", "restore_preview_backup"}, {"backup", nullptr}};
-        if (error.empty() && field(backup, "format") == preview_backup_format &&
-            field(backup, "version").is_number_integer() &&
-            field(backup, "version") == preview_backup_version) {
-            request["backup"] = std::move(backup);
-        }
-        if (request["backup"].is_null() ||
-            request.dump().size() + request_id_bytes > max_preview_restore_request_bytes) {
-            state.restore_error = invalid;
+    const auto content = take_workspace_backup_reply();
+    if (!content) {
+        return;
+    }
+    const auto reply = Json::parse(*content, nullptr, false);
+    const auto operation = string_field(reply, "operation");
+    const bool ok = bool_field(reply, "ok");
+    if (operation == "download") {
+        session.add_local_log(ok ? "success" : "error",
+                              ok ? "Downloaded the Wave workspace backup."
+                                 : string_field(reply, "error", "Could not download the backup."));
+    } else if (state.dialog == ControlsDialog::restore) {
+        if (operation == "apply" && ok) {
+            state.restore_applied = true;
+        } else if (operation == "prepare" && ok && !string_field(reply, "token").empty()) {
+            state.restore_proposal = PanelControlsState::RestoreProposal{
+                std::string(string_field(reply, "token")), describe_restore_summary(reply)};
         } else {
-            state.restore_request = std::move(request);
+            if (operation != "apply" || !bool_field(reply, "retryable")) {
+                state.restore_proposal.reset();
+            }
+            state.restore_error = string_field(reply, "error", "Could not read the backup restore response.");
         }
     }
+}
 
-    const bool pending = state.request_id.has_value();
-    const bool unavailable = !can_use_backup(session);
-    const bool selected = state.restore_request.is_object();
+void render_restore(PanelControlsState& state, const PreviewSession& session)
+{
+    const bool pending = backup_request_pending();
+    const bool applying = backup_request_pending("apply");
+    const auto* unavailable = backup_unavailable(session);
     Dialog frame("Restore backup###ServerPanelControlsDialog", 380,
-                 {{"Cancel", pending}, {"Restore", pending || unavailable || !selected}}, {.busy = pending});
+                 {{"Cancel", applying}, {"Restore", pending || unavailable || !state.restore_proposal}},
+                 {.busy = pending});
     if (!frame) {
         return;
     }
     wrapped(restore_message);
     ImGui::BeginDisabled(pending || unavailable);
     if (theme::button("Choose file", {-1, control_height()})) {
-        state.restore_request = nullptr;
+        state.restore_proposal.reset();
         state.restore_error.clear();
-        choose_preview_json_file(max_preview_backup_file_bytes);
+        choose_workspace_backup();
     }
     ImGui::EndDisabled();
-    if (selected) {
-        wrapped(backup_selected_message, Color::secondary_text);
+    if (state.restore_proposal) {
+        wrapped(state.restore_proposal->summary);
+        wrapped(restore_confirm_message, Color::secondary_text);
     }
     if (unavailable && !pending) {
-        wrapped(session.ready() ? "Backup restore is unavailable." : "The preview connection is unavailable.",
-                Color::warning);
+        wrapped(unavailable, Color::warning);
     }
     if (!state.restore_error.empty()) {
         wrapped(state.restore_error, Color::error);
     }
     const int action = frame.footer();
-    if (action == 0 || state.request_accepted.has_value()) {
-        clear_preview_json_file();
-        state.restore_request = nullptr;
+    if (action == 0 || state.restore_applied || (!applying && ImGui::IsKeyPressed(ImGuiKey_Escape, false))) {
+        clear_workspace_backup_request();
+        state.restore_proposal.reset();
+        state.restore_error.clear();
+        state.restore_applied = false;
         close_dialog(state);
-    } else if (action == 1) {
-        submit(state, session, state.restore_request);
+    } else if (action == 1 && state.restore_proposal) {
+        state.restore_error.clear();
+        apply_workspace_backup(state.restore_proposal->token.c_str());
     }
 }
 
@@ -580,6 +618,7 @@ void render_restore(PanelControlsState& state, PreviewSession& session)
 
 void update_panel_controls(PanelControlsState& state, PreviewSession& session)
 {
+    update_backup_request(state, session);
     if (auto reply = session.take_reply(state.request_id)) {
         state.request_accepted = reply->ok();
     }
@@ -681,11 +720,12 @@ void render_panel_controls(PanelControlsState& state, PreviewSession& session, f
     const auto& core = field(server, "core");
     const ControlsLayout layout(session, core, width, compact);
     const bool lifecycle_busy = core_transition_pending(session);
-    const bool disabled = !session.ready() || state.request_id.has_value();
+    const bool backup_pending = backup_request_pending();
+    const bool disabled = !session.ready() || state.request_id.has_value() || backup_pending;
     const bool checking_core = session.ready() && bool_field(core, "checking_updates");
     const bool checking = session.ready() && update_check_pending(server, state.updates);
     const bool busy = state.dialog == ControlsDialog::none &&
-                      (checking_core || checking || lifecycle_busy ||
+                      (checking_core || checking || lifecycle_busy || backup_pending ||
                        (state.request_id && state.action_config_id == 0));
     const float button_space = std::max(2.0f, width - ImGui::GetStyle().ItemSpacing.x);
     const float primary_width = std::floor(button_space * 2.0f / 3.0f);
@@ -733,16 +773,23 @@ void render_panel_controls(PanelControlsState& state, PreviewSession& session, f
     draw_core_versions(state, session, core, layout, disabled);
     if (layout.has_core) {
         ImGui::Spacing();
-        const bool backup_disabled = disabled || !can_use_backup(session);
+        const auto* backup_reason = backup_unavailable(session);
+        const bool backup_disabled = disabled || backup_reason;
+        const auto show_backup_reason = [&] {
+            if (backup_reason &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("%s", backup_reason);
+            }
+        };
         if (layout.button("Backup", backup_disabled, primary_width)) {
-            download_backup(session);
-            session.add_local_log("info", "Requested download of the Wave preview backup.");
+            download_workspace_backup();
         }
+        show_backup_reason();
         ImGui::SameLine();
         if (layout.button("Restore", backup_disabled, secondary_width)) {
-            state.restore_error.clear();
             open_dialog(state, ControlsDialog::restore);
         }
+        show_backup_reason();
     }
     if (!layout.notice.empty()) {
         wrapped(layout.notice, Color::secondary_text);
@@ -874,6 +921,12 @@ std::string describe_panel_controls(const PanelControlsState& state, const Previ
         if (!notice.empty()) {
             description += notice + ' ';
         }
+        if (session.ready() && core.is_object()) {
+            if (const auto* reason = backup_unavailable(session)) {
+                description += reason;
+                description += ' ';
+            }
+        }
     }
     switch (state.dialog) {
     case ControlsDialog::none:
@@ -907,8 +960,10 @@ std::string describe_panel_controls(const PanelControlsState& state, const Previ
         break;
     case ControlsDialog::restore:
         description += "Restore backup. ";
-        if (state.restore_request.is_object()) {
-            description += std::string(backup_selected_message) + ' ';
+        if (state.restore_proposal) {
+            description += state.restore_proposal->summary + ' ';
+            description += restore_confirm_message;
+            description += ' ';
         }
         if (!state.restore_error.empty()) {
             description += state.restore_error + ' ';
@@ -917,7 +972,7 @@ std::string describe_panel_controls(const PanelControlsState& state, const Previ
     }
     const bool core_busy =
         include_status && state.dialog == ControlsDialog::none &&
-        (checking_updates || core_transition_pending(session) ||
+        (checking_updates || core_transition_pending(session) || backup_request_pending() ||
          (session.ready() && bool_field(core, "checking_updates")));
     if (core_busy || (state.action_config_id == 0 && dialog_pending(state, session))) {
         description += busy_description;

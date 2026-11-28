@@ -839,6 +839,17 @@ bool CoreConfigUsers::valid_filename(std::string_view db_name)
            db_name.ends_with(".json") && core_config_name(db_name) == db_name;
 }
 
+bool CoreConfigUsers::valid_backup_database(std::string_view bytes)
+{
+    try {
+        auto database = parse_database(bytes);
+        static_cast<void>(index_users(database_rows(database)));
+        return true;
+    } catch (const UserError&) {
+        return false;
+    }
+}
+
 fs::path CoreConfigUsers::relative_path(std::string_view config_name, std::string_view db_name)
 {
     return fs::path("configs") / config_name / db_name;

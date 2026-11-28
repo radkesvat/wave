@@ -31,8 +31,11 @@ struct NodeLinkField {
 };
 
 std::span<const NodeLinkField> node_link_fields(std::string_view type);
+std::span<const NodeLinkField> node_link_fields(const WaterWallSchematic& schematic, std::string_view type);
 bool allows_node_next(std::string_view type, const nlohmann::json& settings);
 bool allows_node_previous(std::string_view type);
+bool node_allows_next(const nlohmann::json& definition, const nlohmann::json& settings);
+bool node_allows_previous(const nlohmann::json& definition);
 
 template <typename Json> const char* node_link_key(const Json& container, const NodeLinkField& field)
 {
@@ -54,14 +57,14 @@ template <typename Json> const char* node_link_key(const Json& container, const 
     return first_present ? first_present : field.key;
 }
 
-template <typename Json, typename Visitor> void visit_node_links(Json& node, Visitor&& visit)
+template <typename Json, typename Visitor>
+void visit_node_links(Json& node, std::span<const NodeLinkField> fields, Visitor&& visit)
 {
-    const auto type = node.find("type");
     const auto settings = node.find("settings");
-    if (type == node.end() || !type->is_string() || settings == node.end() || !settings->is_object()) {
+    if (settings == node.end() || !settings->is_object()) {
         return;
     }
-    for (const auto& field : node_link_fields(type->template get_ref<const std::string&>())) {
+    for (const auto& field : fields) {
         auto* container = &*settings;
         if (field.object) {
             const auto object = settings->find(field.object);
@@ -83,6 +86,14 @@ template <typename Json, typename Visitor> void visit_node_links(Json& node, Vis
                 visit(*container, field, key);
             }
         }
+    }
+}
+
+template <typename Json, typename Visitor> void visit_node_links(Json& node, Visitor&& visit)
+{
+    const auto type = node.find("type");
+    if (type != node.end() && type->is_string()) {
+        visit_node_links(node, node_link_fields(type->template get_ref<const std::string&>()), visit);
     }
 }
 

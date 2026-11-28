@@ -20,9 +20,11 @@
 #include "waterwall_schematic_file.h"
 #include "waterwall_users.h"
 #include "wave_version.h"
+#include "workspace_backup.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
+#include <openssl/rand.h>
 
 #include <algorithm>
 #include <array>
@@ -59,7 +61,27 @@ constexpr std::size_t max_request_bytes = 8192;
 constexpr std::size_t max_user_request_bytes = 32 * 1024;
 constexpr std::size_t max_live_user_request_bytes = 32 * 1024 + 2048;
 constexpr auto max_frame_bytes = max_core_config_bytes + 1024;
-constexpr std::size_t max_core_configs = 64;
+
+class WorkspaceBackupBusy : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
+
+std::string new_restore_token()
+{
+    std::array<unsigned char, 16> bytes{};
+    if (RAND_bytes(bytes.data(), bytes.size()) != 1) {
+        throw std::runtime_error("Could not create a workspace restore token.");
+    }
+    constexpr char digits[] = "0123456789abcdef";
+    std::string token;
+    token.reserve(bytes.size() * 2);
+    for (const auto byte : bytes) {
+        token += digits[byte >> 4];
+        token += digits[byte & 0xf];
+    }
+    return token;
+}
 
 bool core_in_use(std::string_view state)
 {
@@ -332,6 +354,14 @@ struct CoreUpdate {
     std::unique_ptr<WaterWall> candidate;
 };
 
+struct PendingWorkspaceBackup {
+    WorkspaceBackup backup;
+    WorkspaceRestoreFiles existing;
+    std::string session;
+    std::string token;
+    std::chrono::steady_clock::time_point expires;
+};
+
 struct LiveUsersAccess {
     std::map<WaterWallUsersOperation, std::vector<WaterWallUsersEndpoint>> endpoints;
     std::string reason;
@@ -448,6 +478,7 @@ class Preview {
                     return;
                 }
                 sampled_at = std::chrono::steady_clock::now();
+                expire_workspace_backup();
                 host_.sample(data_["server"]);
                 update_core();
                 finish_panel_update_check();
@@ -457,6 +488,110 @@ class Preview {
                 ++revision_;
             }
         });
+    }
+
+    std::string download_workspace_backup()
+    {
+        BackupEntries files;
+        {
+            std::lock_guard lock(mutex_);
+            require_workspace_backup_idle();
+            files = capture_workspace_backup(database_->directory(), saved_core_settings_,
+                                             saved_config_registry(data_["server"]["core"]["configs"]));
+        }
+        return write_backup_archive(files);
+    }
+
+    Json stage_workspace_backup(std::string_view archive, std::string session)
+    {
+        auto backup = prepare_workspace_backup(database_->directory(), read_backup_archive(archive));
+        const auto version = schematic_text(backup.manifest.at("waterwall_version"));
+        const auto& configs = backup.manifest.at("configs");
+        auto token = new_restore_token();
+
+        std::lock_guard lock(mutex_);
+        require_workspace_backup_idle();
+        auto existing = existing_workspace_restore_files(database_->directory(), backup);
+        auto replaced = Json::array();
+        std::set<std::string> replaced_names;
+        auto removed = Json::array();
+        for (const auto& row : data_["server"]["core"]["configs"]) {
+            const auto& name = row.at("name");
+            if (std::ranges::any_of(configs, [&](const Json& config) { return config.at("name") == name; })) {
+                replaced_names.insert(name.get<std::string>());
+            } else {
+                removed.push_back(name);
+            }
+        }
+        for (const auto& [path, stamp] : existing) {
+            replaced_names.insert(std::filesystem::path(path).parent_path().filename().string());
+        }
+        for (const auto& name : replaced_names) {
+            replaced.push_back(name);
+        }
+        auto dependencies = std::move(backup.missing_dependencies);
+        if (!WaterWall(database_->directory(), version).installed()) {
+            dependencies.push_back("Install WaterWall " + std::string(version) + " before starting the core.");
+        }
+        Json result = {{"ok", true}, {"token", token}, {"waterwall_version", version},
+                       {"current_waterwall_version", waterwall_version()}, {"configs", configs},
+                       {"replaced_configs", std::move(replaced)}, {"removed_configs", std::move(removed)},
+                       {"missing_dependencies", std::move(dependencies)},
+                       {"compatibility_warnings", std::move(backup.compatibility_warnings)}};
+        pending_backup_ = {std::move(backup), std::move(existing), std::move(session), std::move(token),
+                           std::chrono::steady_clock::now() + 5min};
+        return result;
+    }
+
+    void restore_workspace_backup(std::string_view token, std::string_view session)
+    {
+        std::lock_guard lock(mutex_);
+        expire_workspace_backup();
+        if (!pending_backup_ || pending_backup_->token != token || pending_backup_->session != session) {
+            throw std::runtime_error("Choose and validate the workspace backup again before restoring it.");
+        }
+        require_workspace_backup_idle();
+        if (catalog_result_.valid()) {
+            throw WorkspaceBackupBusy("Wait for the WaterWall release check to finish before restoring.");
+        }
+
+        auto pending = std::move(*pending_backup_);
+        pending_backup_.reset();
+        auto& backup = pending.backup;
+        if (existing_workspace_restore_files(database_->directory(), backup) != pending.existing) {
+            throw std::runtime_error("Workspace files changed. Validate the backup again before restoring it.");
+        }
+        const auto version = schematic_text(backup.manifest.at("waterwall_version"));
+        const auto schematic = prepare_waterwall_release_schematic(waterwall_bin_, version);
+        if (waterwall_schematic(*schematic) != waterwall_schematic(*backup.schematic)) {
+            throw std::runtime_error("The WaterWall schematic changed. Validate the backup again before restoring it.");
+        }
+        auto candidate = std::make_unique<WaterWall>(database_->directory(), version);
+        try {
+            apply_workspace_backup(*database_, backup, pending.token);
+        } catch (...) {
+            std::error_code error;
+            workspace_recovery_required_ = std::filesystem::exists(database_->directory() / ".wave-restore", error) ||
+                                           static_cast<bool>(error);
+            throw;
+        }
+
+        saved_core_settings_ = std::move(backup.manifest.at("core_settings"));
+        data_["server"]["core"]["available_versions"] = cached_waterwall_versions(waterwall_bin_);
+        publish_core_release({std::move(backup.schematic), std::move(candidate)});
+        for (const auto& [scope, target] : roster_targets_) {
+            ++target->saved_write;
+            invalidate_users_roster(*target, "The saved workspace was restored.");
+        }
+        offline_users_bindings_.clear();
+        offline_users_config_errors_.clear();
+        next_config_id_ = 1;
+        data_["server"]["core"]["configs"].clear();
+        load_core_configs(backup.manifest.at("configs"));
+        workspace_restored_ = true;
+        sync_core();
+        log("success", "Restored the WaterWall workspace backup.");
+        ++revision_;
     }
 
     std::string overview()
@@ -530,6 +665,28 @@ class Preview {
     }
 
   private:
+    void require_workspace_backup_idle() const
+    {
+        if (workspace_recovery_required_) {
+            throw std::runtime_error("Restart Wave to finish workspace restore recovery.");
+        }
+        if (core_in_use(core_->state()) || restarting_or_installing()) {
+            throw WorkspaceBackupBusy("Stop WaterWall and wait for any installation to finish first.");
+        }
+    }
+
+    bool restarting_or_installing() const
+    {
+        return restart_pending_ || core_update_.has_value() || core_->state() == "installing";
+    }
+
+    void expire_workspace_backup()
+    {
+        if (pending_backup_ && pending_backup_->expires <= std::chrono::steady_clock::now()) {
+            pending_backup_.reset();
+        }
+    }
+
     void reload_core_settings()
     {
         auto normalized = core_settings::normalize(saved_core_settings_);
@@ -544,30 +701,20 @@ class Preview {
 
     void load_core_configs(const Json& saved_configs)
     {
-        if (!saved_configs.is_array() || saved_configs.size() > max_core_configs) {
-            throw std::runtime_error("core_configs in wave-db.json must be an array of up to 64 configs.");
+        if (const auto error = core_config_registry_error(saved_configs); !error.empty()) {
+            throw std::runtime_error("core_configs in wave-db.json " + std::string(error));
         }
         auto& configs = data_["server"]["core"]["configs"];
         for (const auto& row : saved_configs) {
-            const auto name = row.find("name");
-            const auto id = row.find("id");
-            const auto enabled = row.find("enabled");
-            const auto* text = name == row.end() ? nullptr : name->get_ptr<const std::string*>();
-            if (!text || text->empty() || core_config_name(*text) != *text || id == row.end() ||
-                !integer_value(*id, 1, std::numeric_limits<int>::max() - 1) || enabled == row.end() ||
-                !enabled->is_boolean() || std::ranges::any_of(configs, [&](const Json& config) {
-                    return config["id"] == *id || config["name"] == *name;
-                })) {
-                throw std::runtime_error(
-                    "core_configs in wave-db.json contains an invalid or duplicate config.");
-            }
-            configs.push_back({{"id", *id}, {"name", *name}, {"enabled", *enabled}, {"active", false}});
-            update_read_config_tabs(configs.back(), config_files_.read(*text));
-            next_config_id_ = std::max(next_config_id_, id->get<int>() + 1);
+            const auto& name = row.at("name").get_ref<const std::string&>();
+            const auto id = row.at("id").get<int>();
+            configs.push_back({{"id", id}, {"name", name}, {"enabled", row.at("enabled")}, {"active", false}});
+            update_read_config_tabs(configs.back(), config_files_.read(name));
+            next_config_id_ = std::max(next_config_id_, id + 1);
         }
     }
 
-    bool store_configs(const Json& configs)
+    static Json saved_config_registry(const Json& configs)
     {
         auto stored = configs;
         for (auto& config : stored) {
@@ -575,8 +722,13 @@ class Preview {
             config.erase("auth_nodes");
             config.erase("live_users");
         }
+        return stored;
+    }
+
+    bool store_configs(const Json& configs)
+    {
         try {
-            database_->save_core_configs(stored);
+            database_->save_core_configs(saved_config_registry(configs));
         } catch (const std::runtime_error&) {
             return false;
         }
@@ -1243,15 +1395,24 @@ class Preview {
         const auto revision = request.find("schematic_revision");
         const bool allow_missing_revision =
             schematic_revision_ == 1 && waterwall_version() == bundled_waterwall_version;
-        const bool stale = uses_core_schematic(action) &&
+        const bool edits_config_registry = action == "set_core_config_enabled" || action == "remove_core_config";
+        const bool stale = (uses_core_schematic(action) || (workspace_restored_ && edits_config_registry)) &&
                            (revision == request.end()
                                 ? !allow_missing_revision
                                 : !revision->is_number_unsigned() || *revision != schematic_revision_);
+        const bool changes_workspace = workspace_mutation(action) &&
+                                       (uses_core_schematic(action) || edits_config_registry ||
+                                        action == "restore_preview_backup");
         auto reply = action.empty() ? Reply{false, "Send a JSON panel action."}
                      : too_large    ? Reply{false, "That panel request is too large."}
+                     : workspace_recovery_required_ && (changes_workspace || live_write)
+                         ? Reply{false, "Restart Wave to finish workspace restore recovery."}
                      : stale        ? Reply{false, "WaterWall changed version. Reload the form and retry."}
                      : live_operation ? live_config_users(*live_operation, request, lock)
                                       : dispatch(action, request);
+        if (reply.ok && changes_workspace) {
+            pending_backup_.reset();
+        }
         if (live_write && reply.result.is_null()) {
             reply.result = {{"outcome", "not_sent"}};
         }
@@ -1513,7 +1674,7 @@ class Preview {
             !std::ranges::all_of(preview_backup_tls_fields,
                                  [&](const char* field) { return tls->contains(field); }) ||
             !update_tls_settings(*tls, settings) || saved_configs == backup->end() ||
-            !saved_configs->is_array() || saved_configs->size() > max_core_configs) {
+            !saved_configs->is_array() || saved_configs->size() > max_workspace_configs) {
             return invalid;
         }
 
@@ -1524,7 +1685,7 @@ class Preview {
                 configs.push_back(config);
             }
         }
-        if (configs.size() + saved_configs->size() > max_core_configs) {
+        if (configs.size() + saved_configs->size() > max_workspace_configs) {
             return invalid;
         }
         int next_id = next_config_id_;
@@ -1891,6 +2052,20 @@ class Preview {
         } catch (const std::runtime_error&) {
             return "Could not save the selected WaterWall version in wave-db.json.";
         }
+        pending_backup_.reset();
+        publish_core_release(std::move(next));
+        auto& status = data_["server"]["core"];
+        for (auto& config : status["configs"]) {
+            const auto& name = config["name"].get_ref<const std::string&>();
+            update_read_config_tabs(config, config_files_.read(name));
+        }
+        log("success", "Selected WaterWall " + std::string(waterwall_version()) + '.');
+        sync_core();
+        return {};
+    }
+
+    void publish_core_release(CoreUpdate next)
+    {
         activate_waterwall_schematic(std::move(next.schematic));
         core_ = std::move(next.candidate);
         core_logs_.stop();
@@ -1901,14 +2076,7 @@ class Preview {
         auto& status = data_["server"]["core"];
         status["version"] = waterwall_version();
         sync_core_available_version(status);
-        for (auto& config : status["configs"]) {
-            const auto& name = config["name"].get_ref<const std::string&>();
-            update_read_config_tabs(config, config_files_.read(name));
-        }
-        log("success", "Selected WaterWall " + std::string(waterwall_version()) + '.');
         next_catalog_check_ = {};
-        sync_core();
-        return {};
     }
 
     void update_release_installation()
@@ -1989,7 +2157,7 @@ class Preview {
         }
 
         auto& configs = data_["server"]["core"]["configs"];
-        if (configs.size() >= max_core_configs || next_config_id_ == std::numeric_limits<int>::max()) {
+        if (configs.size() >= max_workspace_configs || next_config_id_ == std::numeric_limits<int>::max()) {
             return {false, "The config list is full."};
         }
         if (std::ranges::any_of(configs, [&](const Json& config) { return config["name"] == name; })) {
@@ -2652,6 +2820,9 @@ class Preview {
     WaterWallLogs core_logs_;
     std::filesystem::path waterwall_bin_;
     std::optional<CoreUpdate> core_update_;
+    std::optional<PendingWorkspaceBackup> pending_backup_;
+    bool workspace_recovery_required_ = false;
+    bool workspace_restored_ = false;
     std::chrono::steady_clock::time_point next_catalog_check_{};
     std::future<CoreCatalogResult> catalog_result_;
     std::jthread catalog_worker_;
@@ -2681,12 +2852,105 @@ class Preview {
     std::array<std::jthread, 4> roster_workers_;
 };
 
+void backup_json(httplib::Response& response, const Json& result)
+{
+    response.set_content(result.dump(), "application/json");
+}
+
+void backup_error(httplib::Response& response, int status, std::string_view error)
+{
+    response.status = status;
+    backup_json(response, {{"ok", false}, {"error", error}});
+}
+
+template <typename Action>
+void backup_request(const std::shared_ptr<AuthStore>& store, const httplib::Request& request,
+                    httplib::Response& response, Action&& action)
+{
+    auto session = authenticated_session_id(store, request);
+    if (session.empty()) {
+        backup_error(response, 401, "Sign in to use workspace backups.");
+        return;
+    }
+    try {
+        action(std::move(session));
+    } catch (const std::runtime_error& error) {
+        backup_error(response, 400, error.what());
+    } catch (const std::exception&) {
+        backup_error(response, 400, "Could not process the workspace backup.");
+    }
+}
+
+void configure_backup_routes(httplib::Server& server, const std::shared_ptr<AuthStore>& store,
+                             const std::shared_ptr<Preview>& preview)
+{
+    server.Get(panel_route(backup_download_route), [preview, store](const httplib::Request& req, httplib::Response& res) {
+        backup_request(store, req, res, [&](const std::string& session) {
+            auto archive = preview->download_workspace_backup();
+            if (authenticated_session_id(store, req) != session) {
+                backup_error(res, 401, "Sign in to use workspace backups.");
+                return;
+            }
+            res.set_header("Content-Disposition", "attachment; filename=\"wave-backup.zip\"");
+            res.set_content(std::move(archive), "application/zip");
+        });
+    });
+    auto uploads = std::make_shared<std::mutex>();
+    server.Post(panel_route(backup_prepare_route),
+                [preview, store, uploads](const httplib::Request& req, httplib::Response& res,
+                                          const httplib::ContentReader& read) {
+                    std::unique_lock lock(*uploads, std::try_to_lock);
+                    if (!lock) {
+                        backup_error(res, 409, "Wait for the current workspace backup upload to finish.");
+                        return;
+                    }
+                    std::string archive;
+                    bool too_large = false;
+                    if (!read([&](const char* data, std::size_t size) {
+                            too_large = size > max_backup_archive_bytes - archive.size();
+                            if (too_large) {
+                                return false;
+                            }
+                            archive.append(data, size);
+                            return true;
+                        })) {
+                        const auto status = too_large || res.status == 413 ? 413 : 400;
+                        backup_error(res, status, status == 413 ? "The workspace backup exceeds 128 MiB."
+                                                                 : "Could not read the workspace backup upload.");
+                        return;
+                    }
+                    backup_request(store, req, res, [&](std::string session) {
+                        backup_json(res, preview->stage_workspace_backup(archive, std::move(session)));
+                    });
+                });
+    post_panel_json(server, panel_route(backup_apply_route),
+                    [preview, store](const httplib::Request& req, httplib::Response& res, std::string_view body) {
+                        backup_request(store, req, res, [&](const std::string& session) {
+                            std::string error;
+                            const auto input = parse_plain_core_config_json(body, "Invalid restore request.", error);
+                            const auto token = schematic_text(schematic_field(input, "token"));
+                            if (!error.empty() || token.size() != 32) {
+                                throw std::runtime_error("Choose a validated backup before restoring it.");
+                            }
+                            try {
+                                preview->restore_workspace_backup(token, session);
+                            } catch (const WorkspaceBackupBusy& error) {
+                                res.status = 409;
+                                backup_json(res, {{"ok", false}, {"error", error.what()}, {"retryable", true}});
+                                return;
+                            }
+                            backup_json(res, {{"ok", true}});
+                        });
+                    });
+}
+
 } // namespace
 
 void configure_preview_routes(httplib::Server& server, std::shared_ptr<AuthStore> store,
                               std::shared_ptr<PanelDatabase> database)
 {
     const auto preview = std::make_shared<Preview>(std::move(database));
+    configure_backup_routes(server, store, preview);
     server.WebSocket(panel_route("/ws/overview"),
                      [preview, store](const httplib::Request& req, httplib::ws::WebSocket& socket) {
                          if (!websocket_session(store, req)()) {

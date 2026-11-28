@@ -360,6 +360,18 @@ void sync_configs(PanelState& state, PreviewSession& session)
     if (!session.ready() || state.config_items == items) {
         return;
     }
+    if (state.page == PanelPage::config) {
+        const auto previous = std::ranges::find(state.config_items, state.config_id, &PanelConfigItem::id);
+        const auto selected = previous == state.config_items.end()
+                                  ? items.end()
+                                  : std::ranges::find(items, previous->name, &PanelConfigItem::name);
+        if (selected == items.end()) {
+            state.page = PanelPage::server;
+            state.config_id = 0;
+        } else {
+            state.config_id = selected->id;
+        }
+    }
     state.config_items = std::move(items);
     const auto exists = [&](int id) {
         return std::ranges::find(state.config_items, id, &PanelConfigItem::id) != state.config_items.end();
@@ -371,10 +383,6 @@ void sync_configs(PanelState& state, PreviewSession& session)
             abandon_config_workspace(it->second, session);
             it = state.workspaces.erase(it);
         }
-    }
-    if (state.page == PanelPage::config && !exists(state.config_id)) {
-        state.page = PanelPage::server;
-        state.config_id = 0;
     }
 }
 

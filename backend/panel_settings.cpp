@@ -630,4 +630,11 @@ void PanelDatabase::save_core_configs(const Json& configs)
     impl_->save_fields({{"core_configs", configs}});
 }
 
+void PanelDatabase::save_workspace_restore(const Json& version, const Json& settings,
+                                           const Json& configs, const Json& restore_id)
+{
+    impl_->save_fields({{"waterwall_version", version}, {"core_settings", settings}, {"core_configs", configs},
+                        {"workspace_restore_id", restore_id}});
+}
+
 } // namespace wave

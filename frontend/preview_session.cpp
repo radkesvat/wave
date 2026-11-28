@@ -40,8 +40,8 @@ void PreviewSession::start(bool keep_snapshot)
 {
     stop();
     status_ = PreviewStatus::loading;
-    schematic_revision_ = 0;
     if (!keep_snapshot) {
+        schematic_revision_ = 0;
         clear_waterwall_schematic();
         schematic_changed_ = false;
         data_.clear();
@@ -366,7 +366,10 @@ bool PreviewSession::receive(std::string_view payload)
 
     if (const auto revision = frame.find("schematic_revision");
         revision != frame.end() && revision->is_number_unsigned()) {
-        schematic_revision_ = revision->get<std::uint64_t>();
+        const auto next = revision->get<std::uint64_t>();
+        // A workspace restore can invalidate forms while keeping the same schematic.
+        schematic_changed_ |= schematic_revision_ != 0 && next != schematic_revision_;
+        schematic_revision_ = next;
     }
     if (const auto support = frame.find("users_roster"); support != frame.end()) {
         supports_users_roster_ = *support == true;

@@ -37,48 +37,25 @@ EM_JS(void, reveal_canvas_item_in_document, (float top, float bottom), {
     else if (itemBottom > viewportHeight) window.scrollBy(0, itemBottom - viewportHeight + 8);
 });
 
-EM_JS(void, download_file, (const char* filename, const char* contents, int length, const char* media_type), {
-    const file = new Blob([UTF8ToString(contents, length)], { type: UTF8ToString(media_type) });
-    const url = URL.createObjectURL(file);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = UTF8ToString(filename);
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+EM_JS(void, start_backup_download, (), { Module['startBackupRequest']('download'); });
+
+EM_JS(void, choose_backup_file, (), { Module['chooseWorkspaceBackup'](128 * 1024 * 1024); });
+
+EM_JS(void, start_backup_apply, (const char* token), {
+    Module['startBackupRequest']('apply', UTF8ToString(token));
 });
 
-EM_JS(void, choose_json_file, (int maxBytes), {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json,application/json';
-    const selection = {};
-    Module['previewJsonSelection'] = selection;
-    input.addEventListener('change', async () => {
-        const file = input.files[0];
-        if (!file) return;
-        if (file.size > maxBytes) {
-            selection.text = "";
-            return;
-        }
-        try {
-            const content = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
-            selection.text = content.includes(String.fromCharCode(0)) ? "" : content;
-        } catch {
-            selection.text = "";
-        }
-    }, { once: true });
-    input.click();
+EM_JS(bool, pending_backup_request, (const char* operation), {
+    return Module['backupRequestPending'](operation ? UTF8ToString(operation) : undefined);
 });
 
-EM_JS_DEPS(take_json_file, "$stringToNewUTF8");
-EM_JS(char*, take_json_file, (), {
-    const selection = Module['previewJsonSelection'];
-    if (selection?.text === undefined) return 0;
-    delete Module['previewJsonSelection'];
-    return stringToNewUTF8(selection.text);
+EM_JS_DEPS(take_backup_reply, "$stringToNewUTF8");
+EM_JS(char*, take_backup_reply, (), {
+    const reply = Module['takeWorkspaceBackupReply']();
+    return reply === null ? 0 : stringToNewUTF8(reply);
 });
 
-EM_JS(void, clear_json_file, (), { delete Module['previewJsonSelection']; });
+EM_JS(void, clear_backup_request, (), { Module['clearWorkspaceBackupRequest'](); });
 
 EM_JS(void, open_config_editor, (const char* text, bool read_only), {
     Module['openConfigJsonEditor'](UTF8ToString(text), !!read_only);
@@ -116,19 +93,29 @@ void reveal_canvas_item(float top, float bottom)
     reveal_canvas_item_in_document(top, bottom);
 }
 
-void download_preview_file(const char* filename, std::string_view contents, const char* media_type)
+void download_workspace_backup()
 {
-    download_file(filename, contents.data(), static_cast<int>(contents.size()), media_type);
+    start_backup_download();
 }
 
-void choose_preview_json_file(std::size_t max_bytes)
+void choose_workspace_backup()
 {
-    choose_json_file(static_cast<int>(max_bytes));
+    choose_backup_file();
 }
 
-std::optional<std::string> take_preview_json_file()
+void apply_workspace_backup(const char* token)
 {
-    auto* text = take_json_file();
+    start_backup_apply(token);
+}
+
+bool backup_request_pending(const char* operation)
+{
+    return pending_backup_request(operation);
+}
+
+std::optional<std::string> take_workspace_backup_reply()
+{
+    auto* text = take_backup_reply();
     if (!text) {
         return std::nullopt;
     }
@@ -137,9 +124,9 @@ std::optional<std::string> take_preview_json_file()
     return result;
 }
 
-void clear_preview_json_file()
+void clear_workspace_backup_request()
 {
-    clear_json_file();
+    clear_backup_request();
 }
 
 void show_config_json_editor(const std::string& initial_text, bool read_only, CanvasViewport bounds,

@@ -24,6 +24,7 @@ class CoreConfigUsers {
     static bool valid_filename(std::string_view db_name);
     static std::filesystem::path relative_path(std::string_view config_name, std::string_view db_name);
     static std::string validate_schematic_editor(const nlohmann::json& users);
+    static bool valid_backup_database(std::string_view bytes);
 
     std::string prepare(std::string_view config_name, std::string_view db_name, bool& created) const;
     bool remove(std::string_view config_name, std::string_view db_name) const;

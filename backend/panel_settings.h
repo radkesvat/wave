@@ -37,6 +37,8 @@ class PanelDatabase {
     void save_auth(const nlohmann::json& admins, const nlohmann::json& auth);
     void save_core_settings(const nlohmann::json& settings);
     void save_core_configs(const nlohmann::json& configs);
+    void save_workspace_restore(const nlohmann::json& version, const nlohmann::json& settings,
+                                const nlohmann::json& configs, const nlohmann::json& restore_id);
 
   private:
     struct Impl;

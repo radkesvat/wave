@@ -329,22 +329,35 @@ const Json& waterwall_node(std::string_view type)
 
 std::span<const NodeLinkField> node_link_fields(std::string_view type)
 {
-    if (active) {
-        if (const auto node = active->nodes.find(type); node != active->nodes.end()) {
-            return node->second.links;
-        }
+    return active ? node_link_fields(*active, type) : std::span<const NodeLinkField>{};
+}
+
+std::span<const NodeLinkField> node_link_fields(const WaterWallSchematic& schematic, std::string_view type)
+{
+    if (const auto node = schematic.nodes.find(type); node != schematic.nodes.end()) {
+        return node->second.links;
     }
     return {};
 }
 
 bool allows_node_previous(std::string_view type)
 {
-    return schematic_field(schematic_field(waterwall_node(type), "ports"), "previous") != false;
+    return node_allows_previous(waterwall_node(type));
 }
 
 bool allows_node_next(std::string_view type, const Json& settings)
 {
-    const auto& ports = schematic_field(waterwall_node(type), "ports");
+    return node_allows_next(waterwall_node(type), settings);
+}
+
+bool node_allows_previous(const Json& definition)
+{
+    return schematic_field(schematic_field(definition, "ports"), "previous") != false;
+}
+
+bool node_allows_next(const Json& definition, const Json& settings)
+{
+    const auto& ports = schematic_field(definition, "ports");
     if (schematic_field(ports, "next") == false) {
         return false;
     }

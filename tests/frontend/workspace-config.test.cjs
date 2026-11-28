@@ -9,7 +9,6 @@ const {
     donationSlotHeight,
     timeout,
     fixture,
-    tlsFixture,
     status,
     expectLoggedOnce,
     openView,
@@ -343,54 +342,210 @@ test('uses the sidebar and creates, toggles, and deletes a config on touch', asy
     }
 });
 
-test('downloads a backup and restores it through the browser file picker', async () => {
+async function backupButtonsRow(page) {
+    await settleCanvas(page);
+    const rows = await verticalRuns(page, 510, 400, 820, [69, 64, 79], 20);
+    assert.ok(rows.length, 'Expected the Backup control.');
+    const [top, bottom] = rows.at(-1);
+    return Math.floor((top + bottom) / 2);
+}
+
+async function chooseBackupFile(page, buffer) {
+    const choosing = page.waitForEvent('filechooser', { timeout });
+    await click(page, 560, (await dialogFrame(page)).top + 80);
+    await (await choosing).setFiles({ name: 'wave-backup.zip', mimeType: 'application/zip', buffer });
+}
+
+test('downloads a backup ZIP, cancels uploads, and retries a busy restore with the same proposal', async () => {
     const page = await workspace.browser.newPage({ viewport: coreDesktop });
-    const data = fixture();
-    const sampleSettings = { ...data.settings };
-    data.settings.tls = tlsFixture();
-    data.server.core.configs.push({ id: 2, name: 'Standby', enabled: false, active: false });
+    const data = fixture('stopped');
+    const archive = Buffer.from('504b0506000000000000000000000000000000000000', 'hex');
+    const uploadUrl = new URL('api/backup/prepare', workspace.url).href;
+    const applyUrl = new URL('api/backup/apply', workspace.url).href;
+    const applyGate = Promise.withResolvers();
+    let applyRequests = 0;
+    let completedUploads = 0;
+    let holdUpload = true;
+    const heldUploads = [];
     const preview = await mockPreview(page, data);
+    await page.route(new URL('api/backup', workspace.url).href, route =>
+        route.fulfill({ status: 200, contentType: 'application/zip', body: archive }));
+    await page.route(uploadUrl, route => {
+        if (!route.request().postDataBuffer()?.equals(archive)) {
+            return route.fulfill({ status: 400, json: { ok: false, error: 'The backup ZIP is invalid.' } });
+        }
+        if (holdUpload) {
+            heldUploads.push(route);
+            return;
+        }
+        completedUploads++;
+        return route.fulfill({ status: 200, json: {
+            ok: true,
+            token: 'fixture-restore-token',
+            current_waterwall_version: '1.6.0',
+            waterwall_version: '1.7.0',
+            configs: [{ name: 'Standby', enabled: true }, { name: 'New config', enabled: false }],
+            replaced_configs: ['Standby'],
+            removed_configs: ['Old config'],
+            missing_dependencies: ['Install WaterWall 1.7.0 before starting the core.'],
+            compatibility_warnings: ['Review the retained draft before enabling it.'],
+        } });
+    });
+    await page.route(applyUrl, async route => {
+        applyRequests++;
+        if (applyRequests === 1) {
+            await applyGate.promise;
+            return route.fulfill({ status: 409, json: {
+                ok: false, retryable: true, error: 'Wait for the WaterWall release check to finish before restoring.',
+            } });
+        }
+        await route.fulfill({ status: 200, json: { ok: true } });
+        data.server.core.version = '1.7.0';
+        await preview.broadcast({});
+    });
     try {
         await page.goto(workspace.url);
         await openView(page, 'Server Status');
-        await status(page, /WaterWall core running/);
-        await settleCanvas(page);
-        const backupX = 510;
-        const restoreX = 675;
-        const backupRows = await verticalRuns(page, backupX, 400, 820, [69, 64, 79], 20);
-        assert.ok(backupRows.length, 'Expected the Backup control.');
-        const [top, bottom] = backupRows.at(-1);
-        const rowY = Math.floor((top + bottom) / 2);
+        await status(page, /WaterWall core stopped/);
+        const rowY = await backupButtonsRow(page);
         const downloading = page.waitForEvent('download', { timeout });
-        await click(page, backupX, rowY);
+        await click(page, 510, rowY);
         const download = await downloading;
-        const buffer = await readFile(await download.path());
-        const backup = JSON.parse(buffer);
-        assert.deepEqual(backup.settings, sampleSettings, 'The preview backup omits deployment TLS settings.');
-        assert.deepEqual(backup.configs, [{ name: 'Standby', enabled: false }]);
+        assert.equal(download.suggestedFilename(), 'wave-backup.zip');
+        assert.deepEqual(await readFile(await download.path()), archive);
+        await status(page, /Downloaded the Wave workspace backup/);
 
-        await click(page, restoreX, rowY);
-        await status(page, /Restore backup/);
-        const chooseBackup = async buffer => {
-            const choosing = page.waitForEvent('filechooser', { timeout });
-            await click(page, 560, (await dialogFrame(page)).top + 80);
-            await (await choosing).setFiles({ name: download.suggestedFilename(), mimeType: 'application/json', buffer });
+        const openRestore = async () => {
+            await click(page, 675, rowY);
+            await status(page, /Restore backup/);
         };
-        const duplicate = Buffer.from(JSON.stringify(backup).replace('"configs":', '"configs":[],"configs":'));
-        await chooseBackup(duplicate);
-        await status(page, /Choose a valid Wave preview backup\./);
-        await chooseBackup(buffer);
-        await status(page, /Wave preview backup selected/);
-        assert.equal(preview.actions.length, 0, 'Selecting a file waits for confirmation.');
+        for (const cancel of [
+            async () => click(page, 670, (await dialogFrame(page)).bottom - 25),
+            async () => page.keyboard.press('Escape'),
+        ]) {
+            await openRestore();
+            const stalled = page.waitForRequest(uploadUrl, { timeout });
+            await chooseBackupFile(page, archive);
+            await stalled;
+            await status(page, /Restore backup\.[\s\S]*Operation in progress\./);
+            const aborted = page.waitForEvent('requestfailed', {
+                timeout, predicate: request => request.url() === uploadUrl,
+            });
+            await cancel();
+            await aborted;
+            await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        }
+        holdUpload = false;
+        await openRestore();
+        await chooseBackupFile(page, Buffer.from('Invalid ZIP'));
+        await status(page, /The backup ZIP is invalid\./);
+        const uploading = page.waitForRequest(uploadUrl, { timeout });
+        await chooseBackupFile(page, archive);
+        const upload = await uploading;
+        assert.equal(upload.method(), 'POST');
+        assert.equal(upload.headers()['content-type'], 'application/zip');
+        assert.equal(upload.headers()['x-wave-csrf'], '1');
+        await status(page, /WaterWall will change from 1\.6\.0 to 1\.7\.0\./);
+        await status(page, /Replace Standby \(enabled\)\. Add New config \(disabled\)\. Remove Old config\./);
+        await status(page, /Install WaterWall 1\.7\.0 before starting the core\./);
+        await status(page, /Review the retained draft before enabling it\./);
+        assert.equal(applyRequests, 0, 'Selecting a file waits for confirmation.');
         const restoreFrame = await dialogFrame(page);
+        const applying = page.waitForRequest(applyUrl, { timeout });
         await confirmDialog(page, (x, y) => click(page, x, y));
-        const restored = await preview.action(0);
-        assertRequest(restored.request, { action: 'restore_preview_backup', backup });
-        await status(page, /Restore backup\..*Operation in progress\./);
+        const apply = await applying;
+        assert.equal(apply.method(), 'POST');
+        assert.equal(apply.headers()['content-type'], 'application/json');
+        assert.equal(apply.headers()['x-wave-csrf'], '1');
+        assert.deepEqual(apply.postDataJSON(), { token: 'fixture-restore-token' });
+        await status(page, /Restore backup\.[\s\S]*Operation in progress\./);
         assert.deepEqual(await dialogFrame(page), restoreFrame, 'Progress keeps the dialog at its original size.');
-        restored.reply({ feedback: 'Restored backup.', feedback_in_logs_only: true });
-        await status(page, /Latest log: Restored backup/);
+        data.server.core.checking_updates = true;
+        await preview.broadcast({});
+        applyGate.resolve();
+        await status(page, /Wait for the WaterWall release check to finish before restoring\./);
+        await status(page, /Replace Standby \(enabled\)/);
+        data.server.core.checking_updates = false;
+        await preview.broadcast({});
+        const retrying = page.waitForRequest(applyUrl, { timeout });
+        await confirmDialog(page, (x, y) => click(page, x, y));
+        assert.deepEqual((await retrying).postDataJSON(), apply.postDataJSON());
+        await status(page, /Core version 1\.7\.0/);
         await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        assert.equal(completedUploads, 1, 'Retry uses the same proposal without another upload.');
+    } finally {
+        applyGate.resolve();
+        await Promise.all(heldUploads.map(route => route.abort().catch(() => {})));
+        await page.close();
+    }
+});
+
+test('reports an unconfirmed restore outcome when Apply times out', async () => {
+    const page = await workspace.browser.newPage({ viewport: coreDesktop });
+    const data = fixture('stopped');
+    const applyUrl = new URL('api/backup/apply', workspace.url).href;
+    await mockPreview(page, data);
+    await page.clock.install();
+    await page.route(new URL('api/backup/prepare', workspace.url).href, route => route.fulfill({
+        status: 200, json: { ok: true, token: 'fixture-restore-token', current_waterwall_version: '1.6.0',
+            waterwall_version: '1.6.0', configs: [], replaced_configs: [], removed_configs: [] },
+    }));
+    await page.route(applyUrl, () => {});
+    try {
+        await page.goto(workspace.url);
+        await waitForServerStatus(page);
+        await click(page, 675, await backupButtonsRow(page));
+        await status(page, /Restore backup/);
+        await chooseBackupFile(page, Buffer.from('Backup ZIP'));
+        await status(page, /This backup contains no configs/);
+        const stalled = page.waitForRequest(applyUrl, { timeout });
+        await confirmDialog(page, (x, y) => click(page, x, y));
+        await stalled;
+        await page.clock.fastForward(31_000);
+        await status(page, /The restore outcome is unconfirmed\. Check the workspace before trying again\./);
+        assert.doesNotMatch(await page.locator('#canvas').getAttribute('aria-label'), /Operation in progress/);
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+    } finally {
+        await page.close();
+    }
+});
+
+test('restores an open config by name and returns to Server Status when its ID is reused', async () => {
+    const page = await workspace.browser.newPage({ viewport: desktop });
+    const data = fixture('stopped');
+    const profile = data.server.core.configs[0];
+    profile.active = false;
+    const preview = await mockPreview(page, data);
+    try {
+        await page.goto(workspace.url);
+        await waitForServerStatus(page);
+        await preview.broadcast({ schematic_revision: 1 });
+        await settleCanvas(page);
+        await page.getByRole('link', { name: profile.name, exact: true }).focus();
+        await page.keyboard.press('Enter');
+        const beforeRestore = await preview.action(0);
+        assertRequest(beforeRestore.request, { action: 'get_core_config', id: profile.id, schematic_revision: 1 });
+        const config = { name: profile.name, nodes: [] };
+        beforeRestore.reply({ result: { config, revision: 'original', editable: true } });
+        await status(page, /Nodes tab\. Nodes\. 0 nodes\./);
+
+        const newId = profile.id + 1;
+        data.server.core.configs = [
+            { ...profile, name: 'Reused ID' },
+            { ...profile, id: newId },
+        ];
+        await preview.broadcast({ schematic_revision: 2, schematic: workspace.waterwallSchematic });
+        const refreshed = await preview.action(1);
+        assertRequest(refreshed.request, { action: 'get_core_config', id: newId, schematic_revision: 2 });
+        const nodes = [{ name: 'restored', type: 'BlackHole', settings: {} }];
+        refreshed.reply({ result: { config: { ...config, nodes }, revision: 'restored', editable: true } });
+        await status(page, /Nodes tab\. Nodes\. 1 node\./);
+
+        data.server.core.configs = [{ ...profile, id: newId, name: 'Different config' }];
+        await preview.broadcast({ schematic_revision: 3, schematic: workspace.waterwallSchematic });
+        await waitForServerStatus(page);
+        assert.equal(preview.actions.length, 2, 'The unrelated config reusing the selected ID stays closed.');
     } finally {
         await page.close();
     }

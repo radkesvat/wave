@@ -29,6 +29,11 @@ struct PanelControlsState {
         restore
     };
 
+    struct RestoreProposal {
+        std::string token;
+        std::string summary;
+    };
+
     Dialog dialog = Dialog::none;
     bool open_dialog = false;
     PanelUpdateState updates;
@@ -41,10 +46,11 @@ struct PanelControlsState {
     unsigned keyboard_focus = 0;
     std::string remove_name;
     bool remove_has_unsaved_changes = false;
-    nlohmann::json restore_request;
     std::optional<std::uint64_t> request_id;
     std::optional<bool> request_accepted;
+    std::optional<RestoreProposal> restore_proposal;
     std::string restore_error;
+    bool restore_applied = false;
 };
 
 void update_panel_controls(PanelControlsState& state, PreviewSession& session);
