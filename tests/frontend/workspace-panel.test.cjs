@@ -1450,6 +1450,15 @@ test('edits and saves session expiry from Panel Settings', async () => {
         await saveExpiry();
         assert.equal(preview.actions.length, 1, 'The saved value is no longer a pending edit.');
 
+        const wide = { ...coreDesktop, width: 1920 };
+        await page.setViewportSize(wide);
+        await settleCanvas(page);
+        const cards = await horizontalRuns(page, 150, 246, wide.width - 24, [31, 27, 34], 280);
+        assert.equal(cards.length, 4, 'All four Panel Settings cards share the top row when there is room.');
+        const [left, right] = cards[3];
+        const [basePath] = await verticalRuns(page, Math.floor((left + right) / 2), 150, 220, [13, 11, 14], 20);
+        assert.ok(basePath, 'The Panel base path input is visible in the fourth card.');
+
         await page.setViewportSize({ ...portrait, height: coreDesktop.height });
         await settleCanvas(page);
         const stacked = await verticalRuns(page, 27,

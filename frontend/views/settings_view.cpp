@@ -324,7 +324,7 @@ void render_panel_settings(SettingsViewState& state, AuthSession& auth, PreviewS
     constexpr float max_card_width = 348;
     const float available = std::max(1.0f, ImGui::GetContentRegionAvail().x);
     const float gap = ImGui::GetStyle().ItemSpacing.x;
-    const int columns = std::clamp(static_cast<int>((available + gap) / (min_column_width + gap)), 1, 3);
+    const int columns = std::clamp(static_cast<int>((available + gap) / (min_column_width + gap)), 1, 4);
     const float width = std::min(max_card_width, (available - (columns - 1) * gap) / columns);
     int card_index = 0;
     const auto begin_card = [&](const char* title) {
