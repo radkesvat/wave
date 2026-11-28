@@ -184,6 +184,22 @@
     <script>
       var Module = (() => {
         const basePath = location.pathname.slice(0, location.pathname.lastIndexOf("/"));
+        let openingPanelLocation = false;
+
+        function panelLocationPending() {
+          return openingPanelLocation;
+        }
+
+        function followPanelLocation(path) {
+          if (openingPanelLocation) return true;
+          if (typeof path !== "string" || !/^(?:\/[A-Za-z0-9_-]+)+\/$/.test(path) || !path.endsWith("/")) {
+            return false;
+          }
+          openingPanelLocation = true;
+          location.replace(location.origin + path);
+          return true;
+        }
+
         const canvas = document.getElementById("canvas");
         const startup = document.getElementById("startup");
         const controls = document.getElementById("panel-controls");
@@ -737,7 +753,8 @@
         window.addEventListener("error", showStartupError, true);
         window.addEventListener("unhandledrejection", showStartupError);
         return {
-          basePath, canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
+          basePath, followPanelLocation, panelLocationPending,
+          canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
           updateConfigLinks, updateConfigTabs,
           panelFocus, setTextInput, installTextInput, copyText, applyAppearance, updateConsole,
           openConfigJsonEditor, positionConfigJsonEditor, configJsonEditorText, closeConfigJsonEditor,

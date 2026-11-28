@@ -520,19 +520,23 @@ std::string PanelDatabase::panel_base_path() const
     return impl_->base_path;
 }
 
-bool PanelDatabase::save_panel_base_path(std::string_view path)
+bool PanelDatabase::save_panel_base_path(std::string_view previous, std::string_view path)
 {
     if (!valid_panel_base_path(path)) {
         throw std::invalid_argument("Invalid panel base path.");
     }
     std::string next(path);
     std::lock_guard lock(impl_->write_mutex);
-    if (!impl_->base_path.empty()) {
+    if (impl_->base_path != previous) {
         return false;
     }
     auto current = impl_->read_existing();
-    if (current.contains(panel_base_path_key)) {
+    const auto saved = current.find(panel_base_path_key);
+    if (previous.empty() ? saved != current.end() : saved == current.end() || *saved != previous) {
         return false;
+    }
+    if (previous == path) {
+        return true;
     }
     current[panel_base_path_key] = next;
     impl_->save(current);

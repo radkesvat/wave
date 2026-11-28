@@ -5,8 +5,12 @@
 #include "panel_base_path.h"
 #include "view_helpers.h"
 
+#include <emscripten.h>
 #include <misc/cpp/imgui_stdlib.h>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <string_view>
 
 namespace wave {
@@ -16,6 +20,80 @@ using theme::Color;
 
 constexpr char entry_popup[] = "###Entry dialog";
 constexpr char checking_message[] = "Checking the session…";
+
+EM_JS(bool, prefers_reduced_motion, (), {
+    if (!Module['entryMotionPreference']) {
+        Module['entryMotionPreference'] = matchMedia('(prefers-reduced-motion: reduce)');
+    }
+    return Module['entryMotionPreference'].matches;
+});
+
+struct WaveBand {
+    float center;
+    float amplitude;
+    float frequency;
+    float slope;
+    float phase;
+    float speed;
+    ImU32 left_color;
+    ImU32 right_color;
+};
+
+void draw_sign_in_background(float top)
+{
+    const auto viewport = ImGui::GetIO().DisplaySize;
+    const float height = viewport.y - top;
+    if (viewport.x < 1 || height < 1) {
+        return;
+    }
+
+    constexpr std::array bands{
+        WaveBand{0.35f, 0.115f, 0.91f, 0.16f, 0.55f, 0.29f, IM_COL32(105, 83, 220, 255),
+                 IM_COL32(176, 128, 232, 255)},
+        WaveBand{0.56f, 0.16f, 1.02f, -0.19f, 2.30f, -0.23f, IM_COL32(86, 133, 248, 255),
+                 IM_COL32(86, 216, 224, 255)},
+        WaveBand{0.73f, 0.10f, 0.83f, -0.09f, 4.10f, 0.19f, IM_COL32(107, 80, 192, 255),
+                 IM_COL32(238, 140, 126, 255)},
+    };
+    const float time = prefers_reduced_motion() ? 0.0f : static_cast<float>(ImGui::GetTime());
+    const float scale = std::clamp(viewport.x / 700.0f, 0.55f, 1.0f);
+    const float spacing = std::clamp(height * 0.023f, 6.0f, 18.0f);
+    auto* draw = ImGui::GetWindowDrawList();
+    draw->PushClipRect({0, top}, viewport, true);
+    draw->AddRectFilledMultiColor({0, top}, viewport, IM_COL32(33, 20, 63, 32), IM_COL32(21, 34, 69, 44),
+                                  IM_COL32(44, 28, 58, 72), IM_COL32(18, 32, 66, 76));
+
+    std::array<ImVec2, 113> points;
+    for (const auto& band : bands) {
+        const float phase = band.phase + time * band.speed;
+        const auto stroke = [&](float width, int opacity) {
+            const int first = draw->VtxBuffer.Size;
+            draw->AddPolyline(points.data(), static_cast<int>(points.size()),
+                              IM_COL32(255, 255, 255, opacity), width);
+            ImGui::ShadeVertsLinearColorGradientKeepAlpha(draw, first, draw->VtxBuffer.Size, {0, top},
+                                                          {viewport.x, top}, band.left_color,
+                                                          band.right_color);
+        };
+        for (int strand = -2; strand <= 2; ++strand) {
+            for (std::size_t i = 0; i < points.size(); ++i) {
+                const float x = static_cast<float>(i) / (points.size() - 1);
+                const float angle = x * 2 * IM_PI * band.frequency;
+                const float wave = std::sin(angle + phase + strand * 0.12f) +
+                                   0.22f * std::sin(angle * 1.65f - phase * 0.66f + strand * 0.15f);
+                const float y = band.center + band.slope * (x - 0.5f) + band.amplitude * scale * wave;
+                points[i] = {x * viewport.x, top + height * y + spacing * strand};
+            }
+            if (strand == 0) {
+                stroke(24.0f * scale, 7);
+                stroke(9.0f * scale, 15);
+                stroke(1.8f, 120);
+            } else {
+                stroke(1.0f, strand == -1 || strand == 1 ? 58 : 34);
+            }
+        }
+    }
+    draw->PopClipRect();
+}
 
 const char* title(EntryPage page)
 {
@@ -35,6 +113,9 @@ void render_entry(EntryViewState& state, AuthSession& session, float entry_top)
 {
     if (state.page == EntryPage::checking) {
         return;
+    }
+    if (state.page == EntryPage::sign_in) {
+        draw_sign_in_background(entry_top);
     }
 
     if (!ImGui::IsPopupOpen(entry_popup)) {
@@ -75,14 +156,12 @@ void render_entry(EntryViewState& state, AuthSession& session, float entry_top)
     } else {
         const bool username_enter = view::edit(
             "Username", state.username, "", enter_submits,
-            setup ? "Use this username to sign in to Wave after setup. Usernames are case-sensitive."
-                  : "Enter the current administrator username. Usernames are case-sensitive.");
+            setup ? "Use this username to sign in to Wave after setup. Usernames are case-sensitive." : "");
         const bool password_enter = view::edit(
             "Password", state.password, "", enter_submits | ImGuiInputTextFlags_Password,
             setup ? "Wave checks for common passwords and predictable patterns. A longer passphrase "
                     "can help you choose a less predictable password."
-                  : "Use the password for your Wave administrator account. WaterWall user credentials "
-                    "are managed separately.");
+                  : "");
         enter = username_enter || password_enter;
     }
     ImGui::EndDisabled();

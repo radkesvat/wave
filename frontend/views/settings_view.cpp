@@ -2,6 +2,7 @@
 
 #include "auth_session.h"
 #include "dialog.h"
+#include "panel_base_path.h"
 #include "session_settings.h"
 #include "view_helpers.h"
 
@@ -280,6 +281,43 @@ void show_settings_connection(PreviewSession& session)
     }
 }
 
+void render_base_path_settings(SettingsViewState& state, AuthSession& auth)
+{
+    if (!state.base_path) {
+        state.base_path = auth.base_path();
+    }
+    auto& path = *state.base_path;
+    ImGui::BeginDisabled(auth.pending());
+    ImGui::TextUnformatted("Base path");
+    help_marker("Start with a slash. Use letters, digits, hyphens, or underscores in each segment. "
+                "Leave out the trailing slash.");
+    ImGui::SetNextItemWidth(-1);
+    const bool enter = ImGui::InputText("##base path", &path, ImGuiInputTextFlags_EnterReturnsTrue);
+    if (ImGui::IsItemEdited() && auth.action() == AuthSession::Action::base_path) {
+        auth.clear_error();
+    }
+    const bool valid = valid_panel_base_path(path);
+    const bool can_save = !auth.pending() && valid && path != auth.base_path();
+    ImGui::BeginDisabled(!can_save);
+    const bool save = theme::button("Save base path");
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    if (can_save && (save || enter)) {
+        auth.submit(AuthSession::Action::base_path, {{panel_base_path_key, path}});
+    }
+    if (auth.pending() && auth.action() == AuthSession::Action::base_path) {
+        ImGui::SameLine();
+        draw_busy_spinner(ImGui::GetFrameHeight());
+    }
+    wrapped("Connected Wave tabs will open the new address. Save any open edits first.",
+            Color::secondary_text);
+    if (!valid) {
+        wrapped(base_path_format_error, Color::error);
+    } else if (auth.action() == AuthSession::Action::base_path && !auth.error().empty()) {
+        wrapped(auth.error(), Color::error);
+    }
+}
+
 void render_panel_settings(SettingsViewState& state, AuthSession& auth, PreviewSession& session, bool narrow)
 {
     constexpr float min_column_width = 300;
@@ -331,6 +369,12 @@ void render_panel_settings(SettingsViewState& state, AuthSession& auth, PreviewS
     if (state.sessions.saved_days) {
         if (begin_card("Sessions")) {
             render_session_settings(state.sessions, session);
+        }
+        ImGui::EndChild();
+    }
+    if (!auth.base_path().empty()) {
+        if (begin_card("Panel base path")) {
+            render_base_path_settings(state, auth);
         }
         ImGui::EndChild();
     }
@@ -407,8 +451,17 @@ std::string describe_settings(const SettingsViewState& state, const AuthSession&
             description += ' ' + expiry_error();
         }
     }
+    if (!auth.base_path().empty()) {
+        description += std::format(" Panel base path. Current path {}.", auth.base_path());
+        if (state.base_path && !valid_panel_base_path(*state.base_path)) {
+            description += std::string(" ") + base_path_format_error;
+        } else if (auth.action() == AuthSession::Action::base_path && !auth.error().empty()) {
+            description += ' ' + auth.error();
+        }
+    }
     if (tls.request || sessions.request ||
-        (auth.pending() && auth.action() == AuthSession::Action::update_administrator)) {
+        (auth.pending() && (auth.action() == AuthSession::Action::update_administrator ||
+                            auth.action() == AuthSession::Action::base_path))) {
         description += std::string(" ") + busy_description;
     }
     return description;

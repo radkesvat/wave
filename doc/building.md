@@ -227,6 +227,10 @@ Enter the username and password, then select **Create administrator**. Sign in
 with those credentials to open the workspace. A browser with a valid session
 opens the workspace directly.
 
+Use **Settings → Panel → Panel base path** to change the URL of a running
+panel. The new path takes effect when you save it.
+[Panel base path](authentication.md#set-the-panel-base-path)
+
 Use **Settings → Panel → Administrator** to change the username or password.
 Saving administrator credentials signs out every active session. In the
 **Panel** tab, **Session expiry (days)** controls how long new sign-ins last

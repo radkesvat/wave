@@ -8,6 +8,8 @@ namespace wave {
 
 inline constexpr char new_password_requirements[] =
     "Use at least 6 characters, including a letter A–Z or a–z and a digit 0–9. Symbols are optional.";
+inline constexpr char base_path_format_error[] =
+    "Enter a path such as /panel with a leading slash and no trailing slash.";
 
 class AuthSession {
   public:
@@ -59,6 +61,10 @@ class AuthSession {
     {
         return session_id_;
     }
+    const std::string& base_path() const
+    {
+        return base_path_;
+    }
 
   private:
     Page page_ = Page::checking;
@@ -67,6 +73,7 @@ class AuthSession {
     std::string error_;
     std::string username_;
     std::string session_id_;
+    std::string base_path_;
 };
 
 } // namespace wave

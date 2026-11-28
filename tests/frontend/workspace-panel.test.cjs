@@ -1441,7 +1441,7 @@ test('edits and saves session expiry from Panel Settings', async () => {
         await settleCanvas(page);
         const stacked = await verticalRuns(page, 27,
             251 + donationSlotHeight, 867 + donationSlotHeight, [61, 58, 67], 20);
-        assert.equal(stacked.length, 3, 'The cards stack along the same left edge at phone width.');
+        assert.equal(stacked.length, 4, 'The four panel settings cards stack along the same left edge.');
     } finally {
         await page.close();
     }

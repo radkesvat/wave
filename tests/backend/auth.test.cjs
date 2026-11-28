@@ -310,6 +310,78 @@ test('saves the session expiry in days for new sign-ins and retains it after res
     await signIn(1);
 });
 
+test('changes the panel base path live and keeps authenticated sessions', async t => {
+    const fixture = await authFixture(t);
+    const original = client(fixture);
+    const credentials = { username: 'fixture-admin', password: 'fixture base path passphrase 4GX1v' };
+    const selection = path => ({ 'panel-base-path': path });
+    await fixture.start();
+    assert.equal((await original.post('base-path', selection('/ops/wave'))).status, 401);
+    assert.equal((await original.post('setup', credentials)).status, 201);
+    const headers = {
+        Cookie: assertCookie(await original.post('sign-in', credentials), expirySeconds), Origin: fixture.origin,
+    };
+    assert.equal((await original.post('base-path', selection('/ops/wave'), { ...headers, 'X-Wave-CSRF': '0' })).status, 403);
+    assert.equal((await original.post('base-path', selection('/ops/wave'), {
+        ...headers, Origin: 'https://other.example.invalid',
+    })).status, 403);
+    for (const invalid of ['/', '/ops/', '/_wave-setup/admin', '//other.example.invalid']) {
+        assert.equal((await original.post('base-path', selection(invalid), headers)).status, 400);
+    }
+
+    const saved = await readFile(fixture.database, 'utf8');
+    const monitor = await original.upgrade(headers);
+    const workspace = await original.upgrade(headers, '/ws/workspace');
+    const terminal = process.platform === 'linux' ? await original.upgrade(headers, '/ws/console') : null;
+    let selected;
+    try {
+        assert.equal(monitor.status, 101);
+        assert.equal(workspace.status, 101);
+        assert.equal(JSON.parse((await monitor.frame()).payload).type, 'session');
+        assert.equal(JSON.parse((await workspace.frame()).payload).type, 'snapshot');
+        if (terminal) {
+            assert.equal(terminal.status, 101);
+            terminal.socket.write(clientFrame(1, JSON.stringify({ type: 'resize', cols: 80, rows: 24 })));
+            assertTerminalStatus(await terminal.frame(), 'ready');
+        }
+
+        const paths = ['/ops/wave', '/admin/console'];
+        const responses = await Promise.all(paths.map(path => original.post('base-path', selection(path), headers)));
+        assert.deepEqual(responses.map(response => response.status).sort(), [201, 404]);
+        const winner = responses.findIndex(response => response.status === 201);
+        selected = paths[winner];
+        assert.equal(responses[winner].headers.location, `${selected}/`);
+        assert.equal(responses[winner].headers['set-cookie'], undefined);
+        assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')), {
+            ...JSON.parse(saved), 'panel-base-path': selected,
+        });
+
+        const notice = await monitor.frame();
+        assert.equal(notice.opcode, 1);
+        assert.deepEqual(JSON.parse(notice.payload), { type: 'base_path', path: selected });
+        assert.equal((await monitor.frame()).opcode, 8);
+        await assertPolicyClose(workspace);
+        if (terminal) await assertPolicyClose(terminal);
+
+        assert.equal((await original.request('/', { headers })).status, 404);
+        assert.equal((await original.request('/api/session', { headers })).status, 404);
+        assert.equal((await original.upgrade(headers)).status, 404);
+        const moved = client(fixture, selected);
+        assert.equal((await moved.request('/', { headers })).status, 200);
+        assert.equal((await moved.request('/api/session', { headers })).status, 200);
+    } finally {
+        monitor.socket?.destroy();
+        workspace.socket?.destroy();
+        terminal?.socket?.destroy();
+    }
+
+    await fixture.stop();
+    await fixture.start();
+    const moved = client(fixture, selected);
+    assert.equal((await moved.request('/api/session', { headers })).status, 200);
+    assert.equal((await original.request('/', { headers })).status, 404);
+});
+
 test('saves validated panel TLS settings for restart and keeps preview backups separate', async t => {
     const fixture = await authFixture(t, undefined, { encrypted: false });
     const { ca, chainPath, keyPath } = await tlsFixture(fixture.cwd);

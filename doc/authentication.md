@@ -121,6 +121,12 @@ WebSockets all use that prefix. For example, `/panel` serves the workspace at
 `/panel/` and its data socket at `/panel/ws/workspace`. Requests outside the
 selected prefix receive the stock nginx **404 Not Found** HTML from Wave.
 
+To move an existing panel, open **Settings → Panel → Panel base path** and
+save the new path. Wave applies it immediately and opens the new URL with
+your existing sign-in. Other connected panel tabs move to the new URL as
+well. Save open edits before moving the panel. Update any bookmarks or proxy
+routes that use the previous URL.
+
 ## Set up the administrator
 
 For HTTPS, use the configured `tls.domain` and the listener port. The browser
@@ -134,6 +140,7 @@ common passwords and predictable patterns using zxcvbn-c locally. Select
 The setup and sign-in dialogs show a circular spinner in the lower-left
 corner while Wave checks the request.
 If sign-in fails, the message appears below the divider in the dialog footer.
+The sign-in background stays still when the browser requests reduced motion.
 [Pre-DNS verification](#verify-https-before-dns)
 
 To change the username or password, go to **Settings → Panel → Administrator**.
@@ -223,6 +230,11 @@ includes an opaque `session_id` for that sign-in. The open panel uses it to
 recognize the same session after a connection drops. Authentication still
 requires the signed session cookie. Active connections close when their
 session expires or is revoked.
+
+`POST /panel/api/auth/base-path` takes the new path as `panel-base-path` and
+requires an active session. A successful change returns HTTP 201 with the
+new panel URL in `Location`. The session monitor announces the move with a
+`base_path` message containing `path`. Sockets using the previous prefix close.
 
 The Console starts a host shell under the Wave backend's operating system
 account after the administrator opens it. Sign-out and credential changes

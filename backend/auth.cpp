@@ -76,7 +76,8 @@ Access route_access(std::string_view route, std::string_view method, bool bootst
         if (route == "/api/auth/setup" || route == "/api/auth/sign-out") {
             return Access::entry;
         }
-        return route == "/api/auth/admin" || route == backup_prepare_route || route == backup_apply_route
+        return route == "/api/auth/admin" || route == base_path_route || route == backup_prepare_route ||
+                       route == backup_apply_route
                    ? Access::authenticated
                    : Access::missing;
     }
@@ -217,9 +218,11 @@ std::string panel_route(std::string_view suffix)
 }
 
 std::function<bool()> websocket_session(const std::shared_ptr<AuthStore>& store,
-                                        const Request& request)
+                                        const std::shared_ptr<PanelDatabase>& database, const Request& request)
 {
-    return [store, token = session_cookie(request)] { return store->session(token).has_value(); };
+    return [store, database, token = session_cookie(request), prefix = request.matches[1].str()] {
+        return prefix == database->panel_base_path() && store->session(token).has_value();
+    };
 }
 
 std::string authenticated_session_id(const std::shared_ptr<AuthStore>& store, const Request& request)
@@ -343,9 +346,11 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         });
     }
 
-    post_panel_json(server, std::string(panel_setup_prefix).append(base_path_route),
+    post_panel_json(server, panel_route(base_path_route),
                     [database, store](const Request& req, Response& res, std::string_view body) {
-        if (store->installed() && !store->session(session_cookie(req))) {
+        const auto prefix = req.matches[1].str();
+        const bool bootstrap = prefix == panel_setup_prefix;
+        if ((!bootstrap || store->installed()) && !store->session(session_cookie(req))) {
             res.status = 401;
             return;
         }
@@ -357,7 +362,7 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
         const auto& path = value->get_ref<const std::string&>();
         try {
-            if (!database->save_panel_base_path(path)) {
+            if (!database->save_panel_base_path(bootstrap ? std::string_view{} : std::string_view(prefix), path)) {
                 not_found(res);
                 return;
             }
@@ -470,7 +475,8 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
     });
 
-    server.WebSocket(panel_route(panel_socket), [store](const Request& req, httplib::ws::WebSocket& socket) {
+    server.WebSocket(panel_route(panel_socket), [store, database](const Request& req, httplib::ws::WebSocket& socket) {
+        const auto prefix = req.matches[1].str();
         const auto token = session_cookie(req);
         const auto session = store->session(token);
         if (!session) {
@@ -486,6 +492,13 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         socket.set_read_timeout(1);
         std::string message;
         while (store->session(token)) {
+            const auto path = database->panel_base_path();
+            if (path != prefix) {
+                if (socket.send(Json{{"type", "base_path"}, {"path", path}}.dump())) {
+                    socket.close();
+                }
+                return;
+            }
             const auto result = socket.read(message);
             if (result == httplib::ws::Text || result == httplib::ws::Binary) {
                 socket.close(httplib::ws::CloseStatus::PolicyViolation, "This socket is read-only.");

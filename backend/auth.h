@@ -29,6 +29,6 @@ void configure_authenticated_routes(httplib::Server& server, const std::filesyst
                                     std::shared_ptr<AuthStore> store, std::shared_ptr<PanelDatabase> database, bool secure,
                                     const std::string& authority = {});
 std::function<bool()> websocket_session(const std::shared_ptr<AuthStore>& store,
-                                        const httplib::Request& request);
+                                        const std::shared_ptr<PanelDatabase>& database, const httplib::Request& request);
 
 } // namespace wave

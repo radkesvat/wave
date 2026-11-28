@@ -40,6 +40,7 @@ struct SettingsViewState {
     CoreSettingsDraft core;
     SessionSettingsDraft sessions;
     TlsSettingsDraft tls;
+    std::optional<std::string> base_path;
     std::string administrator;
     std::array<char, 65> admin_username{};
     std::array<char, 257> current_password{};

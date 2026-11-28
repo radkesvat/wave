@@ -3,7 +3,7 @@ const { readFile, writeFile } = require('node:fs/promises');
 const { test } = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
 const { chromium } = require('playwright-core');
-const { authFixture, timeout } = require('../backend/auth_fixture.cjs');
+const { authFixture, fixtureSession, timeout } = require('../backend/auth_fixture.cjs');
 
 const viewport = { width: 1280, height: 800 };
 
@@ -46,10 +46,9 @@ async function expectEntryTitleStrip(page, title) {
     }
 }
 
-async function visibleInputs(page, top, bottom) {
+async function visibleInputs(page, top, bottom, x = 780) {
     await page.mouse.move(0, 0);
     await settleCanvas(page);
-    const x = 780;
     const pixels = new Set(await matchingPixels(page, { x, y: top, width: 1, height: bottom - top }, [13, 11, 14]));
     const positions = [];
     let start = -1;
@@ -160,6 +159,46 @@ async function waitForShellExit(pid) {
     }
     assert.fail(`Console shell ${pid} is still running after sign-out.`);
 }
+
+test('animates the sign-in background and keeps it still with reduced motion', async t => {
+    assert.ok(process.env.WAVE_SITE_DIR, 'Set WAVE_SITE_DIR to a built Wave frontend.');
+    const fixture = await authFixture(t, process.env.WAVE_SITE_DIR, { encrypted: false });
+    await fixture.start();
+    const browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader'] });
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport });
+    const panel = fixture.origin + fixture.basePath + '/';
+    const clip = { x: 24, y: 100, width: 250, height: viewport.height - 125 };
+    const capture = () => page.screenshot({ clip });
+    const helpInk = async () => {
+        const frame = await entryDialogFrame(page);
+        return matchingPixels(page, {
+            x: (viewport.width - entryDialogWidth(page)) / 2 + 14,
+            y: frame.top + 36, width: 240, height: frame.bottom - frame.top - 82,
+        }, [181, 180, 197]);
+    };
+
+    await page.goto(panel);
+    await waitForStatus(page, 'Set up administrator. Setup.');
+    assert.ok((await helpInk()).length > 0, 'Setup shows field hints.');
+    const setup = await capture();
+    assert.deepEqual(await capture(), setup, 'Setup has a still background.');
+
+    await fixtureSession(fixture);
+    await page.goto(panel);
+    await waitForStatus(page, 'Sign in to Wave. Welcome.');
+    assert.equal((await helpInk()).length, 0, 'Sign-in labels have no help markers.');
+    const animated = await capture();
+    await delay(200);
+    assert.notDeepEqual(await capture(), animated, 'The sign-in waves move behind the form.');
+
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await settleCanvas(page);
+    const still = await capture();
+    await delay(200);
+    assert.deepEqual(await capture(), still, 'Reduced motion keeps the waves still.');
+    assert.notDeepEqual(still, setup, 'The static waves remain visible.');
+});
 
 test('sets a panel base path, authenticates an administrator and closes the terminal on sign-out', async t => {
     assert.ok(process.env.WAVE_SITE_DIR, 'Set WAVE_SITE_DIR to a built Wave frontend.');
@@ -331,4 +370,61 @@ test('sets a panel base path, authenticates an administrator and closes the term
     assert.equal(new URL(page.url()).pathname, recovered + '/');
     assert.equal((await context.request.get(fixture.origin + base + '/')).status(), 404);
     assert.equal(JSON.parse(await readFile(fixture.database, 'utf8'))['panel-base-path'], recovered);
+});
+
+test('changes the panel base path from Settings and moves signed-in tabs', async t => {
+    assert.ok(process.env.WAVE_SITE_DIR, 'Set WAVE_SITE_DIR to a built Wave frontend.');
+    const initial = '/settings/wave';
+    const next = '/operations/panel-v2';
+    const fixture = await authFixture(t, process.env.WAVE_SITE_DIR, { encrypted: false, basePath: initial });
+    await fixture.start();
+    const cookie = await fixtureSession(fixture);
+    const separator = cookie.indexOf('=');
+    const name = cookie.slice(0, separator);
+    const value = cookie.slice(separator + 1);
+    const browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader'] });
+    t.after(() => browser.close());
+    const context = await browser.newContext({ viewport });
+    await context.addCookies([{ name, value, url: fixture.origin, httpOnly: true, sameSite: 'Strict' }]);
+    const page = await context.newPage();
+    const peer = await context.newPage();
+    const workspace = /Wave Server Status.*CPU/;
+    const open = async tab => {
+        await tab.goto(fixture.origin + initial + '/');
+        await waitForStatus(tab, workspace);
+    };
+    await Promise.all([open(page), open(peer)]);
+    await page.bringToFront();
+    await page.getByRole('link', { name: 'Settings', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    await waitForStatus(page, /Panel tab.*Panel base path\. Current path \/settings\/wave\./);
+
+    const inputs = await visibleInputs(page, 150, viewport.height - 30, 325);
+    const field = inputs.at(-1);
+    assert.ok(field, 'Expected the panel base path input below the TLS card.');
+    const endpoint = fixture.origin + initial + '/api/auth/base-path';
+    const attempts = [];
+    page.on('request', request => {
+        if (request.url() === endpoint) attempts.push(request.postDataJSON());
+    });
+    await fillInput(page, field, '/operations//invalid');
+    await waitForStatus(page, /Enter a path such as \/panel with a leading slash and no trailing slash\./);
+    await page.keyboard.press('Enter');
+    await settleCanvas(page);
+    assert.deepEqual(attempts, []);
+
+    const response = page.waitForResponse(endpoint, { timeout });
+    await fillInput(page, field, next);
+    await page.keyboard.press('Enter');
+    const saved = await response;
+    assert.equal(saved.status(), 201);
+    assert.equal(saved.headers().location, next + '/');
+    assert.deepEqual(attempts, [{ 'panel-base-path': next }]);
+    await Promise.all([page, peer].map(async tab => {
+        await tab.waitForURL(fixture.origin + next + '/', { timeout });
+        await waitForStatus(tab, workspace);
+    }));
+    assert.equal((await context.request.get(fixture.origin + initial + '/')).status(), 404);
+    assert.equal((await context.cookies(fixture.origin)).find(cookie => cookie.name === name)?.value, value);
+    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8'))['panel-base-path'], next);
 });

@@ -1,6 +1,7 @@
 #include "console.h"
 
 #include "auth.h"
+#include "panel_settings.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -565,17 +566,18 @@ void serve_console(WebSocket& socket, const std::function<bool()>& session, cons
 } // namespace
 
 void configure_console_route(httplib::Server& server, std::shared_ptr<AuthStore> store,
-                             const std::filesystem::path& directory)
+                             std::shared_ptr<PanelDatabase> database)
 {
-    server.WebSocket(panel_route("/ws/console"), [store = std::move(store), directory](const httplib::Request& request,
-                                                                                   WebSocket& socket) {
-        const auto session = websocket_session(store, request);
+    server.WebSocket(panel_route("/ws/console"),
+                     [store = std::move(store), database = std::move(database)](const httplib::Request& request,
+                                                                              WebSocket& socket) {
+        const auto session = websocket_session(store, database, request);
         if (!session()) {
             socket.close(CloseStatus::PolicyViolation, "Session ended.");
             return;
         }
 #ifdef __linux__
-        serve_console(socket, session, directory);
+        serve_console(socket, session, database->directory());
 #else
         console_error(socket, "The interactive console requires a Linux backend.", CloseStatus::InternalError);
 #endif

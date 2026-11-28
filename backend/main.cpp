@@ -91,9 +91,9 @@ bool validate_site(const std::filesystem::path& site_dir, bool secure)
 void configure_workspace_routes(httplib::Server& server, const std::shared_ptr<wave::AuthStore>& store,
                                 const std::shared_ptr<wave::PanelDatabase>& database)
 {
-    server.WebSocket(wave::panel_route("/ws"), [store](const httplib::Request& req, httplib::ws::WebSocket& socket) {
+    server.WebSocket(wave::panel_route("/ws"), [store, database](const httplib::Request& req, httplib::ws::WebSocket& socket) {
         using namespace std::chrono_literals;
-        const auto session = wave::websocket_session(store, req);
+        const auto session = wave::websocket_session(store, database, req);
         socket.set_read_timeout(1s);
         std::string message;
         while (const auto result = socket.read(message)) {
@@ -106,7 +106,7 @@ void configure_workspace_routes(httplib::Server& server, const std::shared_ptr<w
             }
         }
     });
-    wave::configure_console_route(server, store, database->directory());
+    wave::configure_console_route(server, store, database);
     wave::configure_preview_routes(server, store, database);
 }
 

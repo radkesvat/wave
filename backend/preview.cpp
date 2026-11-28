@@ -2949,11 +2949,11 @@ void configure_backup_routes(httplib::Server& server, const std::shared_ptr<Auth
 void configure_preview_routes(httplib::Server& server, std::shared_ptr<AuthStore> store,
                               std::shared_ptr<PanelDatabase> database)
 {
-    const auto preview = std::make_shared<Preview>(std::move(database));
+    const auto preview = std::make_shared<Preview>(database);
     configure_backup_routes(server, store, preview);
     server.WebSocket(panel_route("/ws/overview"),
-                     [preview, store](const httplib::Request& req, httplib::ws::WebSocket& socket) {
-                         if (!websocket_session(store, req)()) {
+                     [preview, store, database](const httplib::Request& req, httplib::ws::WebSocket& socket) {
+                         if (!websocket_session(store, database, req)()) {
                              socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
                              return;
                          }
@@ -2961,10 +2961,11 @@ void configure_preview_routes(httplib::Server& server, std::shared_ptr<AuthStore
                              socket.close();
                          }
                      });
-    server.WebSocket(panel_route("/ws/workspace"), [preview, store = std::move(store)](const httplib::Request& req,
-                                                                                   httplib::ws::WebSocket& socket) {
-        preview->serve(socket, websocket_session(store, req));
-    });
+    server.WebSocket(panel_route("/ws/workspace"),
+                     [preview, store = std::move(store), database = std::move(database)](const httplib::Request& req,
+                                                                                     httplib::ws::WebSocket& socket) {
+                         preview->serve(socket, websocket_session(store, database, req));
+                     });
 }
 
 } // namespace wave

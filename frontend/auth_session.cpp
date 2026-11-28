@@ -3,6 +3,8 @@
 #include <emscripten.h>
 #include <nlohmann/json.hpp>
 
+#include <cstdlib>
+
 namespace wave {
 namespace {
 
@@ -18,6 +20,11 @@ EM_JS(int, read_auth_page, (), {
     }
 });
 
+EM_JS_DEPS(read_panel_base_path, "$stringToNewUTF8");
+EM_JS(char*, read_panel_base_path, (), {
+    return stringToNewUTF8(Module['basePath']);
+});
+
 EM_JS(void, send_auth_request, (AuthSession* session, const char* path_value, const char* json), {
     const path = UTF8ToString(path_value);
     const basePath = Module['basePath'];
@@ -26,16 +33,11 @@ EM_JS(void, send_auth_request, (AuthSession* session, const char* path_value, co
         headers: { 'Content-Type': 'application/json', 'X-Wave-CSRF': '1' },
         body: UTF8ToString(json), signal: AbortSignal.timeout(10000),
     }).then(response => {
+        if (Module['panelLocationPending']()) return;
         if (path === '/api/auth/base-path' && response.status === 201) {
-            const locationHeader = response.headers.get('Location');
-            if (locationHeader?.startsWith('/') && !locationHeader.startsWith('//')) {
-                const destination = new URL(locationHeader, location.origin);
-                if (destination.origin === location.origin) {
-                    location.replace(destination.href);
-                    return;
-                }
+            if (!Module['followPanelLocation'](response.headers.get('Location'))) {
+                Module['_wave_auth_request_failed'](session, 0);
             }
-            Module['_wave_auth_request_failed'](session, 0);
             return;
         }
         const sessionEnded = response.status === 401 && (path === '/api/auth/admin' ||
@@ -46,7 +48,9 @@ EM_JS(void, send_auth_request, (AuthSession* session, const char* path_value, co
         } else {
             Module['_wave_auth_request_failed'](session, response.status);
         }
-    }).catch(() => Module['_wave_auth_request_failed'](session, 0));
+    }).catch(() => {
+        if (!Module['panelLocationPending']()) Module['_wave_auth_request_failed'](session, 0);
+    });
 });
 
 EM_JS_DEPS(monitor_session, "$stringToNewUTF8,free");
@@ -57,6 +61,7 @@ EM_JS(void, monitor_session, (AuthSession* session), {
     const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
     const basePath = Module['basePath'];
     const connect = () => {
+        if (Module['panelLocationPending']()) return;
         const socket = new WebSocket(protocol + location.host + basePath + '/ws/panel');
         socket.addEventListener('message', event => {
             const data = JSON.parse(event.data);
@@ -66,9 +71,12 @@ EM_JS(void, monitor_session, (AuthSession* session), {
                 Module['_wave_auth_identity'](session, username, id);
                 _free(id);
                 _free(username);
+            } else if (data.type === 'base_path' && typeof data.path === 'string' && data.path !== basePath) {
+                Module['followPanelLocation'](data.path + '/');
             }
         });
         socket.addEventListener('close', async event => {
+            if (Module['panelLocationPending']()) return;
             Module['_wave_auth_identity'](session, 0, 0);
             if (event.code === 1008) {
                 location.replace(basePath + '/');
@@ -97,6 +105,10 @@ void AuthSession::start()
 {
     page_ = static_cast<Page>(read_auth_page());
     if (page_ == Page::panel) {
+        if (auto* path = read_panel_base_path()) {
+            base_path_ = path;
+            std::free(path);
+        }
         monitor_session(this);
     }
 }
@@ -140,7 +152,7 @@ void AuthSession::request_failed(int status)
     } else if (action_ == Action::setup && status == 400) {
         error_ = "Check the username and password requirements.";
     } else if (action_ == Action::base_path && status == 400) {
-        error_ = "Enter a path such as /panel with a leading slash and no trailing slash.";
+        error_ = base_path_format_error;
     } else if (action_ == Action::sign_in && status == 401) {
         error_ = "The username or password was rejected.";
     } else if (action_ == Action::update_administrator && status == 403) {
