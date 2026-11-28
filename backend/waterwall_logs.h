@@ -26,7 +26,7 @@ class WaterWallLogs {
   public:
     explicit WaterWallLogs(const std::filesystem::path& directory);
 
-    void start(const nlohmann::json& settings);
+    void start(const nlohmann::json& settings, bool include_existing = false);
     std::vector<WaterWallLog> read();
     void stop();
 

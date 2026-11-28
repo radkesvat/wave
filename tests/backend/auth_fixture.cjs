@@ -61,7 +61,10 @@ function fixtureWaterWall(logs, observeShutdown) {
     if (observeShutdown) {
         process.on('SIGTERM', () => {
             writeFileSync('fixture-terminated', String(process.pid));
-            setTimeout(() => process.exit(0), 350);
+            setTimeout(() => {
+                writeFileSync('fixture-shutdown-complete', String(process.pid));
+                process.exit(0);
+            }, 350);
         });
     }
     for (const file of settings.configs) JSON.parse(readFileSync(file, 'utf8'));
@@ -94,11 +97,12 @@ async function seedCore(backend, { executable = false, logs = [], observeShutdow
             { mode: 0o700 });
     }
     return { configDir, program, processFile: join(directory, 'fixture-process.json'),
-        terminatedFile: join(directory, 'fixture-terminated') };
+        terminatedFile: join(directory, 'fixture-terminated'),
+        shutdownFile: join(directory, 'fixture-shutdown-complete') };
 }
 
 async function authFixture(t, webSite, {
-    encrypted = true, prepareCore = true, basePath = panelBasePath, runAs,
+    encrypted = true, prepareCore = true, basePath = panelBasePath, runAs, managed = false,
 } = {}) {
     assert.ok(process.env.WAVE_BACKEND, 'Set WAVE_BACKEND to a native Wave build.');
     const cwd = await mkdtemp(join(tmpdir(), 'wave-auth-test-'));
@@ -109,8 +113,9 @@ async function authFixture(t, webSite, {
     async function stop() {
         if (server) {
             server.kill();
-            await closed;
+            const result = await closed;
             server = undefined;
+            return result;
         }
     }
 
@@ -138,6 +143,9 @@ async function authFixture(t, webSite, {
     }
     const port = await loopbackPort();
     const database = join(dirname(backend), 'wave-db.json');
+    const runtime = join(dirname(backend), '.wave-run');
+    const ready = managed ? join(runtime, 'ready') : undefined;
+    if (managed) await mkdir(runtime, { mode: 0o700 });
     const listen = { host: bindHost, port };
     const tls = encrypted ? await tlsFixture(cwd) : undefined;
     const installAttempted = prepareCore ? true : undefined;
@@ -158,6 +166,7 @@ async function authFixture(t, webSite, {
             const release = dirname(core.program);
             permissions.push([dirname(release), 0o700], [release, 0o700], [core.configDir, 0o700]);
         }
+        if (managed) permissions.push([runtime, 0o700]);
         if (!webSite) {
             permissions.push([siteDir, 0o700]);
             for (const file of Object.keys(siteAssets)) permissions.push([join(siteDir, file), 0o600]);
@@ -170,6 +179,7 @@ async function authFixture(t, webSite, {
     }
     const origin = encrypted ? `https://${hostname}:${port}` : `http://${bindHost}:${port}`;
     const args = ['--site-dir', siteDir];
+    if (managed) args.push('--ready-file', ready);
 
     function lookup(_name, options, callback) {
         if (options.all) {
@@ -205,7 +215,7 @@ async function authFixture(t, webSite, {
     }
 
     return { cwd, backend, ca: tls?.ca, rootPath: tls?.rootPath, hostname, bindHost, lookup, origin, basePath,
-        index, database, start, stop, get pid() { return server?.pid; }, get stderr() { return stderr; } };
+        index, database, ready, start, stop, get pid() { return server?.pid; }, get stderr() { return stderr; } };
 }
 
 const previewTimeout = 5000;

@@ -199,7 +199,7 @@ const bootstrapPath = '/_wave-setup';
 const basePathEndpoint = `${bootstrapPath}/api/auth/base-path`;
 
 test('selects a base path on first run and scopes the configured panel routes', async t => {
-    const fixture = await authFixture(t, undefined, { encrypted: false, basePath: null });
+    const fixture = await authFixture(t, undefined, { encrypted: false, basePath: null, managed: true });
     const loopback = JSON.parse(await readFile(fixture.database, 'utf8'));
     await unlink(fixture.database);
     // Create the database without ever binding its fresh public listener defaults.
@@ -212,6 +212,7 @@ test('selects a base path on first run and scopes the configured panel routes', 
     await writeFile(fixture.database, JSON.stringify({ ...fresh, ...loopback }));
     await fixture.start();
     assert.equal(JSON.parse(await readFile(fixture.database, 'utf8')).waterwall_version, '1.6.0');
+    assert.equal(await readFile(fixture.ready, 'utf8'), `${fixture.pid}\n${fixture.origin}/\n`);
 
     const { request, post } = panelClient(fixture.origin);
     const chosen = '/chosen';
@@ -234,6 +235,7 @@ test('selects a base path on first run and scopes the configured panel routes', 
     assert.equal(saved.status, 201);
     assert.equal(saved.headers.get('location'), `${chosen}/`);
     assert.equal(JSON.parse(await readFile(fixture.database, 'utf8'))['panel-base-path'], chosen);
+    assert.equal(await readFile(fixture.ready, 'utf8'), `${fixture.pid}\n${fixture.origin}${chosen}/\n`);
     for (const path of ['/', '/panel', '/panel/', `${bootstrapPath}/`, '/index.wasm', `${chosen}-other/`,
         `${chosen}/unknown`]) {
         await assertNotFound(await request(path));
@@ -254,6 +256,10 @@ test('selects a base path on first run and scopes the configured panel routes', 
     const headers = { Cookie: login.headers.get('set-cookie').split(';', 1)[0] };
     assert.equal(await (await request(`${chosen}/`, { headers })).text(), fixture.index);
     assert.equal((await (await request(`${chosen}/api/session`, { headers })).json()).username, credentials.username);
+    const { stdout: info } = await run(fixture.backend, ['--local-settings']);
+    assert.match(info, /Administrator: "bootstrap-admin"/);
+    assert.match(info, /Base path: \/chosen/);
+    assert.doesNotMatch(info, /argon2|wave_session|signing_key/);
     for (const path of ['/ws/workspace', '/panel/ws/workspace', `${chosen}-other/ws/workspace`]) {
         assert.equal(await websocketStatus(fixture.origin, path, headers), 404);
     }
@@ -559,6 +565,8 @@ test('starts, restarts, and reaps WaterWall with the selected configs supplied t
         const coreLog = join(dirname(backend), rotatingLogPath(settings, 'core'));
         await mkdir(dirname(coreLog), { recursive: true });
         await writeFile(coreLog, taggedLog('WARN', 'Earlier file content'));
+        const { stdout: coreLogs } = await run(backend, ['--local-core-logs']);
+        assert.match(coreLogs, /\[core\] \[warning\] Earlier file content/);
         const expectedLogs = [
             { source: 'core', ts: '12:34:56', level: 'warning', message: 'Fixture core log' },
             { source: 'dns', ts: '12:34:56', level: 'error', message: 'Fixture DNS log' },
@@ -670,6 +678,22 @@ test('starts, restarts, and reaps WaterWall with the selected configs supplied t
         }
         await unlink(coreFixture.processFile);
         await unlink(coreFixture.terminatedFile);
+    });
+
+test('lets WaterWall complete its shutdown when Wave receives SIGTERM',
+    { skip: process.platform !== 'linux' }, async t => {
+        const fixture = await authFixture(t, undefined, { encrypted: false, managed: true });
+        const core = await seedCore(fixture.backend, { executable: true, observeShutdown: true });
+        await fixture.start();
+        const session = await fixtureSession(fixture);
+        const { socket } = await openPreview(t, fixture.origin, session, fixture.basePath);
+        await createCoreConfig(socket, 'Shutdown fixture', true);
+        const started = await requestPreview(socket, 'start_core');
+        assert.equal(started.ok, true, started.feedback);
+        const child = JSON.parse(await waitForFile(core.processFile));
+
+        assert.deepEqual(await fixture.stop(), [0, null], fixture.stderr);
+        assert.equal(await readFile(core.shutdownFile, 'utf8'), String(child.pid));
     });
 
 const supportedInstaller = process.platform === 'linux' && ['x64', 'arm64'].includes(process.arch);

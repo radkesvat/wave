@@ -1,6 +1,7 @@
 #include "auth.h"
 #include "auth_store.h"
 #include "console.h"
+#include "local_cli.h"
 #include "panel_settings.h"
 #include "preview.h"
 #include "waterwall_schematic_file.h"
@@ -8,16 +9,21 @@
 
 #include <httplib.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 
 void wave::ClosePanelListener::operator()(httplib::Server* listener) const noexcept
 {
@@ -27,10 +33,19 @@ void wave::ClosePanelListener::operator()(httplib::Server* listener) const noexc
 
 namespace {
 
+std::atomic<bool> termination_requested = false;
+static_assert(std::atomic<bool>::is_always_lock_free);
+
+void request_termination(int) noexcept
+{
+    termination_requested.store(true, std::memory_order_relaxed);
+}
+
 struct Options {
     std::filesystem::path site_dir = "build/web-release/site";
     bool check_tls = false;
     std::filesystem::path check_schematic;
+    std::filesystem::path ready_file;
 };
 
 bool parse_options(int argc, char* argv[], Options& options)
@@ -41,7 +56,7 @@ bool parse_options(int argc, char* argv[], Options& options)
             options.check_tls = true;
             continue;
         }
-        if (option != "--site-dir" && option != "--check-schematic") {
+        if (option != "--site-dir" && option != "--check-schematic" && option != "--ready-file") {
             if (option.starts_with("--")) {
                 std::cerr << "Unknown option: " << option.substr(0, option.find('=')) << '\n';
             } else {
@@ -58,12 +73,18 @@ bool parse_options(int argc, char* argv[], Options& options)
 
         if (option == "--check-schematic") {
             options.check_schematic = value;
+        } else if (option == "--ready-file") {
+            options.ready_file = value;
         } else {
             options.site_dir = value;
         }
     }
     if (options.check_tls && !options.check_schematic.empty()) {
         std::cerr << "Choose either --check-tls or --check-schematic.\n";
+        return false;
+    }
+    if (!options.ready_file.empty() && (options.check_tls || !options.check_schematic.empty())) {
+        std::cerr << "--ready-file requires starting the Wave listener.\n";
         return false;
     }
     return true;
@@ -130,13 +151,35 @@ void configure_listener_socket(httplib::Server& server)
     });
 }
 
+bool serve_panel(httplib::Server& server, const wave::PreviewRoutes& preview)
+{
+    std::jthread watch_termination([&](std::stop_token stop) {
+        using namespace std::chrono_literals;
+        std::mutex mutex;
+        std::condition_variable_any timer;
+        std::unique_lock lock(mutex);
+        while (!termination_requested.load(std::memory_order_relaxed) && !stop.stop_requested()) {
+            timer.wait_for(lock, stop, 100ms, [] { return false; });
+        }
+        if (termination_requested.load(std::memory_order_relaxed)) {
+            server.stop();
+            preview.request_shutdown();
+        }
+    });
+    return server.listen_after_bind();
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
 {
+    if (const auto result = wave::run_local_command(argc, argv)) {
+        return *result;
+    }
     Options options;
     if (!parse_options(argc, argv, options)) {
-        std::cerr << "Usage: wave-backend [--site-dir PATH] [--check-tls | --check-schematic PATH]\n";
+        std::cerr << "Usage: wave-backend [--site-dir PATH] [--check-tls | --check-schematic PATH]\n"
+                     "       wave-backend --version\n";
         return EXIT_FAILURE;
     }
 
@@ -153,6 +196,9 @@ int main(int argc, char* argv[])
         }
         database =
             std::make_shared<wave::PanelDatabase>(argv[0], options.site_dir, options.check_tls);
+        if (!options.ready_file.empty()) {
+            wave::validate_ready_file(options.ready_file, database->directory());
+        }
         if (!options.check_tls) {
             wave::recover_workspace_restore(*database);
         }
@@ -197,6 +243,9 @@ int main(int argc, char* argv[])
     std::optional<wave::PanelListenerRestart> pending_restart;
     wave::PreviewRoutes preview;
     try {
+        if (std::signal(SIGTERM, request_termination) == SIG_ERR) {
+            throw std::runtime_error("Could not install the Wave shutdown signal handler.");
+        }
         const auto prepare_restart = [&](std::unique_ptr<httplib::Server> listener, wave::PanelSettings next) {
             wave::PanelListenerRestart restart{{}, std::move(next), 0, false};
             restart.listener.reset(listener.release());
@@ -234,7 +283,7 @@ int main(int argc, char* argv[])
                     next.listener->stop();
                 }
             }
-        });
+        }, !options.ready_file.empty());
         configure_workspace_routes(*server, store, database, preview);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
@@ -242,12 +291,21 @@ int main(int argc, char* argv[])
     }
 
     for (;;) {
+        if (!options.ready_file.empty()) {
+            database->observe_listener([path = options.ready_file, port](const auto& settings, auto base_path) {
+                wave::publish_listener_ready(path, settings, port, base_path);
+            });
+        }
         if (secure) {
             std::cout << "Authenticated HTTPS listening on port " << port << std::endl;
         } else {
             std::cout << "Listening on http://" << url_host() << ':' << port << '/' << std::endl;
         }
-        if (!server->listen_after_bind()) {
+        const bool served = serve_panel(*server, preview);
+        if (termination_requested.load(std::memory_order_relaxed)) {
+            return EXIT_SUCCESS;
+        }
+        if (!served) {
             std::cerr << "Could not serve requests on " << endpoint() << port << '\n';
             return EXIT_FAILURE;
         }

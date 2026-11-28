@@ -253,4 +253,19 @@ void WaterWall::update()
     }
 }
 
+void WaterWall::shutdown()
+{
+    core_json_.reset();
+    installer_.request_stop();
+    if (pid_ > 0 && !stop_deadline_ && !stop().empty()) {
+        return;
+    }
+    while (pid_ > 0) {
+        update();
+        if (pid_ > 0) {
+            std::this_thread::sleep_for(25ms);
+        }
+    }
+}
+
 } // namespace wave

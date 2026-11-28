@@ -575,7 +575,7 @@ test('restarts the panel on the restored HTTPS port and can restore an ephemeral
     assert.equal(saved.ok, true, saved.feedback);
     const httpsBackup = await downloadBackup(source, sourceSession);
     const httpsPort = Number(new URL(source.origin).port);
-    const destination = await authFixture(t, undefined, { encrypted: false, basePath: '/previous/http' });
+    const destination = await authFixture(t, undefined, { encrypted: false, basePath: '/previous/http', managed: true });
     assert.notEqual(new URL(destination.origin).port, String(httpsPort));
     await destination.start();
     const pid = destination.pid;
@@ -600,6 +600,7 @@ test('restarts the panel on the restored HTTPS port and can restore an ephemeral
     const secure = { ...destination, ca, basePath: source.basePath, origin: `https://${tls.domain}:${httpsPort}` };
     await waitForListener(secure);
     assert.equal(destination.pid, pid);
+    assert.equal(await readFile(destination.ready, 'utf8'), `${pid}\n${secure.origin}${secure.basePath}/\n`);
     await assertListenerClosed(destination);
     assert.equal((await call(secure, '/api/session', { session: oldSession })).status, 401);
     const secureSession = await signIn(secure, sourceCredentials);
@@ -638,6 +639,7 @@ test('restarts the panel on the restored HTTPS port and can restore an ephemeral
     const assigned = { ...plain, origin: `http://${destination.bindHost}:${httpPort}` };
     await waitForListener(assigned);
     assert.equal(destination.pid, pid);
+    assert.equal(await readFile(destination.ready, 'utf8'), `${pid}\n${assigned.origin}${assigned.basePath}/\n`);
     await assertListenerClosed(plain);
     await signIn(assigned, destinationCredentials);
     assert.equal(JSON.parse(await readFile(destination.database, 'utf8')).listen.port, 0);

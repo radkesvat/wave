@@ -5,6 +5,7 @@
 
 #include <nlohmann/json_fwd.hpp>
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,6 +28,7 @@ class PanelDatabase {
     PanelSettings settings() const;
     const nlohmann::json& initial_contents() const;
     std::string panel_base_path() const;
+    void observe_listener(std::function<void(const PanelSettings&, std::string_view)> publish);
     bool save_panel_base_path(std::string_view previous, std::string_view path);
     nlohmann::json save_tls_settings(const std::optional<TlsSettings>& tls,
                                      std::unique_ptr<httplib::Server>* activation = nullptr);

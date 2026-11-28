@@ -5,6 +5,8 @@ executable and supplies host metrics and preview workspace data. Use a browser
 with WebGL 2 enabled. After sign-in, the workspace starts on **Server Status**.
 See **Panel Controls** there for the WaterWall process state.
 
+For a prebuilt Linux package, see [Install and manage a Wave release](installing.md).
+
 ## Prerequisites
 
 - CMake 3.24 or newer and Ninja on your `PATH`
@@ -181,7 +183,7 @@ If an existing backend build directory was configured from `backend/`, add
 The executable is `build/backend-release/wave-backend` or
 `build/backend-debug/wave-backend`. With Ninja Multi-Config, each configuration
 builds the executable in its own directory, such as `Debug/` or `Release/`.
-Keep the build's `licenses/utf8proc.txt` and `licenses/miniz.txt` with the backend when distributing it.
+Keep the build's `licenses/` directory with the backend when distributing it.
 The executable contains the default WaterWall 1.6.0 schematic. On first
 startup, Wave creates its `waterwall_bin/` cache and seeds the default
 release from that embedded copy. Rebuilding after a schematic edit updates

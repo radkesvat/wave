@@ -31,9 +31,11 @@ using RestartPanel = std::function<void(PanelListenerRestart)>;
 struct PreviewRoutes {
     std::function<void(httplib::Server&)> configure;
     std::function<void(bool)> finish_listener_restart;
+    std::function<void()> request_shutdown;
 };
 
 PreviewRoutes make_preview_routes(std::shared_ptr<AuthStore> store, std::shared_ptr<PanelDatabase> database,
-                                  PreparePanelRestart prepare_restart, RestartPanel restart_panel);
+                                  PreparePanelRestart prepare_restart, RestartPanel restart_panel,
+                                  bool log_panel_events);
 
 } // namespace wave

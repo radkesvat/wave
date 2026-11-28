@@ -28,6 +28,7 @@ class WaterWall {
     std::string start(std::string core_json);
     std::string stop();
     void update();
+    void shutdown();
 
   private:
     std::filesystem::path working_dir_;

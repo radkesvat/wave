@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <ctime>
 #include <future>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -46,6 +47,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <syncstream>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -475,12 +477,12 @@ struct UsersRosterPoll {
 
 class Preview {
   public:
-    Preview(std::shared_ptr<PanelDatabase> database, PreparePanelRestart prepare_restart)
+    Preview(std::shared_ptr<PanelDatabase> database, PreparePanelRestart prepare_restart, bool log_panel_events)
         : database_(std::move(database)), prepare_restart_(std::move(prepare_restart)), config_files_(database_->directory()),
           config_users_(database_->directory()),
           core_(std::make_unique<WaterWall>(database_->directory(), waterwall_version())),
           core_logs_(database_->directory()),
-          waterwall_bin_(waterwall_bin_directory(database_->directory()))
+          waterwall_bin_(waterwall_bin_directory(database_->directory())), log_panel_events_(log_panel_events)
     {
         data_["settings"]["session_expiry_days"] = database_->session_expiry_days();
         const auto& stored = database_->initial_contents();
@@ -514,8 +516,8 @@ class Preview {
             auto sampled_at = std::chrono::steady_clock::now();
             while (!stop.stop_requested()) {
                 timer_.wait_until(lock, stop, sampled_at + host_sample_interval, [] { return false; });
-                if (stop.stop_requested()) {
-                    return;
+                if (stop.stop_requested() || shutting_down_) {
+                    break;
                 }
                 sampled_at = std::chrono::steady_clock::now();
                 expire_workspace_backup();
@@ -527,7 +529,18 @@ class Preview {
                 }
                 ++revision_;
             }
+            // Linux ties WaterWall's parent-death signal to the thread that started it.
+            core_->shutdown();
         });
+    }
+
+    void request_shutdown()
+    {
+        {
+            std::lock_guard lock(mutex_);
+            shutting_down_ = true;
+        }
+        sampler_.request_stop();
     }
 
     std::string download_workspace_backup()
@@ -1640,6 +1653,11 @@ class Preview {
         char timestamp[9];
         const auto length = std::strftime(timestamp, sizeof(timestamp), "%H:%M:%S", &date);
         add_log("panel", {timestamp, length}, level, message);
+        if (log_panel_events_) {
+            auto line = message;
+            std::ranges::replace_if(line, [](unsigned char ch) { return ch < ' ' || ch == 0x7f; }, ' ');
+            std::osyncstream(std::cerr) << '[' << level << "] " << line << '\n';
+        }
     }
 
     Reply complete(std::string feedback, std::string_view level = "success")
@@ -1955,6 +1973,9 @@ class Preview {
 
     Reply change_core_state(std::string_view action)
     {
+        if (shutting_down_) {
+            return {false, "Wave is shutting down."};
+        }
         if (core_update_) {
             return {false, "Wait for the WaterWall update to finish."};
         }
@@ -3019,6 +3040,7 @@ class Preview {
     std::unique_ptr<WaterWall> core_;
     WaterWallLogs core_logs_;
     std::filesystem::path waterwall_bin_;
+    bool log_panel_events_;
     std::optional<CoreUpdate> core_update_;
     std::optional<PendingWorkspaceBackup> pending_backup_;
     bool workspace_recovery_required_ = false;
@@ -3030,6 +3052,7 @@ class Preview {
     bool queued_catalog_check_ = false;
     bool restart_pending_ = false;
     bool listener_restart_pending_ = false;
+    bool shutting_down_ = false;
     std::string restart_error_;
     std::map<int, Json> live_configs_;
     std::map<std::pair<int, std::string>, LiveUsersAccess> live_users_access_;
@@ -3230,9 +3253,10 @@ void configure_workspace_http_routes(httplib::Server& server, const std::shared_
 } // namespace
 
 PreviewRoutes make_preview_routes(std::shared_ptr<AuthStore> store, std::shared_ptr<PanelDatabase> database,
-                                  PreparePanelRestart prepare_restart, RestartPanel restart_panel)
+                                  PreparePanelRestart prepare_restart, RestartPanel restart_panel,
+                                  bool log_panel_events)
 {
-    const auto preview = std::make_shared<Preview>(database, std::move(prepare_restart));
+    const auto preview = std::make_shared<Preview>(database, std::move(prepare_restart), log_panel_events);
     return {
         [preview, store = std::move(store), database = std::move(database), restart_panel = std::move(restart_panel)](
             httplib::Server& server) {
@@ -3255,6 +3279,7 @@ PreviewRoutes make_preview_routes(std::shared_ptr<AuthStore> store, std::shared_
                              });
         },
         [preview](bool applied) { preview->finish_listener_restart(applied); },
+        [preview] { preview->request_shutdown(); },
     };
 }
 

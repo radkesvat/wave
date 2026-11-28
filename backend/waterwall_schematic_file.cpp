@@ -405,7 +405,7 @@ std::shared_ptr<const WaterWallSchematic> prepare_waterwall_release_schematic(co
     return prepare_waterwall_schematic_file(path);
 }
 
-void select_waterwall_schematic(PanelDatabase& database)
+void select_waterwall_schematic(PanelDatabase& database, bool read_only)
 {
     const auto& directory = database.directory();
     const auto& settings = database.initial_contents();
@@ -416,6 +416,14 @@ void select_waterwall_schematic(PanelDatabase& database)
                                  std::string(bundled_waterwall_version) + '.');
     }
     const auto bin_directory = waterwall_bin_directory(directory);
+    if (read_only) {
+        const auto path = waterwall_schematic_path(bin_directory, version);
+        auto schematic = version == bundled_waterwall_version && missing(path)
+                             ? prepare_waterwall_schematic(Json::parse(bundled_waterwall_schematic_json))
+                             : prepare_waterwall_release_schematic(bin_directory, version);
+        activate_waterwall_schematic(std::move(schematic));
+        return;
+    }
     if (!prepare_directory(bin_directory)) {
         throw std::runtime_error("Cannot create or use WaterWall directory " + bin_directory.string() + '.');
     }

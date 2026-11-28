@@ -19,7 +19,7 @@ std::filesystem::path waterwall_schematic_path(const std::filesystem::path& bin_
 std::shared_ptr<const WaterWallSchematic> prepare_waterwall_schematic_file(const std::filesystem::path& path);
 std::shared_ptr<const WaterWallSchematic> prepare_waterwall_release_schematic(
     const std::filesystem::path& bin_directory, std::string_view version);
-void select_waterwall_schematic(PanelDatabase& database);
+void select_waterwall_schematic(PanelDatabase& database, bool read_only = false);
 void load_waterwall_schematic_file(const std::filesystem::path& path);
 
 } // namespace wave

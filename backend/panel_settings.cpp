@@ -380,6 +380,9 @@ std::optional<TlsSettings> load_tls(const Json& settings)
 fs::path database_directory(const char* executable, const fs::path& site_dir)
 {
     const auto directory = executable_path(executable).parent_path();
+    if (site_dir.empty()) {
+        return directory;
+    }
     const auto path = directory / database_name;
     const auto relative = path.lexically_relative(fs::weakly_canonical(fs::absolute(site_dir)));
     if (!relative.empty() && *relative.begin() != "..") {
@@ -501,6 +504,13 @@ struct PanelDatabase::Impl {
         save(current);
     }
 
+    void publish_listener() const
+    {
+        if (listener_observer) {
+            listener_observer(settings, base_path);
+        }
+    }
+
     fs::path directory;
     fs::path site_dir;
     DatabaseFile file;
@@ -508,6 +518,7 @@ struct PanelDatabase::Impl {
     Json contents;
     PanelSettings settings{};
     std::string base_path;
+    std::function<void(const PanelSettings&, std::string_view)> listener_observer;
     int session_expiry_days = default_session_expiry_days;
     bool listener_restart_pending = false;
 };
@@ -541,6 +552,13 @@ std::string PanelDatabase::panel_base_path() const
     return impl_->base_path;
 }
 
+void PanelDatabase::observe_listener(std::function<void(const PanelSettings&, std::string_view)> publish)
+{
+    std::lock_guard lock(impl_->write_mutex);
+    impl_->listener_observer = std::move(publish);
+    impl_->publish_listener();
+}
+
 bool PanelDatabase::save_panel_base_path(std::string_view previous, std::string_view path)
 {
     if (!valid_panel_base_path(path)) {
@@ -562,6 +580,7 @@ bool PanelDatabase::save_panel_base_path(std::string_view previous, std::string_
     current[panel_base_path_key] = next;
     impl_->save(current);
     impl_->base_path = std::move(next);
+    impl_->publish_listener();
     return true;
 }
 
@@ -825,6 +844,7 @@ void PanelDatabase::save_workspace_restore(const Json& manifest, const Json& res
     impl_->save(current);
     impl_->base_path = std::move(path);
     impl_->session_expiry_days = expiry;
+    impl_->publish_listener();
 }
 
 } // namespace wave

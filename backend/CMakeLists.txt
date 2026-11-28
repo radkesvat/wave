@@ -87,7 +87,7 @@ target_compile_features(wave-backup-archive PRIVATE cxx_std_20)
 target_link_libraries(wave-backup-archive PRIVATE wave-miniz)
 
 add_executable(wave-backend
-    main.cpp panel_settings.cpp panel_update.cpp preview.cpp linux_metrics.cpp auth.cpp auth_store.cpp
+    main.cpp local_cli.cpp panel_settings.cpp panel_update.cpp preview.cpp linux_metrics.cpp auth.cpp auth_store.cpp
     workspace_backup.cpp
     waterwall.cpp waterwall_install.cpp waterwall_logs.cpp waterwall_users.cpp users_roster.cpp users_roster_stream.cpp
     core_config_files.cpp core_config_graph.cpp core_config_users.cpp console.cpp
@@ -125,3 +125,6 @@ configure_file(bundled_waterwall_schematic.h.in
     "${PROJECT_BINARY_DIR}/generated/bundled_waterwall_schematic.h" @ONLY)
 configure_file("${utf8proc_SOURCE_DIR}/LICENSE.md" "${CMAKE_BINARY_DIR}/licenses/utf8proc.txt" COPYONLY)
 configure_file("${miniz_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/licenses/miniz.txt" COPYONLY)
+configure_file("${httplib_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/licenses/cpp-httplib.txt" COPYONLY)
+configure_file("${argon2_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/licenses/argon2.txt" COPYONLY)
+configure_file("${zxcvbn_SOURCE_DIR}/LICENSE.txt" "${CMAKE_BINARY_DIR}/licenses/zxcvbn-c.txt" COPYONLY)

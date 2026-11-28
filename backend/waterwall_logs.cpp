@@ -94,7 +94,7 @@ WaterWallLogs::WaterWallLogs(const std::filesystem::path& directory) : directory
 {
 }
 
-void WaterWallLogs::start(const nlohmann::json& settings)
+void WaterWallLogs::start(const nlohmann::json& settings, bool include_existing)
 {
     stop();
     active_ = true;
@@ -116,9 +116,11 @@ void WaterWallLogs::start(const nlohmann::json& settings)
         }
     }
     update_files(local_date());
-    for (auto& logger : loggers_) {
-        for (auto& file : logger.files) {
-            read_file(file, true);
+    if (!include_existing) {
+        for (auto& logger : loggers_) {
+            for (auto& file : logger.files) {
+                read_file(file, true);
+            }
         }
     }
 }
