@@ -259,7 +259,8 @@ For existing deployments, Wave imports missing schematics from
 It imports the legacy `waterwall_bin/Waterwall` into the 1.6.0 directory.
 Version-folder files take precedence and the legacy originals are preserved.
 You can preselect a release by setting `waterwall_version` in `wave-db.json`
-with the Wave backend stopped. Wave loads 1.6.0 when the property is absent.
+with the Wave backend stopped. If the property is absent, Wave loads 1.6.0
+and saves that selection after validating its schematic on startup.
 
 Refer to
 [Panel Controls and versioning](building.md#panel-controls-and-versioning)

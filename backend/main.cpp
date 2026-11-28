@@ -159,7 +159,7 @@ int main(int argc, char* argv[])
         } else {
             server = std::make_unique<httplib::Server>();
         }
-        wave::select_waterwall_schematic(database->directory(), database->initial_contents());
+        wave::select_waterwall_schematic(*database);
         store = std::make_shared<wave::AuthStore>(database);
         wave::configure_authenticated_routes(*server, options.site_dir, store, database, secure, authority);
     } catch (const std::exception& error) {

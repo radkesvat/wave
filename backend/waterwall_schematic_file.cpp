@@ -3,6 +3,7 @@
 #include "bundled_waterwall_schematic.h"
 #include "core_config_users.h"
 #include "core_settings.h"
+#include "panel_settings.h"
 #include "private_temp_directory.h"
 #include "waterwall_schematic.h"
 #include "waterwall_users.h"
@@ -404,8 +405,10 @@ std::shared_ptr<const WaterWallSchematic> prepare_waterwall_release_schematic(co
     return prepare_waterwall_schematic_file(path);
 }
 
-void select_waterwall_schematic(const fs::path& directory, const Json& settings)
+void select_waterwall_schematic(PanelDatabase& database)
 {
+    const auto& directory = database.directory();
+    const auto& settings = database.initial_contents();
     const auto selected = settings.find("waterwall_version");
     const auto version = selected == settings.end() ? bundled_waterwall_version : schematic_text(*selected);
     if (!valid_waterwall_version(version)) {
@@ -422,6 +425,9 @@ void select_waterwall_schematic(const fs::path& directory, const Json& settings)
     seed_schematic(bundled, write_bundled_schematic);
     auto schematic = prepare_waterwall_release_schematic(bin_directory, version);
     migrate_legacy_binary(bin_directory);
+    if (selected == settings.end()) {
+        database.save_waterwall_version(version);
+    }
     activate_waterwall_schematic(std::move(schematic));
 }
 

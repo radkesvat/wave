@@ -376,8 +376,10 @@ Wave and WaterWall have independent versions. **Server Information** shows
 the running Wave version, the selected WaterWall version, and the latest known
 version of each. A warning-colored dot marks a newer version. The selected
 WaterWall version also appears in **Panel Controls**, **Settings → Core**, and
-**Version information**. The backend uses one active WaterWall schematic. The
-default selection is 1.6.0.
+**Version information**. The backend uses one active WaterWall schematic.
+When `wave-db.json` lacks `waterwall_version`, startup selects 1.6.0 and
+saves it after validating its schematic. Wave reuses the saved selection on
+later starts.
 
 Wave's panel version comes from `project(Wave VERSION ...)` in `CMakeLists.txt`.
 Set `WAVE_VERSION_CHANNEL` to `beta` for a beta build or leave it empty for a

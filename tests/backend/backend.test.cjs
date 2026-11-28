@@ -202,8 +202,10 @@ test('selects a base path on first run and scopes the configured panel routes', 
     const fresh = JSON.parse(await readFile(fixture.database, 'utf8'));
     assert.deepEqual(fresh.admin, []);
     assert.equal(fresh['panel-base-path'], undefined);
+    assert.equal(fresh.waterwall_version, undefined);
     await writeFile(fixture.database, JSON.stringify({ ...fresh, ...loopback }));
     await fixture.start();
+    assert.equal(JSON.parse(await readFile(fixture.database, 'utf8')).waterwall_version, '1.6.0');
 
     const { request, post } = panelClient(fixture.origin);
     const chosen = '/chosen';
@@ -828,13 +830,21 @@ test('seeds the embedded schematic on first startup under umask 0002 and uses a 
     const previous = process.umask(0o002);
     try {
         const fixture = await authFixture(t, undefined, { encrypted: false, prepareCore: false });
-        const settings = JSON.parse(await readFile(fixture.database, 'utf8'));
-        await writeFile(fixture.database, JSON.stringify({ ...settings, waterwall_install_attempted: true }));
+        const settings = {
+            ...JSON.parse(await readFile(fixture.database, 'utf8')),
+            admin: [],
+            waterwall_install_attempted: true,
+            panel_name: 'Fixture',
+        };
+        await writeFile(fixture.database, JSON.stringify(settings));
         const cached = schematicFile(fixture.backend);
         assert.deepEqual((await readdir(dirname(fixture.backend))).sort(),
             [basename(fixture.backend), basename(fixture.database)].sort());
 
         await fixture.start();
+        assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')), {
+            ...settings, waterwall_version: '1.6.0',
+        });
         const original = await readFile(bundledSchematicFile, 'utf8');
         assert.equal(await readFile(cached, 'utf8'), original);
         assert.deepEqual(await readdir(dirname(cached)), ['waterwall-1.6.0.json']);
@@ -1281,6 +1291,7 @@ test('finds core updates, keeps the active release on failure, and reloads the s
         assert.equal(reopened.initial.server.core.version, selected.version);
         assert.equal(reopened.initial.server.core.state, 'stopped');
         assert.equal(reopened.schematic.version, selected.version);
+        assert.equal(JSON.parse(await readFile(fixture.database, 'utf8')).waterwall_version, selected.version);
         const omitted = await requestPreview(reopened.socket, 'apply_core_settings', {
             schematic_revision: undefined, settings: { misc: { workers: 4 } },
         });
@@ -2945,11 +2956,14 @@ test('rejects startup when the selected schematic is missing or invalid', async 
     assert.equal(await readFile(db, 'utf8'), settings);
     assert.deepEqual(await readdir(dirname(selected)), ['waterwall-1.6.1.json']);
 
-    await writeFile(db, JSON.stringify({ ...JSON.parse(settings), waterwall_version: '1.6.0' }));
+    const unpinned = JSON.parse(settings);
+    delete unpinned.waterwall_version;
+    await writeFile(db, JSON.stringify(unpinned));
     const cachedDefault = schematicFile(executable);
     const invalidDefault = bundled.replace('"schema_version": 1', '"schema_version": 2');
     await writeWithMode(cachedDefault, invalidDefault);
     await expectStartupFailure(site, /waterwall-1\.6\.0\.json.*Unsupported schematic format/, executable);
+    assert.deepEqual(JSON.parse(await readFile(db, 'utf8')), unpinned);
     assert.equal(await readFile(cachedDefault, 'utf8'), invalidDefault);
 });
 
