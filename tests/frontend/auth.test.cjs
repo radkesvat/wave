@@ -4,6 +4,7 @@ const { test } = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
 const { chromium } = require('playwright-core');
 const { authFixture, fixtureSession, timeout } = require('../backend/auth_fixture.cjs');
+const { selectPanelTheme, waitForTheme } = require('./workspace_fixture.cjs');
 
 const viewport = { width: 1280, height: 800 };
 
@@ -16,7 +17,7 @@ function settleCanvas(page) {
 }
 
 async function matchingPixels(page, clip, color) {
-    const image = await page.screenshot({ clip });
+    const image = await page.screenshot({ clip, scale: 'css' });
     return page.evaluate(async ({ content, color }) => {
         const bitmap = await createImageBitmap(new Blob([Uint8Array.from(atob(content), c => c.charCodeAt(0))]));
         const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
@@ -146,6 +147,35 @@ async function submitBasePath(page, value) {
     await page.keyboard.press('Enter');
 }
 
+async function phoneAuthFixture(t, viewport, userAgent) {
+    assert.ok(process.env.WAVE_SITE_DIR, 'Set WAVE_SITE_DIR to a built Wave frontend.');
+    const fixture = await authFixture(t, process.env.WAVE_SITE_DIR, { encrypted: false });
+    await fixture.start();
+    const panel = fixture.origin + fixture.basePath + '/';
+    const credentials = { username: 'ada', password: 'tF6! gmq2Y' };
+    const setup = await fetch(panel + 'api/auth/setup', {
+        method: 'POST',
+        headers: { Origin: fixture.origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json' },
+        body: JSON.stringify(credentials),
+        signal: AbortSignal.timeout(timeout),
+    });
+    assert.equal(setup.status, 201);
+
+    const browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader'] });
+    t.after(() => browser.close());
+    const phone = await browser.newPage({ viewport, deviceScaleFactor: 3, isMobile: true, hasTouch: true, userAgent });
+    return { panel, credentials, browser, phone };
+}
+
+async function expectSessionCheck(page) {
+    await waitForStatus(page, 'Checking the session…');
+    await settleCanvas(page);
+    const { width, height } = page.viewportSize();
+    const caption = await matchingPixels(page, { x: width / 2 - 125, y: height / 2 - 30, width: 250, height: 90 },
+        [181, 180, 197]);
+    assert.ok(caption.length, 'The session check is visible near the center of the page.');
+}
+
 async function waitForShellExit(pid) {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
@@ -201,30 +231,33 @@ test('animates the sign-in background and keeps it still with reduced motion', a
 });
 
 test('docks the phone keyboard and enters sign-in credentials in the focused fields', async t => {
-    assert.ok(process.env.WAVE_SITE_DIR, 'Set WAVE_SITE_DIR to a built Wave frontend.');
-    const fixture = await authFixture(t, process.env.WAVE_SITE_DIR, { encrypted: false });
-    await fixture.start();
-    const panel = fixture.origin + fixture.basePath + '/';
-    const credentials = { username: 'ada', password: 'tF6! gmq2Y' };
-    const setup = await fetch(panel + 'api/auth/setup', {
-        method: 'POST',
-        headers: { Origin: fixture.origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json' },
-        body: JSON.stringify(credentials),
-        signal: AbortSignal.timeout(timeout),
-    });
-    assert.equal(setup.status, 201);
-
-    const browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader'] });
-    t.after(() => browser.close());
-    const phoneSize = { width: 390, height: 844 };
-    const phone = await browser.newPage({ viewport: phoneSize, isMobile: true, hasTouch: true,
-        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1',
-    });
+    const phoneSize = { width: 320, height: 568 };
+    const viewportLimit = 4096;
+    const { panel, credentials, browser, phone } = await phoneAuthFixture(t, phoneSize,
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1');
+    await phone.addInitScript(limit => {
+        // Model a GPU where the sign-in buffer fits and the taller workspace buffer exceeds the limit.
+        const webgl = WebGL2RenderingContext.prototype;
+        const getParameter = webgl.getParameter;
+        webgl.getParameter = function (parameter) {
+            if (parameter === this.MAX_VIEWPORT_DIMS) return new Int32Array([limit, limit]);
+            if (parameter === this.MAX_RENDERBUFFER_SIZE || parameter === this.MAX_TEXTURE_SIZE) return limit;
+            return getParameter.call(this, parameter);
+        };
+        for (const dimension of ['width', 'height']) {
+            const canvas = HTMLCanvasElement.prototype;
+            const property = Object.getOwnPropertyDescriptor(canvas, dimension);
+            Object.defineProperty(canvas, dimension, {
+                ...property,
+                set(value) { property.set.call(this, this.id === 'canvas' ? Math.min(limit, value) : value); },
+            });
+        }
+    }, viewportLimit);
     const keyboard = phone.locator('#wave-keyboard');
     const input = phone.locator('#wave-text-input');
     const key = name => keyboard.getByRole('button', { name, exact: true });
     const press = name => key(name).tap({ timeout });
-    const fields = page => visibleInputs(page, 110, phoneSize.height - 30, 290);
+    const fields = page => visibleInputs(page, 110, phoneSize.height - 30, phoneSize.width - 45);
 
     await phone.goto(panel);
     await waitForStatus(phone, 'Sign in to Wave. Welcome.');
@@ -290,6 +323,27 @@ test('docks the phone keyboard and enters sign-in credentials in the focused fie
     assert.equal(reply.status(), 204);
     await waitForStatus(phone, /Wave Server Status.*CPU/);
     await keyboard.waitFor({ state: 'hidden', timeout });
+    await settleCanvas(phone);
+    const surface = await phone.locator('#canvas').evaluate(canvas => {
+        const { width, height } = canvas.getBoundingClientRect();
+        const { drawingBufferWidth, drawingBufferHeight } = canvas.getContext('webgl2');
+        return { width, height, dpr: devicePixelRatio, drawingBufferWidth, drawingBufferHeight };
+    });
+    assert.ok(surface.height * surface.dpr > viewportLimit, 'The full-density workspace exceeds the GPU limit.');
+    assert.ok(surface.drawingBufferHeight > 0 && surface.drawingBufferHeight <= viewportLimit,
+        'The workspace backing height fits the GPU limit.');
+    const scaledWidth = surface.width * surface.drawingBufferHeight / surface.height;
+    assert.ok(Math.abs(surface.drawingBufferWidth - scaledWidth) <= 1,
+        'Both workspace backing dimensions use the same scale.');
+    const headerInk = (x, width) => matchingPixels(phone, { x, y: 12, width, height: 24 }, [234, 235, 255]);
+    assert.ok((await headerInk(105, 50)).length, 'Menu remains visible after the workspace resizes the canvas.');
+    assert.ok((await headerInk(157, 50)).length, 'Tools remains visible after the workspace resizes the canvas.');
+    await phone.touchscreen.tap(130, 25);
+    await phone.locator('#menu[aria-expanded="true"]').waitFor({ timeout });
+    await phone.touchscreen.tap(130, 25);
+    await phone.locator('#menu[aria-expanded="false"]').waitFor({ timeout });
+    await phone.touchscreen.tap(142, 146);
+    await waitForStatus(phone, /Wave Settings\. Panel tab\./);
     await phone.close();
 
     const desktop = await browser.newPage({ viewport: phoneSize, hasTouch: true });
@@ -300,6 +354,115 @@ test('docks the phone keyboard and enters sign-in credentials in the focused fie
     await desktop.locator('#wave-text-input').waitFor({ timeout });
     assert.equal(await desktop.locator('#wave-keyboard').isVisible(), false,
         'A narrow desktop browser keeps its regular text input.');
+});
+
+test('uses the phone workspace over HTTP while both sockets are unavailable and detects sign-out', async t => {
+    const phoneSize = { width: 414, height: 896 };
+    const { panel, credentials, phone } = await phoneAuthFixture(t, phoneSize,
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/145.0.0.0 Mobile/15E148 Safari/604.1');
+    let monitorAttempts = 0;
+    await phone.routeWebSocket('**/ws/panel', () => { ++monitorAttempts; });
+    await phone.routeWebSocket('**/ws/workspace', socket => socket.close({ code: 1011 }));
+    const sessionEndpoint = panel + 'api/session';
+    const workspaceEndpoint = panel + 'api/workspace';
+    const workspaceRequest = (request, method) =>
+        request.url().split('?')[0] === workspaceEndpoint && request.method() === method;
+    const workspaceRead = () => phone.waitForResponse(reply => workspaceRequest(reply.request(), 'GET'), { timeout });
+    const heldSession = await holdFirstAuthRequest(phone, sessionEndpoint);
+
+    await phone.goto(panel);
+    await waitForStatus(phone, 'Sign in to Wave. Welcome.');
+    for (const [index, value] of [credentials.username, credentials.password].entries()) {
+        const fields = await visibleInputs(phone, 110, phoneSize.height - 30, phoneSize.width - 45);
+        assert.equal(fields.length, 2);
+        const { x, y } = fields[index];
+        await phone.touchscreen.tap(x, y);
+        await phone.locator('#wave-text-input').waitFor({ timeout });
+        await phone.keyboard.insertText(value);
+        await settleCanvas(phone);
+    }
+    const signIn = phone.waitForResponse('**/api/auth/sign-in', { timeout });
+    await phone.locator('#wave-keyboard').getByRole('button', { name: 'Return', exact: true }).tap({ timeout });
+    assert.equal((await signIn).status(), 204);
+
+    const initialWorkspace = workspaceRead();
+    let identity;
+    try {
+        await expectSessionCheck(phone);
+        identity = phone.waitForResponse(sessionEndpoint, { timeout });
+    } finally {
+        heldSession.release();
+    }
+    const response = await identity;
+    assert.equal(monitorAttempts, 1, 'The session socket connected without delivering an identity.');
+    assert.equal(response.status(), 200);
+    const session = await response.json();
+    assert.equal(session.username, credentials.username);
+    assert.ok(session.session_id);
+    const initial = await initialWorkspace;
+    assert.equal(initial.status(), 200);
+    assert.equal(await initial.request().headerValue('X-Wave-Session'), session.session_id);
+    const snapshot = await initial.json();
+    assert.equal(snapshot.type, 'snapshot');
+    assert.ok(snapshot.workspace_id);
+    assert.equal(snapshot.users_roster, false);
+    await waitForStatus(phone, /Wave Server Status.*CPU/);
+    await phone.touchscreen.tap(200, 146);
+    await waitForStatus(phone, /Wave Settings\. Panel tab\./);
+
+    const saves = [];
+    const tap = async (x, y) => {
+        await phone.touchscreen.tap(x, y);
+        await settleCanvas(phone);
+    };
+    phone.on('request', request => {
+        if (workspaceRequest(request, 'POST')) saves.push(request);
+    });
+    const savedTheme = phone.waitForResponse(reply => workspaceRequest(reply.request(), 'POST'), { timeout });
+    await selectPanelTheme(phone, 'Light', tap);
+    const save = await savedTheme;
+    assert.equal(save.status(), 200);
+    const request = save.request();
+    assert.equal(await request.headerValue('X-Wave-CSRF'), '1');
+    assert.equal(await request.headerValue('X-Wave-Session'), session.session_id);
+    assert.equal(await request.headerValue('X-Wave-Workspace'), snapshot.workspace_id);
+    const submission = request.postDataJSON();
+    assert.equal(submission.action, 'apply_theme');
+    assert.equal(submission.theme, 'light');
+    const reply = await save.json();
+    assert.equal(reply.request_id, submission.request_id);
+    assert.equal(reply.ok, true);
+    assert.equal(reply.data.settings.theme, 'light');
+    await waitForTheme(phone, 'f0f2f7');
+    const refreshed = await workspaceRead();
+    assert.equal(refreshed.status(), 200);
+    assert.equal((await refreshed.json()).data.settings.theme, 'light');
+
+    // Lose the acknowledgement after the server applies the action. Polling should recover the saved state.
+    let savedBeforeDisconnect;
+    await phone.route(workspaceEndpoint, async route => {
+        savedBeforeDisconnect = await route.fetch();
+        await route.abort();
+    }, { times: 1 });
+    const originalTheme = snapshot.data.settings.theme;
+    const recovered = phone.waitForResponse(async reply => reply.ok() && workspaceRequest(reply.request(), 'GET') &&
+        (await reply.json()).data.settings.theme === originalTheme, { timeout });
+    await selectPanelTheme(phone, 'Default', tap);
+    await recovered;
+    assert.equal(savedBeforeDisconnect.status(), 200);
+    assert.equal((await savedBeforeDisconnect.json()).ok, true);
+    await waitForTheme(phone, '080c10');
+
+    const expired = phone.waitForResponse(reply => reply.status() === 401 &&
+        (reply.url() === sessionEndpoint || workspaceRequest(reply.request(), 'GET')), { timeout });
+    const signedOut = await phone.request.post(panel + 'api/auth/sign-out', {
+        headers: { Origin: new URL(panel).origin, 'X-Wave-CSRF': '1' },
+        data: {},
+    });
+    assert.equal(signedOut.status(), 204);
+    assert.equal((await expired).status(), 401);
+    await waitForStatus(phone, 'Sign in to Wave. Welcome.');
+    assert.equal(saves.length, 2, 'Polling never replays even an unconfirmed action.');
 });
 
 test('sets a panel base path, authenticates an administrator and closes the terminal on sign-out', async t => {
@@ -319,6 +482,10 @@ test('sets a panel base path, authenticates an administrator and closes the term
             await sessionGate.promise;
             socket.send(message);
         });
+    });
+    await page.route('**/api/session', async route => {
+        await sessionGate.promise;
+        await route.continue();
     });
 
     await page.goto(fixture.origin + '/');
@@ -410,10 +577,8 @@ test('sets a panel base path, authenticates an administrator and closes the term
     }
     assert.equal((await acceptedSignIn).status(), 204);
     try {
-        await waitForStatus(page, 'Checking the session…');
+        await expectSessionCheck(page);
         await expectEntryTitleStrip(page);
-        const indicator = await matchingPixels(page, { x: 12, y: 60, width: 24, height: 36 }, [81, 165, 246]);
-        assert.equal(indicator.length, 0, 'The page body stays clear while checking the session.');
     } finally {
         sessionGate.resolve();
     }

@@ -33,7 +33,6 @@ constexpr std::string_view websocket_routes[] = {"/ws", panel_socket, "/ws/conso
                                                   "/ws/workspace"};
 constexpr std::string_view sign_in_route = "/api/auth/sign-in";
 constexpr std::string_view base_path_route = "/api/auth/base-path";
-constexpr std::size_t max_panel_json_bytes = 4096;
 
 struct SiteAsset {
     std::string_view path;
@@ -81,7 +80,7 @@ Access route_access(std::string_view route, std::string_view method, bool bootst
             return Access::entry;
         }
         return route == "/api/auth/admin" || route == base_path_route || route == backup_prepare_route ||
-                       route == backup_apply_route
+                       route == backup_apply_route || route == workspace_http_route
                    ? Access::authenticated
                    : Access::missing;
     }
@@ -104,7 +103,9 @@ Access route_access(std::string_view route, std::string_view method, bool bootst
     if (std::ranges::find(websocket_routes, route) != std::end(websocket_routes)) {
         return Access::websocket;
     }
-    return route == "/api/session" || route == backup_download_route ? Access::authenticated : Access::missing;
+    return route == "/api/session" || route == backup_download_route || route == workspace_http_route
+               ? Access::authenticated
+               : Access::missing;
 }
 
 std::string_view setup_page(bool installed, bool authenticated)
@@ -231,7 +232,8 @@ std::string_view credential(const Json& input, const char* name)
 
 Json session_data(const AuthStore::Session& session)
 {
-    return {{"type", "session"}, {"username", session.username}, {"expires_at", session.expires_at}};
+    return {{"type", "session"}, {"username", session.username}, {"expires_at", session.expires_at},
+            {"session_id", session.id}};
 }
 
 } // namespace
@@ -262,14 +264,14 @@ std::string authenticated_session_id(const std::shared_ptr<AuthStore>& store, co
     return session ? session->id : std::string{};
 }
 
-void post_panel_json(Server& server, const std::string& route, PanelJsonHandler handler)
+void post_panel_json(Server& server, const std::string& route, PanelJsonHandler handler, std::size_t body_limit)
 {
-    server.Post(route, [handler = std::move(handler)](const Request& req, Response& res,
-                                                      const httplib::ContentReader& read) {
+    server.Post(route, [handler = std::move(handler), body_limit](const Request& req, Response& res,
+                                                                 const httplib::ContentReader& read) {
         std::string body;
         bool too_large = false;
         if (!read([&](const char* data, std::size_t size) {
-                if (size > max_panel_json_bytes - body.size()) {
+                if (size > body_limit - body.size()) {
                     too_large = true;
                     return false;
                 }
@@ -342,7 +344,9 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
             return reject(res, 401);
         }
         // JSON routes also enforce their limit while reading chunked bodies.
-        const auto body_limit = suffix == backup_prepare_route ? max_backup_archive_bytes : max_panel_json_bytes;
+        const auto body_limit = suffix == backup_prepare_route    ? max_backup_archive_bytes
+                                : suffix == workspace_http_route ? max_workspace_action_bytes
+                                                                 : max_panel_json_bytes;
         if (req.get_header_value_u64("Content-Length") > body_limit ||
             (read && req.has_header("Transfer-Encoding"))) {
             return reject(res, 413);
@@ -517,10 +521,7 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
             socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
             return;
         }
-        auto identity = session_data(*session);
-        // The record ID identifies this sign-in. Authenticating requires the signed cookie.
-        identity["session_id"] = session->id;
-        if (!socket.send(identity.dump())) {
+        if (!socket.send(session_data(*session).dump())) {
             return;
         }
         socket.set_read_timeout(1);

@@ -1,6 +1,7 @@
 #include "entry_view.h"
 
 #include "auth_session.h"
+#include "browser_ui.h"
 #include "dialog.h"
 #include "panel_base_path.h"
 #include "view_helpers.h"
@@ -112,6 +113,13 @@ const char* title(EntryPage page)
 void render_entry(EntryViewState& state, AuthSession& session, float entry_top)
 {
     if (state.page == EntryPage::checking) {
+        const auto viewport = visible_canvas();
+        const auto size = ImGui::CalcTextSize(checking_message);
+        const float top = std::max(viewport.top, entry_top);
+        ImGui::GetWindowDrawList()->AddText(
+            {viewport.left + std::max(0.0f, (viewport.width - size.x) * 0.5f),
+             top + std::max(0.0f, (viewport.top + viewport.height - top - size.y) * 0.5f)},
+            theme::packed(Color::secondary_text), checking_message);
         return;
     }
     if (state.page == EntryPage::sign_in) {

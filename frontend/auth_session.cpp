@@ -60,40 +60,80 @@ EM_JS(void, monitor_session, (AuthSession* session), {
     });
     const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
     const basePath = Module['basePath'];
+    const panelUrl = basePath + '/';
+    const reconnectDelay = 2000;
+    const applyIdentity = data => {
+        if (data?.type !== 'session' || typeof data.username !== 'string' || !data.username ||
+            typeof data.session_id !== 'string' || !data.session_id) {
+            return false;
+        }
+        const username = stringToNewUTF8(data.username);
+        const id = stringToNewUTF8(data.session_id);
+        Module['_wave_auth_identity'](session, username, id);
+        _free(id);
+        _free(username);
+        return true;
+    };
     const connect = () => {
         if (Module['panelLocationPending']()) return;
-        const socket = new WebSocket(protocol + location.host + basePath + '/ws/panel');
+        let deadline;
+        let finished = false;
+        let identified = false;
+        const recover = async code => {
+            if (finished || Module['panelLocationPending']()) return;
+            finished = true;
+            clearTimeout(deadline);
+            if (identified || code === 1008) Module['_wave_auth_identity'](session, 0, 0);
+            if (code === 1008) {
+                location.replace(panelUrl);
+                return;
+            }
+            // Verify with the signed cookie when the monitor is unavailable or never sends identity.
+            let valid = false;
+            try {
+                const response = await fetch(panelUrl + 'api/session', {
+                    mode: 'same-origin', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+                    signal: AbortSignal.timeout(5000),
+                });
+                if (Module['panelLocationPending']()) return;
+                if (response.status === 401) {
+                    Module['_wave_auth_identity'](session, 0, 0);
+                    location.replace(panelUrl);
+                    return;
+                }
+                if (response.ok) {
+                    const data = await response.json();
+                    if (Module['panelLocationPending']()) return;
+                    valid = applyIdentity(data);
+                }
+            } catch {}
+            if (Module['panelLocationPending']()) return;
+            if (!valid) Module['_wave_auth_identity'](session, 0, 0);
+            setTimeout(connect, reconnectDelay);
+        };
+        let socket;
+        try {
+            socket = new WebSocket(protocol + location.host + basePath + '/ws/panel');
+        } catch {
+            recover();
+            return;
+        }
+        deadline = setTimeout(() => {
+            recover();
+            socket.close();
+        }, reconnectDelay);
         socket.addEventListener('message', event => {
-            const data = JSON.parse(event.data);
-            if (data.type === 'session' && typeof data.username === 'string') {
-                const username = stringToNewUTF8(data.username);
-                const id = typeof data.session_id === 'string' ? stringToNewUTF8(data.session_id) : 0;
-                Module['_wave_auth_identity'](session, username, id);
-                _free(id);
-                _free(username);
-            } else if (data.type === 'base_path' && typeof data.path === 'string' && data.path !== basePath) {
+            if (finished || Module['panelLocationPending']()) return;
+            let data;
+            try { data = JSON.parse(event.data); } catch { return; }
+            if (applyIdentity(data)) {
+                identified = true;
+                clearTimeout(deadline);
+            } else if (data?.type === 'base_path' && typeof data.path === 'string' && data.path !== basePath) {
                 Module['followPanelLocation'](data.path + '/');
             }
         });
-        socket.addEventListener('close', async event => {
-            if (Module['panelLocationPending']()) return;
-            Module['_wave_auth_identity'](session, 0, 0);
-            if (event.code === 1008) {
-                location.replace(basePath + '/');
-                return;
-            }
-            // A failed upgrade has no HTTP status in the WebSocket API.
-            try {
-                const response = await fetch(basePath + '/api/session', {
-                    credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(5000),
-                });
-                if (response.status === 401) {
-                    location.replace(basePath + '/');
-                    return;
-                }
-            } catch {}
-            setTimeout(connect, 2000);
-        });
+        socket.addEventListener('close', event => recover(event.code));
     };
     connect();
 });

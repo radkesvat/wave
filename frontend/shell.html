@@ -220,6 +220,8 @@
         text-align: center;
       }
 
+      .startup-message[data-transition] { position: fixed; }
+
       [hidden] { display: none !important; }
     </style>
   </head>
@@ -271,6 +273,45 @@
           openingPanelLocation = true;
           location.replace(location.origin + path);
           return true;
+        }
+
+        async function followPanelHttps(destination) {
+          if (openingPanelLocation || location.protocol !== "http:") return;
+          let target;
+          try { target = new URL(destination); } catch { return; }
+          if (target.protocol !== "https:" || target.username || target.password || target.search || target.hash ||
+              !/^(?:\/[A-Za-z0-9_-]+)+\/$/.test(target.pathname)) return;
+
+          openingPanelLocation = true;
+          setTextInput(false);
+          canvas.style.visibility = "hidden";
+          controls.hidden = true;
+          startup.dataset.transition = "";
+          startup.textContent = "Switching Wave to HTTPS…";
+          startup.hidden = false;
+
+          // Wait for the replacement listener. The target may have a different hostname.
+          const deadline = performance.now() + 12000;
+          while (performance.now() < deadline) {
+            try {
+              await fetch(target.href, { mode: "no-cors", credentials: "omit", cache: "no-store",
+                referrerPolicy: "no-referrer", signal: AbortSignal.timeout(1500) });
+              location.replace(target.href);
+              return;
+            } catch {}
+            await new Promise(resolve => setTimeout(resolve, 350));
+          }
+
+          // If the original listener recovered, reload it to show the server's restart error.
+          try {
+            const old = await fetch(basePath + "/api/session", { cache: "no-store", signal: AbortSignal.timeout(1500) });
+            if (old.ok) {
+              location.reload();
+              return;
+            }
+          } catch {}
+          // A top-level navigation can display certificate and connectivity errors from the browser.
+          location.replace(target.href);
         }
 
         const canvas = document.getElementById("canvas");
@@ -1005,7 +1046,7 @@
         window.addEventListener("error", showStartupError, true);
         window.addEventListener("unhandledrejection", showStartupError);
         return {
-          basePath, followPanelLocation, panelLocationPending,
+          basePath, followPanelLocation, followPanelHttps, panelLocationPending,
           canvas, showPanel, updateDescription, registerHeaderControls, registerPanelPage, updateNavigation,
           updateConfigLinks, updateConfigTabs,
           panelFocus, setTextInput, updateKeyboardState, contentViewport, installTextInput, copyText,

@@ -832,6 +832,91 @@ test('sends the selected schematic only in the first authenticated workspace sna
     assert.deepEqual((await connectPreview(t, fixture.origin, session)).schematic, bundled);
 });
 
+test('serves authenticated workspace snapshots and actions over HTTP with session and workspace checks', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false, basePath: '/test/wave' });
+    await fixture.start();
+    const cookie = await fixtureSession(fixture);
+    const { request, post } = panelClient(fixture.origin);
+    const route = fixture.basePath + '/api/workspace';
+    const identity = await request(fixture.basePath + '/api/session', { headers: { Cookie: cookie } });
+    assert.equal(identity.status, 200);
+    const sessionId = (await identity.json()).session_id;
+    const headers = { Cookie: cookie, 'X-Wave-Session': sessionId };
+
+    assert.equal((await request(route, { headers: { 'X-Wave-Session': sessionId } })).status, 401);
+    assert.equal((await request(route, { headers: { Cookie: cookie } })).status, 401);
+    assert.equal((await request(route, { headers: { ...headers, 'X-Wave-Session': 'different-sign-in' } })).status, 401);
+    await assertNotFound(await request('/api/workspace', { headers }));
+
+    const snapshot = async (query = '') => {
+        const response = await request(route + query, { headers });
+        assert.equal(response.status, 200);
+        assert.equal(response.headers.get('cache-control'), 'no-store');
+        const frame = await response.json();
+        assert.equal(frame.type, 'snapshot');
+        assert.equal(frame.users_roster, false);
+        return frame;
+    };
+    const first = await snapshot();
+    assert.equal(first.data.settings.theme, 'default');
+    assert.ok(first.workspace_id);
+    assert.equal(first.schematic.version, first.data.server.core.version);
+    const known = `?workspace_id=${encodeURIComponent(first.workspace_id)}&schematic_revision=${first.schematic_revision}`;
+    assert.equal((await snapshot(known)).schematic, undefined);
+    assert.equal((await snapshot(`?schematic_revision=${first.schematic_revision}`)).schematic.version, first.schematic.version);
+    assert.equal((await request(`${route}?schematic_revision=-1`, { headers })).status, 400);
+
+    const actionHeaders = { ...headers, 'X-Wave-Workspace': first.workspace_id };
+    const action = { action: 'apply_theme', theme: 'dark', request_id: 42, schematic_revision: first.schematic_revision };
+    assert.equal((await post(route, action, headers)).status, 409);
+    assert.equal((await post(route, action, { ...actionHeaders, 'X-Wave-Session': 'different-sign-in' })).status, 401);
+    assert.equal((await post(route, action, { ...actionHeaders, Origin: 'https://other.example.test' })).status, 403);
+    assert.equal((await post(route, action, { ...actionHeaders, 'X-Wave-CSRF': '0' })).status, 403);
+    assert.equal((await snapshot(known)).data.settings.theme, 'default');
+
+    const refused = await post(route, { ...action, action: 'users_roster_subscribe' }, actionHeaders);
+    assert.equal(refused.status, 200);
+    const roster = await refused.json();
+    assert.equal(roster.ok, false);
+    assert.equal(roster.request_id, action.request_id);
+    assert.match(roster.feedback, /requires a WebSocket/);
+
+    const tooLarge = await post(route, { ...action, unused: 'x'.repeat(256 * 1024 + 1024) }, actionHeaders);
+    assert.equal(tooLarge.status, 413);
+    const rawPost = (body, options) => request(route, {
+        method: 'POST', body, ...options,
+        headers: { ...actionHeaders, 'Content-Type': 'application/json', 'X-Wave-CSRF': '1', Origin: fixture.origin },
+    });
+    const tooLargeChunked = await rawPost((async function* () { yield 'x'.repeat(256 * 1024 + 1025); })(),
+        { duplex: 'half' });
+    assert.equal(tooLargeChunked.status, 413);
+    const deepAction = JSON.stringify(action).slice(0, -1) + ',"unused":' + '['.repeat(70) + '0' + ']'.repeat(70) + '}';
+    assert.equal((await (await rawPost(deepAction)).json()).ok, false);
+    assert.equal((await snapshot(known)).data.settings.theme, 'default');
+    const saved = await post(route, action, actionHeaders);
+    assert.equal(saved.status, 200);
+    const reply = await saved.json();
+    assert.equal(reply.ok, true, reply.feedback);
+    assert.equal(reply.request_id, action.request_id);
+    assert.equal(reply.workspace_id, first.workspace_id);
+    assert.equal(reply.users_roster, false);
+    assert.equal(reply.schematic, undefined);
+    assert.equal((await snapshot(known)).data.settings.theme, 'dark');
+
+    const replacementCookie = await fixtureSession(fixture, { setup: false });
+    assert.equal((await post(route, action, { ...actionHeaders, Cookie: replacementCookie })).status, 401);
+    await fixture.stop();
+    await fixture.start();
+    const restarted = await snapshot(known);
+    assert.notEqual(restarted.workspace_id, first.workspace_id);
+    assert.equal(restarted.schematic.version, first.schematic.version);
+    assert.equal((await post(route, { ...action, theme: 'light' }, actionHeaders)).status, 409);
+    assert.equal((await snapshot()).data.settings.theme, 'dark');
+
+    assert.equal((await post(fixture.basePath + '/api/auth/sign-out', {}, headers)).status, 204);
+    assert.equal((await request(route, { headers })).status, 401);
+});
+
 test('seeds the embedded schematic on first startup under umask 0002 and uses a corrected cache on restart', async t => {
     const previous = process.umask(0o002);
     try {

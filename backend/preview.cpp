@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <compare>
@@ -63,7 +64,6 @@ constexpr auto donation_reminder_interval = std::chrono::days{30};
 constexpr std::size_t max_request_bytes = 8192;
 constexpr std::size_t max_user_request_bytes = 32 * 1024;
 constexpr std::size_t max_live_user_request_bytes = 32 * 1024 + 2048;
-constexpr auto max_frame_bytes = max_core_config_bytes + 1024;
 
 class WorkspaceBackupBusy : public std::runtime_error {
   public:
@@ -374,6 +374,11 @@ struct Reply {
     bool feedback_in_logs_only = false;
 };
 
+struct WorkspaceReply {
+    std::string payload;
+    std::optional<PanelTlsActivation> tls_activation;
+};
+
 struct CoreCatalogResult {
     std::vector<std::string> versions;
     std::string error;
@@ -598,6 +603,9 @@ class Preview {
     std::string restore_workspace_backup(std::string_view token, std::string_view session, AuthStore& store)
     {
         std::lock_guard lock(mutex_);
+        if (tls_activation_pending_) {
+            throw WorkspaceBackupBusy("Wait for Wave to activate HTTPS before restoring a backup.");
+        }
         expire_workspace_backup();
         if (!pending_backup_ || pending_backup_->token != token || pending_backup_->session != session) {
             throw std::runtime_error("Choose and validate the workspace backup again before restoring it.");
@@ -682,7 +690,45 @@ class Preview {
             .dump();
     }
 
-    void serve(httplib::ws::WebSocket& socket, const std::function<bool()>& session)
+    std::string_view workspace_id() const { return users_session_id_; }
+
+    std::string http_snapshot(std::string_view known_workspace, std::uint64_t sent_schematic,
+                              const std::function<bool()>& session)
+    {
+        std::lock_guard lock(mutex_);
+        if (!session()) {
+            return {};
+        }
+        auto frame = snapshot(false);
+        if (known_workspace != workspace_id()) {
+            sent_schematic = 0;
+        }
+        attach_schematic(frame, sent_schematic);
+        return frame.dump(-1, ' ', false, Json::error_handler_t::replace);
+    }
+
+    WorkspaceReply http_action(std::string_view message, const std::function<bool()>& session)
+    {
+        std::uint64_t sent_revision = 0;
+        std::uint64_t sent_schematic = 0;
+        return handle_message(message, sent_revision, sent_schematic, nullptr, session);
+    }
+
+    void finish_tls_activation(bool applied)
+    {
+        std::lock_guard lock(mutex_);
+        tls_activation_pending_ = false;
+        if (applied) {
+            data_["settings"]["tls"]["restart_required"] = false;
+            log("info", "Panel HTTPS is active.");
+        } else {
+            log("error", "Could not start the HTTPS listener. Wave resumed HTTP with the saved TLS settings pending.");
+        }
+        ++revision_;
+    }
+
+    void serve(httplib::ws::WebSocket& socket, const std::function<bool()>& session,
+               const ActivatePanelTls& activate_tls)
     {
         // Only this handler writes to its socket. A short read timeout lets it
         // publish shared state changes while the current browser is idle.
@@ -704,17 +750,25 @@ class Preview {
                 socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
                 return;
             }
-            const auto frame = result == httplib::ws::Timeout
-                                   ? changed_snapshot(sent_revision, sent_schematic)
-                                   : handle_message(result == httplib::ws::Text ? std::string_view(message)
-                                                                                : std::string_view{},
-                                                    sent_revision, sent_schematic, roster, session);
-            if (!frame.empty()) {
+            auto frame = result == httplib::ws::Timeout
+                             ? WorkspaceReply{changed_snapshot(sent_revision, sent_schematic), {}}
+                             : handle_message(result == httplib::ws::Text ? std::string_view(message)
+                                                                         : std::string_view{},
+                                              sent_revision, sent_schematic, &roster, session);
+            if (frame.tls_activation) {
+                // The change is saved even if the client has already disconnected.
+                if (session()) {
+                    socket.send(frame.payload);
+                }
+                activate_tls(std::move(*frame.tls_activation));
+                return;
+            }
+            if (!frame.payload.empty()) {
                 if (!session()) {
                     socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
                     return;
                 }
-                if (!socket.send(frame)) {
+                if (!socket.send(frame.payload)) {
                     return;
                 }
             }
@@ -809,10 +863,13 @@ class Preview {
         return true;
     }
 
-    Json snapshot() const
+    Json snapshot(bool users_roster) const
     {
         Json snapshot = {{"type", "snapshot"}, {"data", data_}};
-        snapshot["users_roster"] = true;
+        snapshot["users_roster"] = users_roster;
+        if (!users_roster) {
+            snapshot["workspace_id"] = workspace_id();
+        }
         snapshot["data"]["settings"]["donation"] = donation_settings(donation_);
         auto& core = snapshot["data"]["server"]["core"];
         const auto state = core["state"].get_ref<const std::string&>();
@@ -845,7 +902,7 @@ class Preview {
         if (revision_ == sent_revision) {
             return {};
         }
-        auto frame = snapshot();
+        auto frame = snapshot(true);
         attach_schematic(frame, sent_schematic);
         sent_revision = revision_;
         return frame.dump(-1, ' ', false, Json::error_handler_t::replace);
@@ -1427,12 +1484,12 @@ class Preview {
         }
     }
 
-    std::string handle_message(std::string_view message, std::uint64_t& sent_revision,
-                               std::uint64_t& sent_schematic, UsersRosterSubscription& roster,
-                               const std::function<bool()>& session)
+    WorkspaceReply handle_message(std::string_view message, std::uint64_t& sent_revision,
+                                  std::uint64_t& sent_schematic, UsersRosterSubscription* roster,
+                                  const std::function<bool()>& session)
     {
         const bool invalid_frame =
-            message.size() > max_frame_bytes || message.find('\0') != std::string_view::npos;
+            message.size() > max_workspace_action_bytes || message.find('\0') != std::string_view::npos;
         bool too_deep = false;
         auto request = invalid_frame ? Json{}
                                      : Json::parse(
@@ -1465,12 +1522,16 @@ class Preview {
         if (!session()) {
             return {};
         }
-        if (!too_large && (action == "users_roster_subscribe" || action == "users_roster_unsubscribe" ||
-                           action == "users_roster_refresh")) {
-            handle_users_roster(action, request, roster);
+        const bool roster_action = action == "users_roster_subscribe" || action == "users_roster_unsubscribe" ||
+                                   action == "users_roster_refresh";
+        if (roster && roster_action && !too_large) {
+            handle_users_roster(action, request, *roster);
             return {};
         }
         const auto revision = request.find("schematic_revision");
+        if (!roster && revision != request.end() && revision->is_number_unsigned()) {
+            sent_schematic = revision->get<std::uint64_t>();
+        }
         const bool allow_missing_revision =
             schematic_revision_ == 1 && waterwall_version() == bundled_waterwall_version;
         const bool edits_config_registry = action == "set_core_config_enabled" || action == "remove_core_config";
@@ -1481,13 +1542,15 @@ class Preview {
         const bool changes_workspace = workspace_mutation(action) &&
                                        (uses_core_schematic(action) || edits_config_registry ||
                                         action == "restore_preview_backup");
+        std::optional<PanelTlsActivation> tls_activation;
         auto reply = action.empty() ? Reply{false, "Send a JSON panel action."}
                      : too_large    ? Reply{false, "That panel request is too large."}
+                     : roster_action ? Reply{false, "The account roster requires a WebSocket connection."}
                      : workspace_recovery_required_ && (changes_workspace || live_write)
                          ? Reply{false, "Restart Wave to finish workspace restore recovery."}
                      : stale        ? Reply{false, "WaterWall changed version. Reload the form and retry."}
                      : live_operation ? live_config_users(*live_operation, request, lock)
-                                      : dispatch(action, request);
+                                      : dispatch(action, request, tls_activation);
         if (reply.ok && changes_workspace) {
             pending_backup_.reset();
         }
@@ -1503,7 +1566,7 @@ class Preview {
         if (reply.changed) {
             ++revision_;
         }
-        auto frame = snapshot();
+        auto frame = snapshot(roster != nullptr);
         attach_schematic(frame, sent_schematic);
         frame["action"] = action;
         frame["ok"] = reply.ok;
@@ -1519,7 +1582,7 @@ class Preview {
             frame["request_id"] = *id;
         }
         sent_revision = revision_;
-        return frame.dump(-1, ' ', false, Json::error_handler_t::replace);
+        return {frame.dump(-1, ' ', false, Json::error_handler_t::replace), std::move(tls_activation)};
     }
 
     void add_log(std::string_view source, std::string_view timestamp, std::string_view level,
@@ -1618,8 +1681,11 @@ class Preview {
         return complete("Applied sample TLS settings.");
     }
 
-    Reply apply_tls_settings(const Json& input)
+    Reply apply_tls_settings(const Json& input, std::optional<PanelTlsActivation>& activation)
     {
+        if (tls_activation_pending_) {
+            return {false, "Wave is already activating HTTPS."};
+        }
         const auto values = input.find("settings");
         if (values == input.end() || !values->is_object()) {
             return {false, "Choose whether to enable panel HTTPS."};
@@ -1627,6 +1693,10 @@ class Preview {
         const auto enabled = values->find("enabled");
         if (enabled == values->end() || !enabled->is_boolean()) {
             return {false, "Choose whether to enable panel HTTPS."};
+        }
+        const auto activate = input.find("activate");
+        if (activate != input.end() && !activate->is_boolean()) {
+            return {false, "Choose whether to activate HTTPS after saving."};
         }
 
         std::optional<TlsSettings> selected;
@@ -1642,11 +1712,23 @@ class Preview {
             selected = TlsSettings{domain->get<std::string>(), chain->get<std::string>(), key->get<std::string>()};
         }
 
+        const auto& active = database_->settings();
+        const bool schedule = selected && !active.tls && activate != input.end() && *activate == true;
+        std::unique_ptr<httplib::Server> listener;
         try {
-            const auto saved = database_->save_tls_settings(selected);
+            const auto saved = database_->save_tls_settings(selected, schedule ? &listener : nullptr);
             data_["settings"]["tls"] = panel_tls_settings(saved, database_->settings().tls);
         } catch (const std::runtime_error& error) {
             return {false, error.what()};
+        }
+        if (schedule) {
+            auto authority = tls_authority(selected->domain, active.listen_port);
+            auto url = "https://" + authority + database_->panel_base_path() + '/';
+            activation.emplace(PanelTlsActivation{std::move(listener), std::move(*selected), std::move(authority)});
+            tls_activation_pending_ = true;
+            auto reply = complete("Saved panel TLS settings. Restarting the panel on HTTPS.");
+            reply.result = {{"https_url", std::move(url)}};
+            return reply;
         }
         const bool restart = data_["settings"]["tls"]["restart_required"] == true;
         return complete(restart ? "Saved panel TLS settings. Restart Wave to apply them."
@@ -2815,7 +2897,7 @@ class Preview {
         return {result.success, std::move(result.message), false, std::move(result.result)};
     }
 
-    Reply dispatch(std::string_view action, const Json& input)
+    Reply dispatch(std::string_view action, const Json& input, std::optional<PanelTlsActivation>& tls_activation)
     {
         if (action == "refresh") {
             return complete("Workspace refreshed.", "info");
@@ -2856,7 +2938,7 @@ class Preview {
             return apply_settings(input);
         }
         if (action == "apply_tls_settings") {
-            return apply_tls_settings(input);
+            return apply_tls_settings(input, tls_activation);
         }
         if (action == "apply_session_settings") {
             return apply_session_settings(input);
@@ -2904,6 +2986,7 @@ class Preview {
     bool manual_catalog_check_ = false;
     bool queued_catalog_check_ = false;
     bool restart_pending_ = false;
+    bool tls_activation_pending_ = false;
     std::string restart_error_;
     std::map<int, Json> live_configs_;
     std::map<std::pair<int, std::string>, LiveUsersAccess> live_users_access_;
@@ -3024,28 +3107,111 @@ void configure_backup_routes(httplib::Server& server, const std::shared_ptr<Auth
                     });
 }
 
+std::function<bool()> workspace_http_session(const std::shared_ptr<AuthStore>& store,
+                                            const std::shared_ptr<PanelDatabase>& database,
+                                            const httplib::Request& request)
+{
+    const auto expected = request.get_header_value("X-Wave-Session");
+    if (request.get_header_value_count("X-Wave-Session") != 1 || expected.empty() ||
+        expected != authenticated_session_id(store, request)) {
+        return [] { return false; };
+    }
+    return websocket_session(store, database, request);
+}
+
+std::optional<std::uint64_t> workspace_schematic_revision(const httplib::Request& request)
+{
+    const auto count = request.get_param_value_count("schematic_revision");
+    std::uint64_t revision = 0;
+    if (count == 0) {
+        return revision;
+    }
+    const auto text = request.get_param_value("schematic_revision");
+    const auto end = text.data() + text.size();
+    const auto parsed = std::from_chars(text.data(), end, revision);
+    return count == 1 && parsed.ec == std::errc{} && parsed.ptr == end ? std::optional(revision) : std::nullopt;
+}
+
+void send_workspace_http(httplib::Response& response, std::string payload, const std::function<bool()>& session)
+{
+    if (payload.empty() || !session()) {
+        response.status = 401;
+        return;
+    }
+    response.set_content(std::move(payload), "application/json");
+}
+
+void configure_workspace_http_routes(httplib::Server& server, const std::shared_ptr<Preview>& preview,
+                                     const std::shared_ptr<AuthStore>& store,
+                                     const std::shared_ptr<PanelDatabase>& database,
+                                     const ActivatePanelTls& activate_tls)
+{
+    const auto route = panel_route(workspace_http_route);
+    server.Get(route, [preview, store, database](const httplib::Request& req, httplib::Response& res) {
+        const auto session = workspace_http_session(store, database, req);
+        if (!session()) {
+            res.status = 401;
+            return;
+        }
+        const auto revision = workspace_schematic_revision(req);
+        if (!revision || req.get_param_value_count("workspace_id") > 1) {
+            res.status = 400;
+            return;
+        }
+        send_workspace_http(res, preview->http_snapshot(req.get_param_value("workspace_id"), *revision, session),
+                            session);
+    });
+    post_panel_json(server, route,
+                    [preview, store, database, activate_tls](const httplib::Request& req, httplib::Response& res,
+                                                             std::string_view body) {
+                        const auto session = workspace_http_session(store, database, req);
+                        if (!session()) {
+                            res.status = 401;
+                            return;
+                        }
+                        if (req.get_header_value_count("X-Wave-Workspace") != 1 ||
+                            req.get_header_value("X-Wave-Workspace") != preview->workspace_id()) {
+                            res.status = 409;
+                            return;
+                        }
+                        auto reply = preview->http_action(body, session);
+                        send_workspace_http(res, std::move(reply.payload), session);
+                        if (reply.tls_activation) {
+                            activate_tls(std::move(*reply.tls_activation));
+                        }
+                    },
+                    max_workspace_action_bytes);
+}
+
 } // namespace
 
-void configure_preview_routes(httplib::Server& server, std::shared_ptr<AuthStore> store,
-                              std::shared_ptr<PanelDatabase> database)
+PreviewRoutes make_preview_routes(std::shared_ptr<AuthStore> store, std::shared_ptr<PanelDatabase> database,
+                                  ActivatePanelTls activate_tls)
 {
     const auto preview = std::make_shared<Preview>(database);
-    configure_backup_routes(server, store, preview);
-    server.WebSocket(panel_route("/ws/overview"),
-                     [preview, store, database](const httplib::Request& req, httplib::ws::WebSocket& socket) {
-                         if (!websocket_session(store, database, req)()) {
-                             socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
-                             return;
-                         }
-                         if (socket.send(preview->overview())) {
-                             socket.close();
-                         }
-                     });
-    server.WebSocket(panel_route("/ws/workspace"),
-                     [preview, store = std::move(store), database = std::move(database)](const httplib::Request& req,
-                                                                                     httplib::ws::WebSocket& socket) {
-                         preview->serve(socket, websocket_session(store, database, req));
-                     });
+    return {
+        [preview, store = std::move(store), database = std::move(database), activate_tls = std::move(activate_tls)](
+            httplib::Server& server) {
+            configure_backup_routes(server, store, preview);
+            configure_workspace_http_routes(server, preview, store, database, activate_tls);
+            server.WebSocket(panel_route("/ws/overview"),
+                             [preview, store, database](const httplib::Request& req, httplib::ws::WebSocket& socket) {
+                                 if (!websocket_session(store, database, req)()) {
+                                     socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
+                                     return;
+                                 }
+                                 if (socket.send(preview->overview())) {
+                                     socket.close();
+                                 }
+                             });
+            server.WebSocket(panel_route("/ws/workspace"),
+                             [preview, store, database, activate_tls](const httplib::Request& req,
+                                                                     httplib::ws::WebSocket& socket) {
+                                 preview->serve(socket, websocket_session(store, database, req), activate_tls);
+                             });
+        },
+        [preview](bool applied) { preview->finish_tls_activation(applied); },
+    };
 }
 
 } // namespace wave

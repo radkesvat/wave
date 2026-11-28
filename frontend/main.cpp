@@ -10,6 +10,7 @@
 #include <SDL.h>
 #include <emscripten.h>
 #include <emscripten/html5.h>
+#include <emscripten/html5_webgl.h>
 #include <imgui.h>
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl2.h>
@@ -169,6 +170,9 @@ void apply_theme(wave::theme::Appearance appearance)
 struct Application {
     SDL_Window* window = nullptr;
     SDL_GLContext gl_context = nullptr;
+    EMSCRIPTEN_WEBGL_CONTEXT_HANDLE webgl_context = 0;
+    int max_drawable_width = 0;
+    int max_drawable_height = 0;
     ImPlotContext* implot = nullptr;
     bool imgui_sdl = false;
     bool imgui_gl = false;
@@ -200,8 +204,8 @@ struct Application {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-        window = SDL_CreateWindow("Wave", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1, 1,
-                                  SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+        // Wave sizes the logical window from CSS and chooses the backing resolution separately.
+        window = SDL_CreateWindow("Wave", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1, 1, SDL_WINDOW_OPENGL);
         if (!window) {
             return false;
         }
@@ -214,6 +218,17 @@ struct Application {
 
         gl_context = SDL_GL_CreateContext(window);
         if (!gl_context || SDL_GL_MakeCurrent(window, gl_context) != 0) {
+            return false;
+        }
+        webgl_context = emscripten_webgl_get_current_context();
+        GLint viewport_limits[2]{};
+        GLint renderbuffer_limit = 0;
+        glGetIntegerv(GL_MAX_VIEWPORT_DIMS, viewport_limits);
+        glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &renderbuffer_limit);
+        max_drawable_width = std::min(viewport_limits[0], renderbuffer_limit);
+        max_drawable_height = std::min(viewport_limits[1], renderbuffer_limit);
+        if (max_drawable_width < 1 || max_drawable_height < 1) {
+            SDL_SetError("Could not read the WebGL framebuffer limits");
             return false;
         }
 
@@ -294,7 +309,7 @@ struct Application {
         SDL_Quit();
     }
 
-    bool fit_canvas(int viewport_width)
+    bool fit_canvas(int viewport_width, int& drawable_width, int& drawable_height)
     {
         double css_width = 0;
         double css_height = 0;
@@ -313,14 +328,28 @@ struct Application {
         int window_width = 0;
         int window_height = 0;
         SDL_GetWindowSize(window, &window_width, &window_height);
-        const int height = static_cast<int>(css_height);
-        const int resized_width = static_cast<int>(css_width);
-        if (window_width != resized_width || window_height != height) {
-            // SDL updates the backing buffer at device resolution and scales pointer events
-            // to these logical window dimensions.
-            SDL_SetWindowSize(window, resized_width, height);
+        const int width = std::max(1, static_cast<int>(css_width));
+        const int height = std::max(1, static_cast<int>(css_height));
+        if (window_width != width || window_height != height) {
+            SDL_SetWindowSize(window, width, height);
         }
-        return true;
+
+        // A narrow workspace can be several screens tall. Reduce pixel density if it won't fit.
+        const double scale = std::min({emscripten_get_device_pixel_ratio(), double(max_drawable_width) / width,
+                                       double(max_drawable_height) / height});
+        const int pixel_width = std::max(1, static_cast<int>(width * scale));
+        const int pixel_height = std::max(1, static_cast<int>(height * scale));
+        int canvas_width = 0;
+        int canvas_height = 0;
+        emscripten_get_canvas_element_size("#canvas", &canvas_width, &canvas_height);
+        if (canvas_width != pixel_width || canvas_height != pixel_height) {
+            emscripten_set_canvas_element_size("#canvas", pixel_width, pixel_height);
+        }
+
+        // A browser can allocate less than requested. Clipping must use the actual drawable size.
+        return emscripten_webgl_get_drawing_buffer_size(webgl_context, &drawable_width, &drawable_height) ==
+                   EMSCRIPTEN_RESULT_SUCCESS &&
+               drawable_width > 0 && drawable_height > 0;
     }
 
     void update_session()
@@ -361,7 +390,7 @@ struct Application {
                 }
                 workspace_session_id = panel.auth.session_id();
                 panel.entry.page = wave::EntryPage::workspace;
-                session.start();
+                session.start_for_sign_in(workspace_session_id);
             }
         }
         session.update();
@@ -447,7 +476,9 @@ struct Application {
         ImVec2 browser_viewport;
         read_browser_viewport(&browser_viewport.x, &browser_viewport.y);
         const int viewport_width = static_cast<int>(browser_viewport.x);
-        if (!fit_canvas(viewport_width)) {
+        int drawable_width = 0;
+        int drawable_height = 0;
+        if (!fit_canvas(viewport_width, drawable_width, drawable_height)) {
             wave::finish_config_json_editor_frame();
             return;
         }
@@ -464,6 +495,8 @@ struct Application {
         wave::theme::apply_text_scale(viewport_width);
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
+        auto& io = ImGui::GetIO();
+        io.DisplayFramebufferScale = {drawable_width / io.DisplaySize.x, drawable_height / io.DisplaySize.y};
         ImGui::NewFrame();
         const auto previous_preset = panel.appearance.preset;
         wave::render_panel(panel, session, browser_viewport, browser_panel_focus());
@@ -482,9 +515,6 @@ struct Application {
         }
         ImGui::Render();
 
-        int drawable_width = 0;
-        int drawable_height = 0;
-        SDL_GL_GetDrawableSize(window, &drawable_width, &drawable_height);
         glViewport(0, 0, drawable_width, drawable_height);
         const auto clear = wave::theme::rgba(wave::theme::Color::canvas);
         glClearColor(clear.x, clear.y, clear.z, clear.w);

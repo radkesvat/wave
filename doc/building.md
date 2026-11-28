@@ -81,6 +81,8 @@ for hover and press. The header uses flat Menu and Tools controls.
 Wave embeds Poppins Medium 4.004. Workspace text uses 23 logical pixels from
 1600 CSS pixels and 18 at narrower widths. Secondary text and headings use
 shared sizes. The font notice is available in About and under `site/licenses/`.
+The tall, scrollable phone workspace keeps its layout and touch coordinates
+when Wave reduces the canvas pixel density to fit WebGL framebuffer limits.
 
 The frontend theme defines the shared colors and geometry for ImGui widgets
 and custom drawing. `WAVE_STARTUP_CANVAS` and `WAVE_STARTUP_TEXT` in the
@@ -243,8 +245,9 @@ Saving administrator credentials signs out every active session. In the
 **Panel** tab, **Session expiry (days)** controls how long new sign-ins last
 and defaults to 3 days. The **TLS** box enables or disables HTTPS and saves the
 domain, certificate chain path, and private key path. The fields are dimmed
-and locked when **Enable TLS** is off. Saved TLS changes apply after the Wave
-backend restarts. [TLS configuration](authentication.md#configure-tls)
+and locked when **Enable TLS** is off. Enabling TLS on the HTTP panel restarts
+the listener automatically. Certificate changes on an HTTPS panel and
+disabling TLS take effect after a manual restart. [TLS configuration](authentication.md#configure-tls)
 
 ### Preview controls and server options
 
@@ -311,11 +314,21 @@ when a reply arrives after the form has been closed or replaced. If the
 socket closes between render frames, the form can still read a reply it
 already received. A form still waiting for its reply reports the disconnect.
 
+When the workspace WebSocket is unavailable, Wave exchanges snapshots and
+actions over authenticated HTTP at `/panel/api/workspace`. It polls while the
+tab is visible and submits actions one at a time, without replaying actions
+whose outcome is unknown. Each request identifies the current sign-in, and
+actions also identify the workspace instance. The streaming account list and
+host terminal require their WebSocket connections. Live exact-ID account
+lookup remains available with the corresponding WaterWall grant.
+
 The snapshot's `settings.tls` object reports the saved `enabled`, `domain`,
 `certificate_chain`, and `private_key` values, along with `supported` and
 `restart_required`. Send `apply_tls_settings` with a `settings` object
 containing `enabled`. When enabling, include `domain`, `certificate_chain`,
-and `private_key` so the backend can validate them before saving. When
+and `private_key` so the backend can validate them before saving. On an HTTP
+listener, `activate: true` in the action restarts the listener with HTTPS
+enabled. The reply includes the new address in `result.https_url`. When
 disabling, the backend retains the saved paths. The legacy `apply_settings`
 action still updates the sample values used by preview backups.
 

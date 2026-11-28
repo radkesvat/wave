@@ -16,6 +16,11 @@ struct TlsSettings {
     std::filesystem::path private_key;
 };
 
+inline std::string tls_authority(const std::string& domain, int port)
+{
+    return port == 443 ? domain : domain + ':' + std::to_string(port);
+}
+
 void validate_tls_settings(const TlsSettings& settings, int port);
 std::unique_ptr<httplib::Server> make_tls_server(const TlsSettings& settings,
                                               const std::filesystem::path& site_dir, int port);

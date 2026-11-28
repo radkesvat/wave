@@ -42,9 +42,11 @@ struct PreviewReply {
 
 class PreviewSession {
   public:
+    void start_for_sign_in(std::string_view session_id);
     void start(bool keep_snapshot = false);
     void stop();
     void update();
+    void receive_http(int status, std::string_view payload);
     std::optional<std::uint64_t> submit(nlohmann::json request, double timeout_ms = 0);
     std::optional<PreviewReply> take_reply(std::optional<std::uint64_t>& request_id);
     void abandon(std::optional<std::uint64_t>& request_id);
@@ -52,6 +54,7 @@ class PreviewSession {
     void clear_local_logs();
     bool take_schematic_change();
     bool supports_users_roster() const { return supports_users_roster_; }
+    bool http_fallback() const { return http_fallback_; }
     const UsersRoster* users_roster(std::optional<std::uint64_t> subscription) const;
     bool lost_users_roster_identity(std::optional<std::uint64_t> subscription) const
     {
@@ -85,6 +88,7 @@ class PreviewSession {
         std::string action;
         double deadline;
         std::optional<PreviewReply> reply;
+        std::string queued_http_body;
     };
 
     struct LocalLog {
@@ -93,6 +97,9 @@ class PreviewSession {
     };
 
     void fail();
+    void start_http_fallback();
+    void update_http(double now);
+    void discard_queued_http(std::string_view message);
     bool receive(std::string_view payload);
     bool send_users_roster(nlohmann::json request);
     bool send_roster_unsubscribe(std::uint64_t subscription);
@@ -102,6 +109,11 @@ class PreviewSession {
 
     EMSCRIPTEN_WEBSOCKET_T socket_ = 0;
     double deadline_ = 0;
+    std::string sign_in_id_;
+    std::string http_workspace_id_;
+    std::optional<std::uint64_t> http_request_;
+    double next_http_poll_ = 0;
+    bool http_fallback_ = false;
     bool schematic_changed_ = false;
     bool supports_users_roster_ = false;
     bool document_visible_ = true;

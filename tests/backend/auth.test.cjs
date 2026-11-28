@@ -7,7 +7,7 @@ const https = require('node:https');
 const { join } = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
 const { test } = require('node:test');
-const { authFixture, timeout } = require('./auth_fixture.cjs');
+const { authFixture, seedCore, timeout } = require('./auth_fixture.cjs');
 const { tlsFixture } = require('./tls_fixture.cjs');
 
 const cookiePrefix = '__Host-wave_session=';
@@ -184,7 +184,8 @@ test('HTTPS verifies trust and enforces durable JWT sessions on HTTP and WebSock
     await fixture.start();
     const retained = await request('/api/session', { headers: authenticated });
     assert.equal(retained.status, 200);
-    assert.deepEqual(JSON.parse(retained.body), { type: 'session', username: claims.sub, expires_at: claims.exp });
+    const expectedIdentity = { type: 'session', username: claims.sub, expires_at: claims.exp, session_id: claims.jti };
+    assert.deepEqual(JSON.parse(retained.body), expectedIdentity);
     assert.equal(retained.headers['cache-control'], 'no-store');
 
     const ws = await upgrade(authenticated);
@@ -193,9 +194,7 @@ test('HTTPS verifies trust and enforces durable JWT sessions on HTTP and WebSock
     try {
         const identity = await ws.frame();
         assert.equal(identity.opcode, 1);
-        assert.deepEqual(JSON.parse(identity.payload), {
-            type: 'session', username: claims.sub, expires_at: claims.exp, session_id: claims.jti,
-        });
+        assert.deepEqual(JSON.parse(identity.payload), expectedIdentity);
         assert.equal((await request('/api/session', { headers: { Cookie: cookiePrefix + claims.jti } })).status, 401);
         if (terminal) {
             assert.equal(terminal.status, 101);
@@ -487,6 +486,137 @@ test('saves validated panel TLS settings for restart and keeps preview backups s
     await fixture.start();
     await withPreview(fixture, tlsState(false, false), async (_apply, assertListener) => assertListener());
 });
+
+for (const transport of ['WebSocket', 'HTTP']) {
+    test(`activates panel TLS over ${transport} without restarting the backend process`, async t => {
+        const fixture = await authFixture(t, undefined, { encrypted: false, basePath: '/control/room' });
+        const { ca, chainPath, keyPath } = await tlsFixture(fixture.cwd);
+        const settings = { enabled: true, domain: fixture.hostname, certificate_chain: chainPath, private_key: keyPath };
+        const httpsOrigin = `https://${fixture.hostname}:${new URL(fixture.origin).port}`;
+        const secure = client({ ...fixture, ca, origin: httpsOrigin });
+        const plain = client(fixture);
+        const credentials = { username: 'fixture-admin', password: 'fixture TLS activation passphrase 5Qm7R' };
+        const core = transport === 'WebSocket' && process.platform === 'linux'
+            ? await seedCore(fixture.backend, { executable: true }) : undefined;
+        await fixture.start();
+        const pid = fixture.pid;
+        assert.equal((await plain.post('setup', credentials)).status, 201);
+        const signIn = await plain.post('sign-in', credentials);
+        assert.equal(signIn.status, 204);
+        const headers = { Cookie: signIn.headers['set-cookie'][0].split(';', 1)[0], Origin: fixture.origin };
+        const workspace = await plain.upgrade(headers, '/ws/workspace');
+        const monitor = await plain.upgrade(headers);
+        assert.equal(workspace.status, 101);
+        assert.equal(monitor.status, 101);
+        t.after(() => {
+            workspace.socket?.destroy();
+            monitor.socket?.destroy();
+        });
+
+        const readSnapshot = async (socket, predicate = () => true) => {
+            for (;;) {
+                const frame = await socket.frame();
+                assert.equal(frame.opcode, 1);
+                const payload = JSON.parse(frame.payload);
+                assert.equal(payload.type, 'snapshot');
+                if (predicate(payload)) return payload;
+            }
+        };
+        const identity = JSON.parse((await monitor.frame()).payload);
+        const initial = await readSnapshot(workspace);
+        const httpHeaders = { ...headers, 'X-Wave-Session': identity.session_id };
+        if (transport === 'HTTP') {
+            const snapshot = await plain.request('/api/workspace', { headers: httpHeaders });
+            assert.equal(snapshot.status, 200);
+            httpHeaders['X-Wave-Workspace'] = JSON.parse(snapshot.body).workspace_id;
+        }
+        let id = 0;
+        async function send(action, fields = {}) {
+            const request_id = ++id;
+            const body = { action, request_id, schematic_revision: initial.schematic_revision, ...fields };
+            let reply;
+            if (transport === 'HTTP') {
+                const response = await plain.request('/api/workspace', { method: 'POST', data: body,
+                    headers: { ...httpHeaders, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json' } });
+                assert.equal(response.status, 200);
+                reply = JSON.parse(response.body);
+            } else {
+                workspace.socket.write(clientFrame(1, JSON.stringify(body)));
+                reply = await readSnapshot(workspace, frame => frame.request_id === request_id);
+            }
+            assert.equal(reply.request_id, request_id);
+            assert.equal(reply.action, action);
+            return reply;
+        }
+
+        let corePid;
+        if (core) {
+            const created = await send('create_core_config', { name: 'TLS continuity' });
+            assert.equal(created.ok, true, created.feedback);
+            const { id: configId } = created.data.server.core.configs.find(config => config.name === 'TLS continuity');
+            const enabled = await send('set_core_config_enabled', { id: configId, enabled: true });
+            assert.equal(enabled.ok, true, enabled.feedback);
+            const started = await send('start_core');
+            assert.equal(started.ok, true, started.feedback);
+            if (started.data.server.core.state !== 'running') {
+                await readSnapshot(workspace, frame => frame.data.server.core.state === 'running');
+            }
+            const deadline = Date.now() + timeout;
+            while (corePid === undefined) {
+                try {
+                    corePid = JSON.parse(await readFile(core.processFile, 'utf8')).pid;
+                } catch (error) {
+                    if (error.code !== 'ENOENT' || Date.now() >= deadline) throw error;
+                    await delay(20);
+                }
+            }
+        }
+
+        const before = await readFile(fixture.database, 'utf8');
+        const invalid = await send('apply_tls_settings', { activate: true,
+            settings: { ...settings, private_key: join(fixture.cwd, 'missing.key') } });
+        assert.equal(invalid.ok, false);
+        assert.match(invalid.feedback, /private key/i);
+        assert.equal(await readFile(fixture.database, 'utf8'), before);
+        assert.equal((await plain.request('/api/session', { headers })).status, 200);
+
+        const confirmed = await send('apply_tls_settings', { activate: true, settings });
+        assert.equal(confirmed.ok, true, confirmed.feedback);
+        assert.equal(confirmed.result?.https_url, httpsOrigin + fixture.basePath + '/');
+        const deadline = Date.now() + timeout;
+        for (;;) {
+            try {
+                assert.equal((await secure.request('/api/session', { headers })).status, 401);
+                break;
+            } catch (error) {
+                if (!['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ERR_SSL_WRONG_VERSION_NUMBER'].includes(error.code) ||
+                    Date.now() >= deadline) throw error;
+                await delay(20);
+            }
+        }
+        assert.equal(fixture.pid, pid);
+        assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')).tls, settings);
+
+        const tlsCookie = assertCookie(await secure.post('sign-in', credentials), expirySeconds);
+        const tlsHeaders = { Cookie: tlsCookie, Origin: httpsOrigin };
+        const authenticated = await secure.request('/api/session', { headers: tlsHeaders });
+        assert.equal(authenticated.status, 200);
+        assert.equal(JSON.parse(authenticated.body).username, credentials.username);
+        const active = await secure.upgrade(tlsHeaders, '/ws/workspace');
+        assert.equal(active.status, 101);
+        try {
+            const { data } = await readSnapshot(active);
+            assert.deepEqual(data.settings.tls, { ...settings, supported: true, restart_required: false });
+            if (corePid) {
+                assert.equal(data.server.core.state, 'running');
+                assert.equal(JSON.parse(await readFile(core.processFile, 'utf8')).pid, corePid);
+                assert.doesNotThrow(() => process.kill(corePid, 0));
+            }
+        } finally {
+            active.socket.destroy();
+        }
+    });
+}
 
 test('closes the TLS terminal when the shell exits during a final keystroke',
     { skip: process.platform !== 'linux' }, async t => {

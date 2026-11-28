@@ -55,10 +55,12 @@ session cookies over the network in cleartext.
 
 In **Settings → Panel → TLS**, turn on **Enable TLS**, enter the domain and
 PEM paths, and select **Apply changes**. Wave validates the files before
-saving. Restart the Wave backend to use the saved settings, then reconnect
-over HTTPS with the configured hostname and listener port. Turn off
-**Enable TLS** and apply to return to HTTP after a restart. The fields stay
-locked while the switch is off, and Wave keeps the saved hostname and paths.
+saving. When enabling HTTPS from HTTP, Wave restarts the panel listener on
+the same port and opens the configured HTTPS address in the current tab.
+Sign in there if prompted. WaterWall keeps running through the listener
+restart. Turn off **Enable TLS** and apply to return to HTTP after a manual
+restart. The fields stay locked while the switch is off, and Wave keeps the
+saved hostname and paths.
 
 To configure TLS before first sign-in or recover an unavailable listener,
 set the same values in `wave-db.json` while Wave is stopped.
@@ -226,11 +228,12 @@ Authentication POST requests require a same-origin `Origin`, JSON, and
 `X-Wave-CSRF: 1`. `POST /panel/api/auth/admin` takes `username`,
 `current_password`, and `password`. An empty new password keeps the
 current one. The session monitor at `/panel/ws/panel` and the workspace sockets
-check origin and session before upgrading. The monitor's identity message
-includes an opaque `session_id` for that sign-in. The open panel uses it to
-recognize the same session after a connection drops. Authentication still
-requires the signed session cookie. Active connections close when their
-session expires or is revoked.
+check origin and session before upgrading. The monitor and `GET /panel/api/session`
+return the same identity fields, `type`, `username`, `expires_at`, and an opaque
+`session_id` for that sign-in. The panel can verify its session over HTTP when
+the monitor cannot deliver the identity. It uses the ID to recognize the same
+session after a connection drops. Authentication requires the signed session
+cookie. Active connections close when their session expires or is revoked.
 
 `POST /panel/api/auth/base-path` takes the new path as `panel-base-path` and
 requires an active session. A successful change returns HTTP 201 with the

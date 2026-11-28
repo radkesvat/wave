@@ -1305,14 +1305,25 @@ test('validates and saves WaterWall form settings alongside a separate Panel TLS
         await openView(page, 'Settings');
         await status(page, /TLS settings\. Enable TLS on\./);
         const panelFrame = await tabBodyFrame();
+        const border = [61, 58, 67];
+        const edges = await horizontalRuns(page, 130, 205, desktop.width - 28, border);
+        assert.equal(edges.length, 6, 'The first row contains three Settings cards.');
+        const [tlsLeft, tlsRight, adminLeft, adminRight, sessionsLeft, sessionsRight] =
+            edges.map(([x]) => x);
+        const columns = [[tlsLeft, tlsRight], [adminLeft, adminRight], [sessionsLeft, sessionsRight]];
+        const widths = columns.map(([left, right]) => right - left + 1);
+        assert.ok(Math.max(...widths) - Math.min(...widths) <= 1, 'Compact Settings columns have equal widths.');
         const cardTop = async (left, right) => {
-            const edge = x => verticalRuns(page, x, 101, 410, [61, 58, 67], 80);
+            const edge = x => verticalRuns(page, x, 101, 410, border, 80);
             const bounds = await edge(left);
             assert.equal(bounds.length, 1, 'Expected the left edge of the Settings card.');
             assert.deepEqual(await edge(right), bounds, 'The Settings card stays within its column.');
             return bounds[0][0];
         };
-        const tops = [await cardTop(205, 548), await cardTop(556, 899), await cardTop(907, 1250)];
+        const tops = [];
+        for (const [left, right] of columns) {
+            tops.push(await cardTop(left, right));
+        }
         assert.deepEqual(tops, [106, 106, 106], 'All three compact Settings cards align at the top.');
         const fields = await tlsInputRows(page);
         assert.equal(fields.length, 3, 'Expected all enabled TLS fields.');
@@ -1354,7 +1365,7 @@ test('validates and saves WaterWall form settings alongside a separate Panel TLS
         await status(page, /Apply TLS settings\./);
         await confirmDialog(page, (x, y) => click(page, x, y), 370);
         const panelSave = await preview.action(0);
-        assertRequest(panelSave.request, { action: 'apply_tls_settings', settings: tls });
+        assertRequest(panelSave.request, { action: 'apply_tls_settings', settings: tls, activate: true });
         data.settings.tls = { ...tls, supported: true, restart_required: true };
         const feedback = 'Saved panel TLS settings. Restart Wave to apply them.';
         panelSave.reply({ feedback, feedback_in_logs_only: true });
@@ -1448,6 +1459,71 @@ test('locks disabled TLS fields and saves the change after confirmation', async 
         await status(page, restart);
         assert.equal(preview.actions.length, 2, 'Reloading restores the saved setting without resubmitting it.');
     } finally {
+        await page.close();
+    }
+});
+
+test('enables TLS and opens the HTTPS panel after the listener responds', async () => {
+    const page = await workspace.browser.newPage({ viewport: desktop });
+    const data = fixture();
+    const { supported, restart_required, ...tls } = tlsFixture();
+    data.settings.tls = { ...tls, enabled: false, supported, restart_required };
+    const preview = await mockPreview(page, data);
+    const https = new URL(workspace.url);
+    https.protocol = 'https:';
+    https.hostname = tls.domain;
+    const httpsUrl = https.href;
+    const probeGate = Promise.withResolvers();
+    let probes = 0;
+    await page.route(`${https.origin}/**`, async route => {
+        if (route.request().isNavigationRequest()) {
+            await route.fulfill({ contentType: 'text/html', body: '<title>HTTPS Wave fixture</title>' });
+        } else {
+            ++probes;
+            await probeGate.promise;
+            await route.fulfill({ status: 200 });
+        }
+    });
+    try {
+        await page.goto(workspace.url);
+        await openView(page, 'Settings');
+        await status(page, /TLS settings\. Enable TLS off\./);
+        await click(page, 226, 148);
+        await status(page, /TLS settings\. Enable TLS on\./);
+        const fields = await tlsInputRows(page);
+        assert.equal(fields.length, 3);
+        const confirm = async index => {
+            await click(page, 245, await tlsApplyRow(page, fields.at(-1)[1]));
+            await status(page, /Apply TLS settings\./);
+            assert.equal(preview.actions.length, index, 'The listener restarts only after confirmation.');
+            await confirmDialog(page, (x, y) => click(page, x, y), 370);
+            const action = await preview.action(index);
+            assertRequest(action.request, { action: 'apply_tls_settings', settings: tls, activate: true });
+            return action;
+        };
+
+        const rejected = await confirm(0);
+        const error = 'The TLS private key does not match the leaf certificate.';
+        rejected.reply({ ok: false, feedback: error, feedback_in_logs_only: true });
+        await expectLoggedOnce(page, error);
+        await page.waitForFunction(() => !document.getElementById('panel-controls').inert);
+        assert.equal(page.url(), workspace.url);
+        assert.equal(probes, 0, 'A rejected TLS configuration leaves the current listener in use.');
+
+        const saved = await confirm(1);
+        const probe = page.waitForRequest(request => !request.isNavigationRequest() &&
+            new URL(request.url()).origin === https.origin, { timeout });
+        saved.reply({ result: { https_url: httpsUrl } });
+        await probe;
+        const transition = page.locator('#startup');
+        await transition.waitFor({ timeout });
+        assert.equal(await transition.textContent(), 'Switching Wave to HTTPS…');
+        assert.equal(page.url(), workspace.url, 'Wave waits for the HTTPS listener before navigating.');
+        probeGate.resolve();
+        await page.waitForURL(httpsUrl, { timeout });
+        assert.equal(await page.title(), 'HTTPS Wave fixture');
+    } finally {
+        probeGate.resolve();
         await page.close();
     }
 });

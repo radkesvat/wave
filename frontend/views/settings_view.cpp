@@ -6,6 +6,7 @@
 #include "session_settings.h"
 #include "view_helpers.h"
 
+#include <emscripten.h>
 #include <misc/cpp/imgui_stdlib.h>
 
 #include <algorithm>
@@ -23,6 +24,8 @@ using theme::Color;
 constexpr char tls_dialog_title[] = "Apply TLS settings";
 constexpr char tls_restart_notice[] = "Restart Wave to apply the saved TLS settings.";
 constexpr char tls_unavailable[] = "TLS settings are unavailable on this backend.";
+
+EM_JS(bool, panel_uses_https, (), { return location.protocol === 'https:'; });
 
 void sync_tls_settings(TlsSettingsDraft& draft, const Json& settings)
 {
@@ -64,8 +67,12 @@ void submit_tls_settings(TlsSettingsDraft& draft, PreviewSession& session)
         settings["certificate_chain"] = draft.certificate_chain;
         settings["private_key"] = draft.private_key;
     }
-    draft.request =
-        session.submit({{"action", "apply_tls_settings"}, {"settings", std::move(settings)}}, 5000);
+    auto request = Json{{"action", "apply_tls_settings"}, {"settings", std::move(settings)}};
+    const bool activate = draft.enabled && !panel_uses_https();
+    if (activate) {
+        request["activate"] = true;
+    }
+    draft.request = session.submit(std::move(request), activate ? 0 : 5000);
 }
 
 void render_tls_settings(TlsSettingsDraft& draft, const Json& settings, bool narrow)
@@ -83,7 +90,7 @@ void render_tls_settings(TlsSettingsDraft& draft, const Json& settings, bool nar
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Enable TLS");
-    help_marker("Wave switches between HTTPS and HTTP when the backend restarts.");
+    help_marker("Enabling TLS on an HTTP panel restarts the panel listener and opens HTTPS.");
 
     ImGui::BeginDisabled(!draft.enabled);
     draft.dirty |= edit_tls_field("Domain", draft.domain, "panel.example.test",
@@ -98,7 +105,8 @@ void render_tls_settings(TlsSettingsDraft& draft, const Json& settings, bool nar
 
     const bool complete = !draft.enabled || (!draft.domain.empty() && !draft.certificate_chain.empty() &&
                                              !draft.private_key.empty());
-    ImGui::BeginDisabled(!tls_settings_changed(draft) || !complete);
+    const bool pending_activation = draft.enabled && draft.restart_required && !panel_uses_https();
+    ImGui::BeginDisabled((!tls_settings_changed(draft) && !pending_activation) || !complete);
     if (theme::button("Apply changes")) {
         ImGui::OpenPopup(tls_dialog_title);
     }
@@ -138,7 +146,9 @@ void render_tls_dialog(TlsSettingsDraft& draft, PreviewSession& session)
             {.busy = pending}};
         frame) {
         draft.confirming = true;
-        if (draft.enabled) {
+        if (draft.enabled && !panel_uses_https()) {
+            wrapped("Wave will restart its panel listener and open HTTPS. Sign in again at the configured hostname.");
+        } else if (draft.enabled) {
             wrapped("Restart Wave after saving, then reconnect over HTTPS using the configured hostname.");
         } else {
             wrapped("Restart Wave after saving, then reconnect over HTTP. Credentials and sessions will "

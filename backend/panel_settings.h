@@ -28,7 +28,9 @@ class PanelDatabase {
     const nlohmann::json& initial_contents() const;
     std::string panel_base_path() const;
     bool save_panel_base_path(std::string_view previous, std::string_view path);
-    nlohmann::json save_tls_settings(const std::optional<TlsSettings>& tls);
+    nlohmann::json save_tls_settings(const std::optional<TlsSettings>& tls,
+                                     std::unique_ptr<httplib::Server>* activation = nullptr);
+    void finish_tls_activation(std::optional<TlsSettings> tls);
     int session_expiry_days() const;
     void save_session_expiry_days(int days);
     void save_theme(theme::Preset preset);

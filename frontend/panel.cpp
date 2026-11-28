@@ -57,6 +57,7 @@ constexpr float narrow_work_height = 660;
 constexpr float narrow_logs_height = 232;
 constexpr float desktop_logs_min_height = 195;
 constexpr float server_min_work_height = 120;
+constexpr char panel_connection_help[] = "Check your connection to the Wave server and try again.";
 
 const char* entry_caption(EntryPage page)
 {
@@ -164,19 +165,26 @@ float draw_header(const PanelLayout& layout, ImVec2 viewport, bool in_workspace,
     }
     const auto core_state = reported_core_state(session);
     constexpr std::string_view status_prefix = "WaterWall ";
-    const bool has_status = session.ready() && !core_state.empty();
-    const auto status = has_status ? std::format("{}{}", status_prefix, core_state)
-                        : session.status() == PreviewStatus::loading ? "Connecting to Wave…"
-                                                                     : "Wave disconnected";
+    const bool connected = session.ready();
+    const bool http = session.http_fallback();
+    const bool has_status = connected && !core_state.empty();
+    std::string status = "Wave disconnected";
+    if (has_status) {
+        status = std::format("{}{}{}", status_prefix, core_state, http ? " · HTTP" : "");
+    } else if (connected) {
+        status = http ? "Wave connected over HTTP" : "Wave connected";
+    } else if (session.status() == PreviewStatus::loading) {
+        status = http ? "Connecting over HTTP…" : "Connecting to Wave…";
+    }
     const float status_size = theme::secondary_font_size;
     ImGui::PushFont(nullptr, status_size);
     const float status_width = ImGui::CalcTextSize(status.c_str()).x;
     const float status_x = layout.narrow ? 23 : viewport.x - 24 - status_width;
     const float center_y = layout.narrow ? 64 : desktop_header / 2;
     const float text_y = std::floor(center_y - status_size / 2);
-    draw.AddCircleFilled(
-        {status_x - 9, center_y}, 3,
-        packed(has_status ? view::core_status_color(core_state, Color::warning) : Color::warning));
+    const auto dot_color = has_status ? view::core_status_color(core_state, Color::warning)
+                                     : connected ? Color::success : Color::warning;
+    draw.AddCircleFilled({status_x - 9, center_y}, 3, packed(dot_color));
     const auto state_color =
         has_status ? view::core_status_color(core_state, Color::secondary_text) : Color::secondary_text;
     if (state_color == Color::secondary_text) {
@@ -756,10 +764,19 @@ void render_dialogs(PanelState& state, PreviewSession& session)
             break;
         }
         case PanelDialog::diagnostics: {
-            ImGui::TextWrapped("Preview socket: %s", session.status() == PreviewStatus::ready ? "Connected"
-                                                     : session.status() == PreviewStatus::loading
-                                                         ? "Connecting"
-                                                         : "Unavailable");
+            if (session.ready()) {
+                ImGui::TextWrapped("Workspace connected over %s.", session.http_fallback() ? "HTTP" : "WebSocket");
+            } else if (session.status() == PreviewStatus::loading) {
+                ImGui::TextWrapped("Connecting to the workspace over %s…",
+                                   session.http_fallback() ? "HTTP" : "WebSocket");
+            } else {
+                ImGui::TextWrapped("Workspace connection unavailable.");
+                ImGui::TextWrapped("%s", panel_connection_help);
+            }
+            if (session.http_fallback() && session.ready()) {
+                ImGui::TextWrapped("Account lists require the workspace WebSocket. "
+                                   "The terminal opens its own connection.");
+            }
             const auto core_state = reported_core_state(session);
             if (core_state.empty()) {
                 ImGui::TextWrapped("WaterWall state: Unavailable");
@@ -767,7 +784,6 @@ void render_dialogs(PanelState& state, PreviewSession& session)
                 ImGui::TextWrapped("%s: %.*s", session.ready() ? "WaterWall state" : "Last WaterWall state",
                                    static_cast<int>(core_state.size()), core_state.data());
             }
-            ImGui::TextWrapped("Workspace transport: JSON WebSocket");
             ImGui::TextWrapped("Renderer: %.0f frames/s, %.2f× scale", ImGui::GetIO().Framerate,
                                ImGui::GetIO().DisplayFramebufferScale.x);
             break;
@@ -809,19 +825,22 @@ void render_view(PanelState& state, PreviewSession& session, bool narrow, bool s
 {
     switch (state.page) {
     case PanelPage::server: {
+        const float start = ImGui::GetCursorScreenPos().y;
+        if (session.status() == PreviewStatus::unavailable) {
+            view::wrapped("Panel connection unavailable.", Color::warning);
+            view::wrapped(panel_connection_help, Color::secondary_text);
+            if (theme::button("Reconnect")) {
+                session.start(true);
+            }
+        }
         const auto& server = view::field(session.data(), "server");
         if (server.is_null()) {
-            if (session.status() != PreviewStatus::loading) {
-                view::wrapped("Panel connection unavailable.", Color::warning);
-                if (theme::button("Reconnect")) {
-                    session.start();
-                }
-            }
             break;
         }
+        const float banner_height = ImGui::GetCursorScreenPos().y - start;
         const float height = render_server_status(server, state.panel_controls, session, stacked_status);
         if (narrow && stacked_status) {
-            state.stacked_server_status_height = height + 2 * theme::window_padding.y;
+            state.stacked_server_status_height = banner_height + height + 2 * theme::window_padding.y;
         }
         break;
     }
@@ -1023,10 +1042,12 @@ std::string describe_workspace_page(const PanelState& state, const PreviewSessio
     }
     const bool controls_dialog = state.panel_controls.dialog != PanelControlsState::Dialog::none;
     const bool has_server = state.page == PanelPage::server && session.data().contains("server");
+    if (session.status() == PreviewStatus::unavailable) {
+        description += " Panel connection unavailable. ";
+        description += panel_connection_help;
+    }
     if (!session.ready() && !has_server) {
-        auto result =
-            description + (session.status() == PreviewStatus::loading ? " Loading panel data."
-                                                                      : " Panel connection unavailable.");
+        auto result = description + (session.status() == PreviewStatus::loading ? " Loading panel data." : "");
         if (controls_dialog) {
             result += ' ' + describe_panel_controls(state.panel_controls, session, false);
         }
@@ -1036,6 +1057,9 @@ std::string describe_workspace_page(const PanelState& state, const PreviewSessio
         return result;
     }
 
+    if (session.ready() && session.http_fallback()) {
+        description += " Workspace connected over HTTP.";
+    }
     std::string result = description + ' ' + describe_logs(state.logs, session.logs());
     if (state.refresh_request || state.logs.clear_request ||
         (state.auth.pending() && state.auth.action() == AuthSession::Action::sign_out)) {

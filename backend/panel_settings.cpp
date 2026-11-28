@@ -4,9 +4,7 @@
 #include "session_settings.h"
 #include "waterwall_schematic.h"
 
-#ifdef WAVE_ENABLE_AUTH
 #include <httplib.h>
-#endif
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -511,6 +509,7 @@ struct PanelDatabase::Impl {
     PanelSettings settings{};
     std::string base_path;
     int session_expiry_days = default_session_expiry_days;
+    bool tls_activation_pending = false;
 };
 
 PanelDatabase::PanelDatabase(const char* executable, const fs::path& site_dir, bool check_only)
@@ -548,7 +547,7 @@ bool PanelDatabase::save_panel_base_path(std::string_view previous, std::string_
     }
     std::string next(path);
     std::lock_guard lock(impl_->write_mutex);
-    if (impl_->base_path != previous) {
+    if (impl_->tls_activation_pending || impl_->base_path != previous) {
         return false;
     }
     auto current = impl_->read_existing();
@@ -565,13 +564,18 @@ bool PanelDatabase::save_panel_base_path(std::string_view previous, std::string_
     return true;
 }
 
-Json PanelDatabase::save_tls_settings(const std::optional<TlsSettings>& tls)
+Json PanelDatabase::save_tls_settings(const std::optional<TlsSettings>& tls,
+                                      std::unique_ptr<httplib::Server>* activation)
 {
     std::lock_guard lock(impl_->write_mutex);
     auto current = impl_->read_existing();
+    std::unique_ptr<httplib::Server> validated;
     if (tls) {
 #ifdef WAVE_ENABLE_AUTH
-        make_tls_server(*tls, impl_->site_dir, current.at("listen").at("port").get<int>());
+        if (activation) {
+            validate_tls_settings(*tls, impl_->settings.listen_port);
+        }
+        validated = make_tls_server(*tls, impl_->site_dir, current.at("listen").at("port").get<int>());
 #else
         throw std::runtime_error("This Wave build does not support HTTPS.");
 #endif
@@ -588,7 +592,22 @@ Json PanelDatabase::save_tls_settings(const std::optional<TlsSettings>& tls)
         saved["private_key"] = tls->private_key.string();
     }
     impl_->save(current);
+    if (activation) {
+        *activation = std::move(validated);
+        // The acknowledgement contains the current base path. Keep it stable through the switch.
+        impl_->tls_activation_pending = static_cast<bool>(*activation);
+    }
     return std::move(saved);
+}
+
+void PanelDatabase::finish_tls_activation(std::optional<TlsSettings> tls)
+{
+    // The previous listener and its request handlers have already drained.
+    std::lock_guard lock(impl_->write_mutex);
+    if (tls) {
+        impl_->settings.tls = std::move(tls);
+    }
+    impl_->tls_activation_pending = false;
 }
 
 int PanelDatabase::session_expiry_days() const

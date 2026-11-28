@@ -2049,6 +2049,12 @@ std::string access_description(const ConfigUsersState& state)
 std::string list_notice(const ConfigUsersState& state, const PreviewSession& session, const UsersRoster* roster)
 {
     if (can_list(state) && session.ready() && !session.supports_users_roster()) {
+        if (session.http_fallback()) {
+            return state.source == Source::live && can_lookup(state)
+                       ? "The account list requires a WebSocket connection. "
+                         "You can still look up an account by its exact ID."
+                       : "The account list requires a WebSocket connection.";
+        }
         return "This Wave backend does not support the account roster. Update the backend to browse and search names.";
     }
     if (!state.list_error.empty()) {
