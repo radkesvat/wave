@@ -1,6 +1,9 @@
 #pragma once
 
+#include <nlohmann/json_fwd.hpp>
+
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -42,6 +45,11 @@ class AuthStore {
         unauthorized,
         busy
     };
+    enum class BasePathResult {
+        saved,
+        stale,
+        unauthorized
+    };
 
     explicit AuthStore(std::shared_ptr<PanelDatabase> database);
     ~AuthStore();
@@ -52,9 +60,16 @@ class AuthStore {
     SetupResult setup(std::string_view username, std::string_view password);
     SignInResult sign_in(std::string_view username, std::string_view password, IssuedSession& session);
     std::optional<Session> session(std::string_view token) const;
+    std::optional<std::string> monitored_panel_path(std::string_view token, std::string_view session_id,
+                                                   std::string_view connected_path) const;
     void sign_out(std::string_view token);
     UpdateResult update_admin(std::string_view token, std::string_view username,
                               std::string_view current_password, std::string_view new_password);
+    BasePathResult update_panel_base_path(std::string_view token, std::string_view previous,
+                                         std::string_view path);
+    static void validate_admin_backup(const nlohmann::json& admins);
+    bool restore_admin(const nlohmann::json& admins, std::string_view session_id, std::string_view restored_base_path,
+                       const std::function<void(const nlohmann::json& local_auth_state)>& commit);
 
   private:
     struct Impl;

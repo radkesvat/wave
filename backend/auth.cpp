@@ -378,13 +378,9 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
     }
 
     post_panel_json(server, panel_route(base_path_route),
-                    [database, store](const Request& req, Response& res, std::string_view body) {
+                    [store](const Request& req, Response& res, std::string_view body) {
         const auto prefix = req.matches[1].str();
         const bool bootstrap = prefix == panel_setup_prefix;
-        if ((!bootstrap || store->installed()) && !store->session(session_cookie(req))) {
-            res.status = 401;
-            return;
-        }
         const auto input = Json::parse(body, nullptr, false);
         const auto value = input.find(panel_base_path_key);
         if (value == input.end() || !value->is_string() || !valid_panel_base_path(value->get_ref<const std::string&>())) {
@@ -393,8 +389,15 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
         const auto& path = value->get_ref<const std::string&>();
         try {
-            if (!database->save_panel_base_path(bootstrap ? std::string_view{} : std::string_view(prefix), path)) {
+            switch (store->update_panel_base_path(session_cookie(req),
+                                                  bootstrap ? std::string_view{} : std::string_view(prefix), path)) {
+            case AuthStore::BasePathResult::saved:
+                break;
+            case AuthStore::BasePathResult::stale:
                 not_found(res);
+                return;
+            case AuthStore::BasePathResult::unauthorized:
+                res.status = 401;
                 return;
             }
         } catch (const std::runtime_error&) {
@@ -506,7 +509,7 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
     });
 
-    server.WebSocket(panel_route(panel_socket), [store, database](const Request& req, httplib::ws::WebSocket& socket) {
+    server.WebSocket(panel_route(panel_socket), [store](const Request& req, httplib::ws::WebSocket& socket) {
         const auto prefix = req.matches[1].str();
         const auto token = session_cookie(req);
         const auto session = store->session(token);
@@ -522,10 +525,9 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
         }
         socket.set_read_timeout(1);
         std::string message;
-        while (store->session(token)) {
-            const auto path = database->panel_base_path();
-            if (path != prefix) {
-                if (socket.send(Json{{"type", "base_path"}, {"path", path}}.dump())) {
+        while (const auto path = store->monitored_panel_path(token, session->id, prefix)) {
+            if (*path != prefix) {
+                if (socket.send(Json{{"type", "base_path"}, {"path", *path}}.dump())) {
                     socket.close();
                 }
                 return;

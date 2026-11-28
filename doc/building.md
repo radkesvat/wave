@@ -734,12 +734,17 @@ process before sending credentials. [WaterWall 1.6.0 APIServer](https://github.c
 
 Stop WaterWall before using **Backup** or **Restore** in Panel Controls.
 **Backup** downloads `wave-backup.zip`. Its `manifest.json` records the backup
-format version, the selected `waterwall_version`, saved core settings, and the
-registered config IDs, names, and enabled flags. The ZIP includes each config's
+format version, the source `wave_version`, the selected `waterwall_version`,
+saved core settings, and the registered config IDs, names, and enabled flags.
+Version 2 also records `panel_settings` with the base path, listener address and
+port, TLS settings and PEM paths, session expiry, theme, donation answer and UTC
+timestamp, and the administrator username and Argon2id password hash. The ZIP
+includes each config's
 `config.json`, referenced AuthenticationServer databases, and their `.backup`
 recovery files when present. Wave preserves the saved bytes of a primary and
 recovery file when WaterWall can load the primary or recover from the backup.
-The export captures the last state saved to disk.
+The export captures the last state saved to disk and excludes Wave session
+tokens, session records, the JWT signing key, and TLS certificate and key files.
 
 **Restore** validates the ZIP and shows the WaterWall version and the configs
 that will be added, replaced, or removed from the workspace. The destination
@@ -747,13 +752,20 @@ must have a valid schematic for the recorded release. Wave reports a missing
 executable or known external file dependencies, including databases required
 by Router rules, before confirmation. It preserves disabled drafts and warns
 when the selected release lacks one of their node types. Supply host-specific
-files separately. A restore uses the destination's Wave
-administrator, sessions, listener, base path, and TLS settings. ZIPs contain
-WaterWall credentials, so store them privately and use HTTPS for remote access.
+files separately. Restore preview shows the restored administrator and base
+path, and reports TLS problems to resolve before restarting. ZIPs contain the
+Wave administrator's password hash and may contain WaterWall credentials, so
+store them privately and use HTTPS for remote access.
 [Authentication and HTTPS](authentication.md)
 
 Confirm to apply the restored configuration files, core settings, and selected
-version together. Wave keeps unrelated files in the config folders, including
+WaterWall release together with any included panel settings. A version 2 restore
+replaces the administrator credentials, signs out existing sessions, generates
+a fresh JWT signing key, and switches to the restored base path. Sign in there
+with the administrator credentials from the backup. The listener address, port,
+and TLS changes take effect after Wave restarts. A version 1 backup restores the
+WaterWall workspace and keeps the destination panel settings and sessions.
+Wave keeps unrelated files in the config folders, including
 the files of configs removed from the workspace registry. Wave recovers an
 interrupted restore at startup before opening the workspace. Keep the config
 filesystems mounted until recovery finishes. Start WaterWall from Panel

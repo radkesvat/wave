@@ -50,6 +50,10 @@ using Json = nlohmann::json;
 constexpr char default_host[] = "0.0.0.0";
 constexpr int default_port = 2045;
 constexpr char database_name[] = "wave-db.json";
+constexpr std::array<std::string_view, 7> panel_backup_keys{
+    "admin", panel_base_path_key, "listen", "tls", "session_expiry_days", "theme", "donation",
+};
+constexpr std::array<std::string_view, 3> tls_backup_text_keys{"domain", "certificate_chain", "private_key"};
 
 class DatabaseDirectorySyncError : public std::runtime_error {
 public:
@@ -393,9 +397,8 @@ struct LoadedDatabase {
     bool changed;
 };
 
-LoadedDatabase load_database(const DatabaseFile& file, bool protect_permissions)
+LoadedDatabase load_database(Json settings)
 {
-    auto settings = file.read_settings(protect_permissions).value_or(Json::object());
     const auto [admins, added_admins] = settings.emplace("admin", Json::array());
     if (!admins->is_array() || admins->size() > 1) {
         throw std::runtime_error("admin in wave-db.json must be an array "
@@ -429,6 +432,24 @@ LoadedDatabase load_database(const DatabaseFile& file, bool protect_permissions)
     return {std::move(settings), std::move(listener), session_expiry_days, added_admins || added_host || added_port};
 }
 
+bool has_exact_keys(const Json& object, std::initializer_list<std::string_view> keys)
+{
+    return object.is_object() && object.size() == keys.size() &&
+           std::ranges::all_of(keys, [&](auto key) { return object.contains(key); });
+}
+
+bool donation_backup_record(const Json& donation)
+{
+    return has_exact_keys(donation, {"answer", "answered_at"}) && donation.at("answer").is_string() &&
+           donation.at("answered_at").is_string();
+}
+
+bool tls_backup_text(const Json& value)
+{
+    return value.is_string() && std::ranges::none_of(value.get_ref<const std::string&>(),
+                                                    [](unsigned char ch) { return ch < 0x20 || ch == 0x7f; });
+}
+
 } // namespace
 
 struct PanelDatabase::Impl {
@@ -438,7 +459,7 @@ struct PanelDatabase::Impl {
         if (!check_only) {
             file.lock();
         }
-        auto loaded = load_database(file, !check_only);
+        auto loaded = load_database(file.read_settings(!check_only).value_or(Json::object()));
         if (const auto path = loaded.contents.find(panel_base_path_key); path != loaded.contents.end()) {
             if (!path->is_string() || !valid_panel_base_path(path->get_ref<const std::string&>())) {
                 throw std::runtime_error("Invalid panel-base-path in wave-db.json.");
@@ -546,16 +567,16 @@ bool PanelDatabase::save_panel_base_path(std::string_view previous, std::string_
 
 Json PanelDatabase::save_tls_settings(const std::optional<TlsSettings>& tls)
 {
+    std::lock_guard lock(impl_->write_mutex);
+    auto current = impl_->read_existing();
     if (tls) {
 #ifdef WAVE_ENABLE_AUTH
-        make_tls_server(*tls, impl_->site_dir, impl_->settings.listen_port);
+        make_tls_server(*tls, impl_->site_dir, current.at("listen").at("port").get<int>());
 #else
         throw std::runtime_error("This Wave build does not support HTTPS.");
 #endif
     }
 
-    std::lock_guard lock(impl_->write_mutex);
-    auto current = impl_->read_existing();
     auto& saved = current["tls"];
     if (!saved.is_object()) {
         saved = Json::object();
@@ -634,11 +655,136 @@ void PanelDatabase::save_core_configs(const Json& configs)
     impl_->save_fields({{"core_configs", configs}});
 }
 
-void PanelDatabase::save_workspace_restore(const Json& version, const Json& settings,
-                                           const Json& configs, const Json& restore_id)
+Json PanelDatabase::capture_panel_backup() const
 {
-    impl_->save_fields({{"waterwall_version", version}, {"core_settings", settings}, {"core_configs", configs},
-                        {"workspace_restore_id", restore_id}});
+    std::lock_guard lock(impl_->write_mutex);
+    const auto saved = impl_->read_existing();
+    const auto& admin = saved.at("admin").at(0);
+    const auto& listen = saved.at("listen");
+    const auto saved_tls = saved.value("tls", Json::object());
+    Json tls = {{"enabled", saved_tls.value("enabled", false)}};
+    for (const auto key : tls_backup_text_keys) {
+        const auto field = saved_tls.find(key);
+        if (field != saved_tls.end() && tls_backup_text(*field)) {
+            tls[key] = *field;
+        }
+    }
+    const auto saved_theme = saved.find("theme");
+    const auto preset = saved_theme != saved.end() && saved_theme->is_string()
+                            ? theme::parse_preset(saved_theme->get_ref<const std::string&>())
+                            : std::nullopt;
+    Json donation;
+    if (const auto item = saved.find("donation"); item != saved.end() && item->is_object()) {
+        const auto answer = item->find("answer");
+        const auto time = item->find("answered_at");
+        if (answer != item->end() && answer->is_string() && time != item->end() && time->is_string()) {
+            donation = {{"answer", *answer}, {"answered_at", *time}};
+        }
+    }
+    return {{"admin", Json::array({{{"username", admin.at("username")}, {"password", admin.at("password")}}})},
+            {panel_base_path_key, saved.at(panel_base_path_key)},
+            {"listen", {{"host", listen.at("host")}, {"port", listen.at("port")}}},
+            {"tls", std::move(tls)},
+            {"session_expiry_days", saved.value("session_expiry_days", default_session_expiry_days)},
+            {"theme", theme::preset_key(preset.value_or(theme::Preset::standard))},
+            {"donation", std::move(donation)}};
+}
+
+void PanelDatabase::validate_panel_backup(const Json& panel) const
+{
+    if (!panel.is_object() || panel.size() != panel_backup_keys.size() ||
+        !std::ranges::all_of(panel_backup_keys, [&](auto key) { return panel.contains(key); })) {
+        throw std::runtime_error("Wave panel settings in the backup are invalid.");
+    }
+    const auto& path = panel.at(panel_base_path_key);
+    if (!path.is_string() || !valid_panel_base_path(path.get_ref<const std::string&>())) {
+        throw std::runtime_error("The backup contains an invalid panel base path.");
+    }
+    const auto& admins = panel.at("admin");
+    if (!admins.is_array() || admins.size() != 1 ||
+        !has_exact_keys(admins.front(), {"username", "password"}) || !admins.front().at("username").is_string() ||
+        !admins.front().at("password").is_string()) {
+        throw std::runtime_error("The backup must contain one Wave administrator with a username and password hash.");
+    }
+    if (!has_exact_keys(panel.at("listen"), {"host", "port"})) {
+        throw std::runtime_error("The backup contains invalid Wave listener settings.");
+    }
+    const auto& tls = panel.at("tls");
+    if (!tls.is_object() || !tls.contains("enabled") || !tls.at("enabled").is_boolean()) {
+        throw std::runtime_error("The backup contains invalid Wave TLS settings.");
+    }
+    std::size_t tls_field_count = 1;
+    for (const auto key : tls_backup_text_keys) {
+        const auto field = tls.find(key);
+        if (field != tls.end() && tls_backup_text(*field)) {
+            ++tls_field_count;
+        }
+    }
+    if (tls.size() != tls_field_count) {
+        throw std::runtime_error("The backup contains invalid Wave TLS settings.");
+    }
+    const auto& preset = panel.at("theme");
+    if (!preset.is_string() || !theme::parse_preset(preset.get_ref<const std::string&>())) {
+        throw std::runtime_error("The backup contains an invalid Wave theme.");
+    }
+    const auto& donation = panel.at("donation");
+    if (!donation.is_null() && !donation_backup_record(donation)) {
+        throw std::runtime_error("The backup contains an invalid donation response.");
+    }
+    const auto saved = load_database(panel);
+    if (saved.settings.tls) {
+#ifdef WAVE_ENABLE_AUTH
+        validate_tls_settings(*saved.settings.tls, saved.settings.listen_port);
+#else
+        throw std::runtime_error("This Wave build does not support the backup's HTTPS settings.");
+#endif
+    }
+}
+
+std::string PanelDatabase::panel_backup_tls_error(const Json& panel) const
+{
+#ifdef WAVE_ENABLE_AUTH
+    try {
+        if (const auto tls = load_tls(panel)) {
+            make_tls_server(*tls, impl_->site_dir, panel.at("listen").at("port").get<int>());
+        }
+    } catch (const std::runtime_error& error) {
+        return error.what();
+    }
+#else
+    (void)panel;
+#endif
+    return {};
+}
+
+void PanelDatabase::save_workspace_restore(const Json& manifest, const Json& restore_id, const Json& auth_state)
+{
+    std::lock_guard lock(impl_->write_mutex);
+    auto current = impl_->read_existing();
+    current["waterwall_version"] = manifest.at("waterwall_version");
+    current["core_settings"] = manifest.at("core_settings");
+    current["core_configs"] = manifest.at("configs");
+    current["workspace_restore_id"] = restore_id;
+    const auto panel = manifest.find("panel_settings");
+    if (panel == manifest.end()) {
+        impl_->save(current);
+        return;
+    }
+    if (!auth_state.is_object()) {
+        throw std::invalid_argument("The restored administrator requires fresh authentication state.");
+    }
+    auto path = panel->at(panel_base_path_key).get<std::string>();
+    const int expiry = panel->at("session_expiry_days").get<int>();
+    for (const auto key : panel_backup_keys) {
+        current[key] = panel->at(key);
+    }
+    if (current.at("donation").is_null()) {
+        current.erase("donation");
+    }
+    current["auth"] = auth_state;
+    impl_->save(current);
+    impl_->base_path = std::move(path);
+    impl_->session_expiry_days = expiry;
 }
 
 } // namespace wave

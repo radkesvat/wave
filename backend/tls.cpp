@@ -111,16 +111,6 @@ void require_private_location(const fs::path& path, const fs::path& site_dir)
     }
 }
 
-void validate_settings(const TlsSettings& settings)
-{
-    if (!valid_dns_hostname(settings.domain)) {
-        throw std::runtime_error("Use a lowercase DNS hostname without a scheme, port, wildcard, or trailing dot.");
-    }
-    if (!settings.certificate_chain.is_absolute() || !settings.private_key.is_absolute()) {
-        throw std::runtime_error("Use absolute local paths for both TLS PEM files.");
-    }
-}
-
 Bio open_pem(const fs::path& path, const char* diagnostic)
 {
     const int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
@@ -214,12 +204,22 @@ void load_certificate_chain(SSL_CTX* context, const TlsSettings& settings)
 
 } // namespace
 
-std::unique_ptr<httplib::Server> make_tls_server(const TlsSettings& settings, const fs::path& site_dir, int port)
+void validate_tls_settings(const TlsSettings& settings, int port)
 {
     if (port == 0) {
         throw std::runtime_error("Set a fixed listen.port in wave-db.json for HTTPS.");
     }
-    validate_settings(settings);
+    if (!valid_dns_hostname(settings.domain)) {
+        throw std::runtime_error("Use a lowercase DNS hostname without a scheme, port, wildcard, or trailing dot.");
+    }
+    if (!settings.certificate_chain.is_absolute() || !settings.private_key.is_absolute()) {
+        throw std::runtime_error("Use absolute local paths for both TLS PEM files.");
+    }
+}
+
+std::unique_ptr<httplib::Server> make_tls_server(const TlsSettings& settings, const fs::path& site_dir, int port)
+{
+    validate_tls_settings(settings, port);
     require_private_location(settings.certificate_chain, site_dir);
     require_private_location(settings.private_key, site_dir);
     auto server = std::make_unique<httplib::SSLServer>([](httplib::tls::ctx_t context) {

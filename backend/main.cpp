@@ -133,6 +133,9 @@ int main(int argc, char* argv[])
         }
         database =
             std::make_shared<wave::PanelDatabase>(argv[0], options.site_dir, options.check_tls);
+        if (!options.check_tls) {
+            wave::recover_workspace_restore(*database);
+        }
         settings = database->settings();
         secure = settings.tls.has_value();
         if (!options.check_tls && !validate_site(options.site_dir, secure)) {
@@ -160,7 +163,6 @@ int main(int argc, char* argv[])
         } else {
             server = std::make_unique<httplib::Server>();
         }
-        wave::recover_workspace_restore(*database);
         wave::select_waterwall_schematic(*database);
         store = std::make_shared<wave::AuthStore>(database);
         wave::configure_authenticated_routes(*server, options.site_dir, store, database, secure, authority);

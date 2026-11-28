@@ -1,5 +1,6 @@
 #include "workspace_backup.h"
 
+#include "auth_store.h"
 #include "core_config_files.h"
 #include "core_config_graph.h"
 #include "core_config_name.h"
@@ -9,6 +10,7 @@
 #include "private_temp_directory.h"
 #include "waterwall_schematic.h"
 #include "waterwall_schematic_file.h"
+#include "wave_version.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -178,15 +180,29 @@ bool valid_workspace_path(std::string_view name)
     return CoreConfigUsers::valid_filename(filename);
 }
 
-void validate_manifest(const Json& manifest)
+void validate_manifest(const PanelDatabase& database, const Json& manifest)
 {
     const auto& configs = schematic_field(manifest, "configs");
     const auto& settings = schematic_field(manifest, "core_settings");
     const auto& version = schematic_field(manifest, "version");
-    if (schematic_field(manifest, "format") != format || !version.is_number_integer() || version != 1 ||
+    if (schematic_field(manifest, "format") != format || !version.is_number_integer() ||
+        (version != 1 && version != 2) ||
         !valid_waterwall_version(schematic_text(schematic_field(manifest, "waterwall_version"))) ||
         !settings.is_object() || settings.dump().size() > core_settings::max_bytes) {
         throw std::runtime_error("Invalid or unsupported Wave workspace backup manifest.");
+    }
+    if (version == 2) {
+        const auto wave_version = schematic_text(schematic_field(manifest, "wave_version"));
+        if (manifest.size() != 7 || wave_version.empty() || wave_version.size() > 64 ||
+            wave_version.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.+-") !=
+                wave_version.npos || !manifest.contains("panel_settings")) {
+            throw std::runtime_error("Invalid Wave panel metadata in the backup manifest.");
+        }
+        const auto& panel = manifest.at("panel_settings");
+        database.validate_panel_backup(panel);
+        AuthStore::validate_admin_backup(panel.at("admin"));
+    } else if (manifest.contains("panel_settings")) {
+        throw std::runtime_error("A version 1 workspace backup cannot contain panel settings.");
     }
     if (const auto error = core_config_registry_error(configs, true); !error.empty()) {
         throw std::runtime_error("The workspace backup config registry " + std::string(error));
@@ -499,15 +515,22 @@ void recover_journal(const fs::path& directory, const fs::path& journal, const J
 
 } // namespace
 
-BackupEntries capture_workspace_backup(const fs::path& directory, const Json& settings, const Json& configs)
+BackupEntries capture_workspace_backup(const PanelDatabase& database, Json panel, const Json& settings,
+                                      const Json& configs)
 {
-    const Json manifest = {{"format", format}, {"version", 1}, {"waterwall_version", waterwall_version()},
-                           {"core_settings", settings}, {"configs", configs}};
-    validate_manifest(manifest);
+    const auto& directory = database.directory();
+    const Json manifest = {{"format", format}, {"version", 2}, {"wave_version", release_version},
+                           {"panel_settings", std::move(panel)},
+                           {"waterwall_version", waterwall_version()}, {"core_settings", settings}, {"configs", configs}};
+    validate_manifest(database, manifest);
     validate_core_settings(settings, waterwall_schematic());
 
-    BackupEntries entries{{manifest_path, manifest.dump(2) + '\n'}};
-    std::size_t size = entries.begin()->second.size();
+    auto serialized = manifest.dump(2) + '\n';
+    std::size_t size = serialized.size();
+    if (size > max_metadata_bytes) {
+        throw std::runtime_error("The workspace backup manifest exceeds its size limit.");
+    }
+    BackupEntries entries{{manifest_path, std::move(serialized)}};
     const auto capture = [&](const std::string& path, std::size_t limit, bool private_file) {
         auto bytes = read_file(directory / path, limit, private_file);
         if (!bytes) {
@@ -543,14 +566,15 @@ BackupEntries capture_workspace_backup(const fs::path& directory, const Json& se
     return entries;
 }
 
-WorkspaceBackup prepare_workspace_backup(const fs::path& directory, BackupEntries entries)
+WorkspaceBackup prepare_workspace_backup(const PanelDatabase& database, BackupEntries entries)
 {
+    const auto& directory = database.directory();
     const auto manifest_file = entries.find(manifest_path);
     if (manifest_file == entries.end()) {
         throw std::runtime_error("This ZIP has no Wave workspace backup manifest.");
     }
     auto manifest = parse_object(manifest_file->second, max_metadata_bytes, "manifest");
-    validate_manifest(manifest);
+    validate_manifest(database, manifest);
     entries.erase(manifest_file);
     const auto version = schematic_text(manifest.at("waterwall_version"));
     std::shared_ptr<const WaterWallSchematic> schematic;
@@ -674,7 +698,8 @@ WorkspaceRestoreFiles existing_workspace_restore_files(const fs::path& directory
     return files;
 }
 
-void apply_workspace_backup(PanelDatabase& database, const WorkspaceBackup& backup, const std::string& restore_id)
+void apply_workspace_backup(PanelDatabase& database, const WorkspaceBackup& backup, const std::string& restore_id,
+                            const Json& auth_state)
 {
     const auto& directory = database.directory();
     const auto journal = directory / journal_directory;
@@ -775,8 +800,7 @@ void apply_workspace_backup(PanelDatabase& database, const WorkspaceBackup& back
             sync_directory(folder);
         }
         sync_directory(root);
-        database.save_workspace_restore(backup.manifest.at("waterwall_version"), backup.manifest.at("core_settings"),
-                                        backup.manifest.at("configs"), restore_id);
+        database.save_workspace_restore(backup.manifest, restore_id, auth_state);
     } catch (...) {
         recover_journal(directory, journal, nullptr);
         throw;

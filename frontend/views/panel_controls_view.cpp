@@ -519,6 +519,19 @@ std::string describe_restore_summary(const Json& reply)
     std::string summary = version == current
                               ? std::format("WaterWall {}.", version)
                               : std::format("WaterWall will change from {} to {}.", current, version);
+    if (const auto source = string_field(reply, "wave_version"); !source.empty()) {
+        summary += std::format("\nCreated by Wave {}.", source);
+    }
+    const auto& panel = field(reply, "panel_settings");
+    if (panel.is_object()) {
+        summary += std::format("\nPanel base path {}. Administrator {}.", string_field(panel, "base_path"),
+                               string_field(panel, "administrator"));
+        summary += "\nRestoring replaces panel settings and administrator credentials. "
+                   "All active Wave sessions will be signed out.";
+        if (bool_field(panel, "restart_required")) {
+            summary += "\nRestart Wave to apply the restored listener and TLS settings.";
+        }
+    }
     const auto& configs = array_field(reply, "configs");
     const auto& replaced = array_field(reply, "replaced_configs");
     if (configs.empty()) {

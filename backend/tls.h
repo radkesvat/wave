@@ -16,6 +16,7 @@ struct TlsSettings {
     std::filesystem::path private_key;
 };
 
+void validate_tls_settings(const TlsSettings& settings, int port);
 std::unique_ptr<httplib::Server> make_tls_server(const TlsSettings& settings,
                                               const std::filesystem::path& site_dir, int port);
 

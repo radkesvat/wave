@@ -250,18 +250,33 @@ struct Admin {
     }
 };
 
+Admin read_admin_identity(const Json& entry, const char* error)
+{
+    Admin admin{text(entry, "username"), text(entry, "password"), {}, {}};
+    if (!AuthStore::valid_username(admin.username) || !valid_password_hash(admin.password_hash)) {
+        throw std::runtime_error(error);
+    }
+    return admin;
+}
+
+Admin read_backup_admin(const Json& admins)
+{
+    constexpr auto error =
+        "A Wave panel backup requires one administrator with a username and an Argon2id password hash.";
+    if (!admins.is_array() || admins.size() != 1 || !admins.front().is_object() || admins.front().size() != 2) {
+        throw std::runtime_error(error);
+    }
+    return read_admin_identity(admins.front(), error);
+}
+
 std::optional<Admin> load_admin(const Json& database)
 {
     const auto& admins = database.at("admin");
     if (admins.empty()) {
         return std::nullopt;
     }
-    const auto& entry = admins.front();
-    Admin admin{text(entry, "username"), text(entry, "password"), {}, {}};
-    if (!AuthStore::valid_username(admin.username) || !valid_password_hash(admin.password_hash)) {
-        throw std::runtime_error("An administrator in wave-db.json requires a "
-                                 "username and an Argon2id password hash.");
-    }
+    auto admin = read_admin_identity(admins.front(), "An administrator in wave-db.json requires a "
+                                                   "username and an Argon2id password hash.");
     const auto state = database.find("auth");
     if (state == database.end()) {
         admin.jwt_key = random_hex(32);
@@ -285,6 +300,16 @@ std::optional<Admin> load_admin(const Json& database)
     }
     return admin;
 }
+
+struct RestoredPanelPath {
+    struct RevokedSession {
+        std::string id;
+        std::int64_t expires_at;
+    };
+    std::string path;
+    std::vector<RevokedSession> sessions;
+    std::chrono::steady_clock::time_point expires_at;
+};
 
 } // namespace
 
@@ -316,6 +341,7 @@ struct AuthStore::Impl {
     mutable std::mutex mutex;
     bool storage_failed = false;
     std::optional<Admin> admin;
+    std::optional<RestoredPanelPath> restored_panel_path;
     std::mutex sign_in_mutex;
     std::chrono::steady_clock::time_point retry_after{};
 };
@@ -377,6 +403,7 @@ AuthStore::SignInResult AuthStore::sign_in(std::string_view username, std::strin
     }
     std::string stored_username;
     std::string stored_hash;
+    std::string stored_key;
     {
         std::lock_guard lock(impl_->mutex);
         impl_->check_available();
@@ -385,6 +412,7 @@ AuthStore::SignInResult AuthStore::sign_in(std::string_view username, std::strin
         }
         stored_username = impl_->admin->username;
         stored_hash = impl_->admin->password_hash;
+        stored_key = impl_->admin->jwt_key;
     }
     if (!verify_password(password, stored_hash) || username != stored_username) {
         impl_->retry_after = std::chrono::steady_clock::now() + 1s;
@@ -393,6 +421,9 @@ AuthStore::SignInResult AuthStore::sign_in(std::string_view username, std::strin
 
     std::lock_guard lock(impl_->mutex);
     impl_->check_available();
+    if (!secret_equal(impl_->admin->jwt_key, stored_key)) {
+        return SignInResult::invalid;
+    }
     const auto now = unix_time();
     auto next = *impl_->admin;
     std::erase_if(next.sessions, [now](const auto& record) { return record.expires_at <= now; });
@@ -421,6 +452,30 @@ std::optional<AuthStore::Session> AuthStore::session(std::string_view token) con
         return std::nullopt;
     }
     return Session{impl_->admin->username, match->expires_at, match->id};
+}
+
+std::optional<std::string> AuthStore::monitored_panel_path(std::string_view token, std::string_view session_id,
+                                                          std::string_view connected_path) const
+{
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->storage_failed || !impl_->admin) {
+        return std::nullopt;
+    }
+    if (impl_->admin->find_session(token) != impl_->admin->sessions.end()) {
+        return impl_->database->panel_base_path();
+    }
+
+    // Only an already connected monitor gets this notice. The old cookie cannot authenticate again.
+    const auto& restored = impl_->restored_panel_path;
+    if (!restored || restored->path == connected_path || restored->expires_at <= std::chrono::steady_clock::now()) {
+        return std::nullopt;
+    }
+    const auto active = std::ranges::find(restored->sessions, session_id, &RestoredPanelPath::RevokedSession::id);
+    if (active == restored->sessions.end() || active->expires_at <= unix_time() ||
+        restored->path != impl_->database->panel_base_path()) {
+        return std::nullopt;
+    }
+    return restored->path;
 }
 
 void AuthStore::sign_out(std::string_view token)
@@ -473,6 +528,50 @@ AuthStore::UpdateResult AuthStore::update_admin(std::string_view token, std::str
     }
     impl_->commit(Admin{std::string(username), std::move(next_hash), random_hex(32), {}});
     return UpdateResult::updated;
+}
+
+AuthStore::BasePathResult AuthStore::update_panel_base_path(std::string_view token, std::string_view previous,
+                                                           std::string_view path)
+{
+    std::lock_guard lock(impl_->mutex);
+    impl_->check_available();
+    if ((!previous.empty() || impl_->admin) &&
+        (!impl_->admin || impl_->admin->find_session(token) == impl_->admin->sessions.end())) {
+        return BasePathResult::unauthorized;
+    }
+    return impl_->database->save_panel_base_path(previous, path) ? BasePathResult::saved : BasePathResult::stale;
+}
+
+void AuthStore::validate_admin_backup(const Json& admins)
+{
+    read_backup_admin(admins);
+}
+
+bool AuthStore::restore_admin(const Json& admins, std::string_view session_id, std::string_view restored_base_path,
+                              const std::function<void(const Json& local_auth_state)>& commit)
+{
+    auto next = read_backup_admin(admins);
+    std::lock_guard lock(impl_->mutex);
+    impl_->check_available();
+    const auto now = unix_time();
+    if (!impl_->admin || std::ranges::none_of(impl_->admin->sessions, [&](const auto& record) {
+            return record.expires_at > now && record.id == session_id;
+        })) {
+        return false;
+    }
+
+    next.jwt_key = random_hex(32);
+    RestoredPanelPath notice{std::string(restored_base_path), {}, {}};
+    for (const auto& record : impl_->admin->sessions) {
+        if (record.expires_at > now) {
+            notice.sessions.emplace_back(record.id, record.expires_at);
+        }
+    }
+    commit(next.state());
+    notice.expires_at = std::chrono::steady_clock::now() + 1min;
+    impl_->restored_panel_path = std::move(notice);
+    impl_->admin = std::move(next);
+    return true;
 }
 
 } // namespace wave

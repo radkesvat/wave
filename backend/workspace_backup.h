@@ -28,14 +28,15 @@ struct WorkspaceBackup {
 
 using WorkspaceRestoreFiles = std::map<std::string, std::array<std::uintmax_t, 5>, std::less<>>;
 
-BackupEntries capture_workspace_backup(const std::filesystem::path& directory, const nlohmann::json& settings,
-                                      const nlohmann::json& configs);
-WorkspaceBackup prepare_workspace_backup(const std::filesystem::path& directory, BackupEntries entries);
+BackupEntries capture_workspace_backup(const PanelDatabase& database, nlohmann::json panel,
+                                      const nlohmann::json& settings, const nlohmann::json& configs);
+WorkspaceBackup prepare_workspace_backup(const PanelDatabase& database, BackupEntries entries);
 WorkspaceRestoreFiles existing_workspace_restore_files(const std::filesystem::path& directory,
                                                       const WorkspaceBackup& backup);
 
 // Recover before loading the selected schematic or opening the workspace.
 void recover_workspace_restore(const PanelDatabase& database);
-void apply_workspace_backup(PanelDatabase& database, const WorkspaceBackup& backup, const std::string& restore_id);
+void apply_workspace_backup(PanelDatabase& database, const WorkspaceBackup& backup, const std::string& restore_id,
+                            const nlohmann::json& auth_state = nullptr);
 
 } // namespace wave

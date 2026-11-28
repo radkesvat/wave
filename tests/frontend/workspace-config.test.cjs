@@ -511,6 +511,47 @@ test('reports an unconfirmed restore outcome when Apply times out', async () => 
     }
 });
 
+test('previews restored panel settings and opens sign-in at the restored base path', async () => {
+    const page = await workspace.browser.newPage({ viewport: coreDesktop });
+    const data = fixture('stopped');
+    const basePath = '/restored/wave';
+    const restoredUrl = new URL(`${basePath}/`, workspace.url);
+    const signInUrl = new URL('sign-in', restoredUrl);
+    const applyUrl = new URL('api/backup/apply', workspace.url).href;
+    await mockPreview(page, data);
+    await page.route(new URL('api/backup/prepare', workspace.url).href, route => route.fulfill({
+        status: 200, json: {
+            ok: true, token: 'panel-restore-token', current_waterwall_version: '1.6.0', waterwall_version: '1.6.0',
+            wave_version: '0.0.1-beta', panel_settings: { base_path: basePath, administrator: 'restored-admin',
+                restart_required: true },
+            configs: [], replaced_configs: [], removed_configs: [],
+        },
+    }));
+    await page.route(applyUrl, route => route.fulfill({ status: 200, json: { ok: true, base_path: basePath } }));
+    await page.route(restoredUrl.href, route => route.fulfill({ status: 303, headers: { location: signInUrl.href } }));
+    try {
+        await page.goto(workspace.url);
+        await waitForServerStatus(page);
+        await click(page, 675, await backupButtonsRow(page));
+        await status(page, /Restore backup/);
+        await chooseBackupFile(page, Buffer.from('Backup ZIP'));
+        await status(page, /Created by Wave 0\.0\.1-beta\./);
+        await status(page, /Panel base path \/restored\/wave\. Administrator restored-admin\./);
+        await status(page, /Restoring replaces panel settings and administrator credentials\./);
+        await status(page, /All active Wave sessions will be signed out\./);
+        await status(page, /Restart Wave to apply the restored listener and TLS settings\./);
+        assert.equal(page.url(), workspace.url, 'The preview keeps the current panel open until confirmation.');
+        const applying = page.waitForRequest(applyUrl, { timeout });
+        const navigating = page.waitForRequest(restoredUrl.href, { timeout });
+        await confirmDialog(page, (x, y) => click(page, x, y));
+        assert.deepEqual((await applying).postDataJSON(), { token: 'panel-restore-token' });
+        assert.ok((await navigating).isNavigationRequest());
+        await page.waitForURL(signInUrl.href, { timeout });
+    } finally {
+        await page.close();
+    }
+});
+
 test('restores an open config by name and returns to Server Status when its ID is reused', async () => {
     const page = await workspace.browser.newPage({ viewport: desktop });
     const data = fixture('stopped');

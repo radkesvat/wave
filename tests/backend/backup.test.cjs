@@ -1,13 +1,15 @@
 const assert = require('node:assert/strict');
 const { execFile } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
+const { once } = require('node:events');
 const { chown, mkdir, readFile, readdir, readlink, stat, unlink, writeFile } = require('node:fs/promises');
 const { dirname, join } = require('node:path');
 const { test } = require('node:test');
 const { promisify } = require('node:util');
+const { crc32, inflateRawSync } = require('node:zlib');
 const { authFixture, fixtureSession, nextPreviewSnapshot, openPreview, requestPreview, seedCore, timeout } =
     require('./auth_fixture.cjs');
-const { bundledSchematicFile, schematicFile } = require('./tls_fixture.cjs');
+const { bundledSchematicFile, schematicFile, tlsFixture } = require('./tls_fixture.cjs');
 
 const archiveVersion = '1.6.1';
 
@@ -44,6 +46,67 @@ async function provisionRelease(fixture) {
     const source = await readFile(bundledSchematicFile, 'utf8');
     await mkdir(dirname(target), { mode: 0o700, recursive: true });
     await writeFile(target, source.replace('"version": "1.6.0"', `"version": "${archiveVersion}"`), { mode: 0o600 });
+}
+
+function readZip(archive) {
+    // Wave emits ordinary ZIP files without a ZIP comment or ZIP64 records.
+    const end = archive.length - 22;
+    assert.equal(archive.readUInt32LE(end), 0x06054b50);
+    const count = archive.readUInt16LE(end + 10);
+    let offset = archive.readUInt32LE(end + 16);
+    const entries = new Map();
+    for (let index = 0; index < count; ++index) {
+        assert.equal(archive.readUInt32LE(offset), 0x02014b50);
+        const method = archive.readUInt16LE(offset + 10);
+        const size = archive.readUInt32LE(offset + 20);
+        const local = archive.readUInt32LE(offset + 42);
+        const nameSize = archive.readUInt16LE(offset + 28);
+        const name = archive.toString('utf8', offset + 46, offset + 46 + nameSize);
+        assert.equal(archive.readUInt32LE(local), 0x04034b50);
+        const start = local + 30 + archive.readUInt16LE(local + 26) + archive.readUInt16LE(local + 28);
+        const stored = archive.subarray(start, start + size);
+        assert.ok(method === 0 || method === 8);
+        entries.set(name, method === 8 ? inflateRawSync(stored) : stored);
+        offset += 46 + nameSize + archive.readUInt16LE(offset + 30) + archive.readUInt16LE(offset + 32);
+    }
+    return entries;
+}
+
+function writeZip(entries) {
+    const files = [];
+    const directory = [];
+    let fileBytes = 0;
+    for (const [path, body] of entries) {
+        const name = Buffer.from(path);
+        const crc = crc32(body);
+        const local = Buffer.alloc(30);
+        local.writeUInt32LE(0x04034b50);
+        local.writeUInt16LE(20, 4);
+        local.writeUInt16LE(0x0800, 6);
+        local.writeUInt32LE(crc, 14);
+        local.writeUInt32LE(body.length, 18);
+        local.writeUInt32LE(body.length, 22);
+        local.writeUInt16LE(name.length, 26);
+        const record = Buffer.alloc(46);
+        record.writeUInt32LE(0x02014b50);
+        record.writeUInt16LE(20, 4);
+        local.copy(record, 6, 4, 28);
+        record.writeUInt32LE(fileBytes, 42);
+        files.push(local, name, body);
+        directory.push(record, name);
+        fileBytes += local.length + name.length + body.length;
+    }
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50);
+    end.writeUInt16LE(entries.size, 8);
+    end.writeUInt16LE(entries.size, 10);
+    end.writeUInt32LE(directory.reduce((length, chunk) => length + chunk.length, 0), 12);
+    end.writeUInt32LE(fileBytes, 16);
+    return Buffer.concat([...files, ...directory, end]);
+}
+
+function withManifest(entries, manifest) {
+    return writeZip(new Map(entries).set('manifest.json', Buffer.from(JSON.stringify(manifest))));
 }
 
 test('ZIP routes require a session, check the upload origin, and keep JSON request limits', async t => {
@@ -156,9 +219,14 @@ test('restores the ZIP version, saved core settings, config bytes and referenced
     assert.equal(download.headers.get('content-type'), 'application/zip');
     assert.match(download.headers.get('content-disposition'), /^attachment;.+\.zip/i);
     assert.equal(download.headers.get('cache-control'), 'no-store');
-    const archive = Buffer.from(await download.arrayBuffer());
-    assert.equal(archive.subarray(0, 4).toString('hex'), '504b0304');
-    assert.ok(archive.length > 4096, 'The ZIP exceeds the authentication route payload limit.');
+    const downloaded = Buffer.from(await download.arrayBuffer());
+    assert.equal(downloaded.subarray(0, 4).toString('hex'), '504b0304');
+    assert.ok(downloaded.length > 4096, 'The ZIP exceeds the authentication route payload limit.');
+    const entries = readZip(downloaded);
+    const legacyManifest = JSON.parse(entries.get('manifest.json'));
+    delete legacyManifest.panel_settings;
+    delete legacyManifest.wave_version;
+    const archive = withManifest(entries, { ...legacyManifest, version: 1 });
     await writeFile(join(sourceDirectory, databasePath), '{"users":[{}]}');
     await writeFile(join(sourceDirectory, `${databasePath}.backup`), 'invalid recovery');
     await readReply(await call(source, '/api/backup', { session: sourceSession }), false);
@@ -245,6 +313,7 @@ test('restores the ZIP version, saved core settings, config bytes and referenced
     const proposal = await readReply(await prepare(destination, destinationSession, archive), true);
     assert.equal(proposal.waterwall_version, archiveVersion);
     assert.equal(proposal.current_waterwall_version, '1.6.0');
+    assert.equal(proposal.panel_settings, undefined);
     assert.deepEqual(proposal.configs.map(({ name, enabled }) => ({ name, enabled })), [{ name, enabled: true }]);
     assert.deepEqual(proposal.replaced_configs, [name]);
     assert.deepEqual(proposal.removed_configs, [extraName]);
@@ -295,6 +364,139 @@ test('restores the ZIP version, saved core settings, config bytes and referenced
     const reopened = await openPreview(t, destination.origin, destinationSession, destination.basePath);
     assert.equal(reopened.initial.server.core.version, archiveVersion);
     assert.equal(reopened.initial.server.core.configs[0].name, name);
+});
+
+test('backs up and restores Wave panel settings and administrator credentials without sessions', async t => {
+    const source = await authFixture(t, undefined, { encrypted: false, basePath: '/backup-origin' });
+    const newPath = '/archived/wave';
+    const sourceCredentials = { username: 'source-admin', password: 'backup source test passphrase 9Qf4W' };
+    const oldCredentials = { username: 'destination-admin', password: 'backup destination test passphrase 6Kn7X' };
+    const auth = (fixture, action, credentials) => call(fixture, `/api/auth/${action}`, {
+        body: JSON.stringify(credentials),
+    });
+    async function signIn(fixture, credentials, setup = false) {
+        if (setup) assert.equal((await auth(fixture, 'setup', credentials)).status, 201);
+        const response = await auth(fixture, 'sign-in', credentials);
+        assert.equal(response.status, 204);
+        return response.headers.get('set-cookie').split(';', 1)[0];
+    }
+
+    let tls = { enabled: false, domain: source.hostname,
+        certificate_chain: join(source.cwd, 'saved certificate.pem'), private_key: join(source.cwd, 'saved key.pem') };
+    const initialDb = JSON.parse(await readFile(source.database, 'utf8'));
+    await writeFile(source.database, JSON.stringify({ ...initialDb, tls, fixture_only: 'not a panel setting' }));
+    await source.start();
+    const sourceSession = await signIn(source, sourceCredentials, true);
+    const pathChange = await call(source, '/api/auth/base-path', {
+        session: sourceSession, body: JSON.stringify({ 'panel-base-path': newPath }),
+    });
+    assert.equal(pathChange.status, 201);
+    const exporting = { ...source, basePath: newPath };
+    const sourceView = await openPreview(t, source.origin, sourceSession, newPath);
+    if (sourceView.initial.settings.tls.supported) {
+        const { chainPath, keyPath } = await tlsFixture(source.cwd);
+        tls = { ...tls, enabled: true, certificate_chain: chainPath, private_key: keyPath };
+    }
+    for (const [action, fields] of [
+        ['apply_session_settings', { session_expiry_days: 9 }],
+        ['apply_theme', { theme: 'light' }],
+        ['apply_donation', { answer: '15' }],
+        ...(tls.enabled ? [['apply_tls_settings', { settings: tls }]] : []),
+    ]) {
+        const reply = await requestPreview(sourceView.socket, action, fields);
+        assert.equal(reply.ok, true, reply.feedback);
+    }
+    const sourceDb = JSON.parse(await readFile(source.database, 'utf8'));
+    const download = await call(exporting, '/api/backup', { session: sourceSession });
+    assert.equal(download.status, 200, download.ok ? undefined : await download.text());
+    const archive = Buffer.from(await download.arrayBuffer());
+    const entries = readZip(archive);
+    assert.deepEqual([...entries.keys()], ['manifest.json']);
+    const manifestText = entries.get('manifest.json').toString('utf8');
+    const manifest = JSON.parse(manifestText);
+    assert.equal(manifest.version, 2);
+    assert.match(manifest.wave_version, /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/);
+    assert.deepEqual(manifest.panel_settings, {
+        admin: sourceDb.admin, 'panel-base-path': newPath, listen: sourceDb.listen, tls,
+        session_expiry_days: 9, theme: 'light', donation: sourceDb.donation,
+    });
+    assert.match(manifest.panel_settings.admin[0].password, /^\$argon2id\$/);
+    assert.equal(manifest.panel_settings.donation.answer, '15');
+    for (const privateValue of [sourceCredentials.password, sourceSession.slice('wave_session='.length),
+        sourceDb.auth.jwt_key, sourceDb.auth.sessions[0].id]) {
+        assert.equal(manifestText.includes(privateValue), false);
+    }
+    if (tls.enabled) await unlink(tls.private_key);
+
+    const destination = await authFixture(t, undefined, { encrypted: false, basePath: '/current/panel' });
+    await destination.start();
+    const destinationSession = await signIn(destination, oldCredentials, true);
+    const peer = await signIn(destination, oldCredentials);
+    const destinationView = await openPreview(t, destination.origin, destinationSession, destination.basePath);
+    const before = await readFile(destination.database, 'utf8');
+    for (const change of [
+        panel => { panel.auth = sourceDb.auth; },
+        panel => { panel.admin[0].password = 'plaintext'; },
+        panel => { panel['panel-base-path'] = 'missing-leading-slash'; },
+        panel => { panel.listen.port = 65536; },
+        panel => { panel.donation.answered_at = 'yesterday'; },
+    ]) {
+        const invalid = structuredClone(manifest);
+        change(invalid.panel_settings);
+        const response = await prepare(destination, destinationSession, withManifest(entries, invalid));
+        assert.equal(response.status, 400);
+        await readReply(response, false);
+    }
+    assert.equal(await readFile(destination.database, 'utf8'), before);
+
+    const proposal = await readReply(await prepare(destination, destinationSession, archive), true);
+    assert.equal(proposal.wave_version, manifest.wave_version);
+    assert.deepEqual(proposal.panel_settings, {
+        administrator: sourceCredentials.username, base_path: newPath, restart_required: true,
+    });
+    if (tls.enabled) {
+        assert.match(proposal.missing_dependencies.join('\n'), /panel TLS.*Cannot read the TLS private key PEM/i);
+    }
+    assert.equal(await readFile(destination.database, 'utf8'), before);
+    await nextPreviewSnapshot(destinationView.socket, frame => !frame.data.server.core.checking_updates);
+
+    const panelSocket = new WebSocket(`${destination.origin.replace('http:', 'ws:')}${destination.basePath}/ws/panel`, {
+        headers: { Cookie: peer, Origin: destination.origin },
+    });
+    t.after(() => panelSocket.close());
+    const [identityMessage] = await once(panelSocket, 'message', { signal: AbortSignal.timeout(timeout) });
+    assert.equal(JSON.parse(identityMessage.data).username, oldCredentials.username);
+    const moved = once(panelSocket, 'message', { signal: AbortSignal.timeout(timeout) });
+    assert.deepEqual(await readReply(await apply(destination, destinationSession, proposal.token), true), {
+        ok: true, base_path: newPath,
+    });
+    const [notice] = await moved;
+    assert.deepEqual(JSON.parse(notice.data), { type: 'base_path', path: newPath });
+
+    const after = JSON.parse(await readFile(destination.database, 'utf8'));
+    for (const [name, value] of Object.entries(manifest.panel_settings)) {
+        assert.deepEqual(after[name], value, `Restored ${name}`);
+    }
+    assert.deepEqual(after.auth.sessions, []);
+    assert.notEqual(after.auth.jwt_key, sourceDb.auth.jwt_key);
+    assert.notEqual(after.auth.jwt_key, JSON.parse(before).auth.jwt_key);
+    assert.equal((await call(destination, '/api/session', { session: destinationSession })).status, 404);
+    const restored = { ...destination, basePath: newPath };
+    for (const session of [sourceSession, destinationSession, peer]) {
+        assert.equal((await call(restored, '/api/session', { session })).status, 401);
+    }
+    const newSession = await signIn(restored, sourceCredentials);
+    assert.equal((await auth(restored, 'sign-in', oldCredentials)).status, 401);
+    const session = await (await call(restored, '/api/session', { session: newSession })).json();
+    assert.equal(session.username, sourceCredentials.username);
+    assert.ok(session.expires_at - Math.floor(Date.now() / 1000) >= 9 * 86400 - 5);
+    const { initial } = await openPreview(t, restored.origin, newSession, newPath);
+    assert.equal(initial.settings.session_expiry_days, 9);
+    assert.equal(initial.settings.theme, 'light');
+    assert.equal(initial.settings.donation.answer, '15');
+    assert.equal(initial.settings.donation.answered_at, sourceDb.donation.answered_at);
+    assert.equal(initial.settings.tls.enabled, tls.enabled);
+    assert.equal(initial.settings.tls.restart_required, tls.enabled);
 });
 
 test('preserves empty rosters and byte-exact AuthenticationServer recovery pairs in ZIPs', async t => {

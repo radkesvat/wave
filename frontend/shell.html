@@ -692,6 +692,12 @@
             }
             const reply = await response.json().catch(() => null);
             if (response.ok && !download && reply?.ok === true) {
+              if (apply && reply.base_path !== undefined) {
+                if (typeof reply.base_path !== "string" || !followPanelLocation(reply.base_path + "/")) {
+                  request.reply = { ok: false, error: unconfirmed };
+                }
+                return;
+              }
               request.reply = reply;
               return;
             }

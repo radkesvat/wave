@@ -1,6 +1,7 @@
 #include "preview.h"
 
 #include "auth.h"
+#include "auth_store.h"
 #include "core_config_files.h"
 #include "core_config_graph.h"
 #include "core_config_json.h"
@@ -8,6 +9,7 @@
 #include "core_config_users.h"
 #include "core_settings.h"
 #include "linux_metrics.h"
+#include "panel_base_path.h"
 #include "panel_settings.h"
 #include "panel_update.h"
 #include "preview_backup.h"
@@ -66,6 +68,11 @@ constexpr auto max_frame_bytes = max_core_config_bytes + 1024;
 class WorkspaceBackupBusy : public std::runtime_error {
   public:
     using std::runtime_error::runtime_error;
+};
+
+class WorkspaceBackupSessionEnded : public std::runtime_error {
+  public:
+    WorkspaceBackupSessionEnded() : std::runtime_error("Sign in to restore a workspace backup.") {}
 };
 
 std::string new_restore_token()
@@ -271,7 +278,7 @@ std::optional<Donation> read_donation(const Json& saved)
         return std::nullopt;
     }
     const auto time = parse_utc_timestamp(*timestamp);
-    if (!time || *time > utc_now()) {
+    if (!time) {
         return std::nullopt;
     }
     return Donation{*answer, *timestamp, *time};
@@ -350,6 +357,13 @@ Json panel_tls_settings(const Json& saved, const std::optional<TlsSettings>& act
                                                key != active->private_key.string()));
     return {{"enabled", enabled}, {"domain", domain}, {"certificate_chain", chain}, {"private_key", key},
             {"supported", supported}, {"restart_required", restart_required}};
+}
+
+bool panel_restore_needs_restart(const Json& panel, const PanelSettings& active)
+{
+    const auto& listen = panel.at("listen");
+    return listen.at("host") != active.listen_host || listen.at("port") != active.listen_port ||
+           panel_tls_settings(panel.at("tls"), active.tls).at("restart_required") == true;
 }
 
 struct Reply {
@@ -512,7 +526,11 @@ class Preview {
         {
             std::lock_guard lock(mutex_);
             require_workspace_backup_idle();
-            files = capture_workspace_backup(database_->directory(), saved_core_settings_,
+            auto panel = database_->capture_panel_backup();
+            if (!read_donation(panel.at("donation"))) {
+                panel["donation"] = nullptr;
+            }
+            files = capture_workspace_backup(*database_, std::move(panel), saved_core_settings_,
                                              saved_config_registry(data_["server"]["core"]["configs"]));
         }
         return write_backup_archive(files);
@@ -520,9 +538,23 @@ class Preview {
 
     Json stage_workspace_backup(std::string_view archive, std::string session)
     {
-        auto backup = prepare_workspace_backup(database_->directory(), read_backup_archive(archive));
+        auto backup = prepare_workspace_backup(*database_, read_backup_archive(archive));
         const auto version = schematic_text(backup.manifest.at("waterwall_version"));
         const auto& configs = backup.manifest.at("configs");
+        Json restored_panel;
+        if (const auto panel = backup.manifest.find("panel_settings"); panel != backup.manifest.end()) {
+            const auto& donation = panel->at("donation");
+            if (!donation.is_null() && !read_donation(donation)) {
+                throw std::runtime_error("The backup contains an invalid donation response or UTC timestamp.");
+            }
+            if (const auto error = database_->panel_backup_tls_error(*panel); !error.empty()) {
+                backup.missing_dependencies.push_back(
+                    "Resolve the restored panel TLS settings before restarting Wave. " + error);
+            }
+            restored_panel = {{"base_path", panel->at(panel_base_path_key)},
+                              {"administrator", panel->at("admin").front().at("username")},
+                              {"restart_required", panel_restore_needs_restart(*panel, database_->settings())}};
+        }
         auto token = new_restore_token();
 
         std::lock_guard lock(mutex_);
@@ -554,12 +586,16 @@ class Preview {
                        {"replaced_configs", std::move(replaced)}, {"removed_configs", std::move(removed)},
                        {"missing_dependencies", std::move(dependencies)},
                        {"compatibility_warnings", std::move(backup.compatibility_warnings)}};
+        if (!restored_panel.is_null()) {
+            result["wave_version"] = backup.manifest.at("wave_version");
+            result["panel_settings"] = std::move(restored_panel);
+        }
         pending_backup_ = {std::move(backup), std::move(existing), std::move(session), std::move(token),
                            std::chrono::steady_clock::now() + 5min};
         return result;
     }
 
-    void restore_workspace_backup(std::string_view token, std::string_view session)
+    std::string restore_workspace_backup(std::string_view token, std::string_view session, AuthStore& store)
     {
         std::lock_guard lock(mutex_);
         expire_workspace_backup();
@@ -583,8 +619,19 @@ class Preview {
             throw std::runtime_error("The WaterWall schematic changed. Validate the backup again before restoring it.");
         }
         auto candidate = std::make_unique<WaterWall>(database_->directory(), version);
+        const auto panel = backup.manifest.find("panel_settings");
+        std::string restored_path;
         try {
-            apply_workspace_backup(*database_, backup, pending.token);
+            if (panel == backup.manifest.end()) {
+                apply_workspace_backup(*database_, backup, pending.token);
+            } else {
+                restored_path = panel->at(panel_base_path_key).get<std::string>();
+                if (!store.restore_admin(panel->at("admin"), session, restored_path, [&](const Json& auth_state) {
+                        apply_workspace_backup(*database_, backup, pending.token, auth_state);
+                    })) {
+                    throw WorkspaceBackupSessionEnded();
+                }
+            }
         } catch (...) {
             std::error_code error;
             workspace_recovery_required_ = std::filesystem::exists(database_->directory() / ".wave-restore", error) ||
@@ -592,6 +639,16 @@ class Preview {
             throw;
         }
 
+        if (panel != backup.manifest.end()) {
+            auto& settings = data_["settings"];
+            settings["session_expiry_days"] = panel->at("session_expiry_days");
+            settings["theme"] = panel->at("theme");
+            settings["tls"] = panel_tls_settings(panel->at("tls"), database_->settings().tls);
+            donation_ = read_donation(panel->at("donation"));
+            if (panel_restore_needs_restart(*panel, database_->settings())) {
+                log("warning", "Restart Wave to apply the restored listener and TLS settings.");
+            }
+        }
         saved_core_settings_ = std::move(backup.manifest.at("core_settings"));
         data_["server"]["core"]["available_versions"] = cached_waterwall_versions(waterwall_bin_);
         publish_core_release({std::move(backup.schematic), std::move(candidate)});
@@ -608,6 +665,7 @@ class Preview {
         sync_core();
         log("success", "Restored the WaterWall workspace backup.");
         ++revision_;
+        return restored_path;
     }
 
     std::string overview()
@@ -650,7 +708,7 @@ class Preview {
                                    ? changed_snapshot(sent_revision, sent_schematic)
                                    : handle_message(result == httplib::ws::Text ? std::string_view(message)
                                                                                 : std::string_view{},
-                                                    sent_revision, sent_schematic, roster);
+                                                    sent_revision, sent_schematic, roster, session);
             if (!frame.empty()) {
                 if (!session()) {
                     socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
@@ -1370,7 +1428,8 @@ class Preview {
     }
 
     std::string handle_message(std::string_view message, std::uint64_t& sent_revision,
-                               std::uint64_t& sent_schematic, UsersRosterSubscription& roster)
+                               std::uint64_t& sent_schematic, UsersRosterSubscription& roster,
+                               const std::function<bool()>& session)
     {
         const bool invalid_frame =
             message.size() > max_frame_bytes || message.find('\0') != std::string_view::npos;
@@ -1403,6 +1462,9 @@ class Preview {
               (live_write && bytes <= max_live_user_request_bytes));
 
         std::unique_lock lock(mutex_);
+        if (!session()) {
+            return {};
+        }
         if (!too_large && (action == "users_roster_subscribe" || action == "users_roster_unsubscribe" ||
                            action == "users_roster_refresh")) {
             handle_users_roster(action, request, roster);
@@ -2946,13 +3008,18 @@ void configure_backup_routes(httplib::Server& server, const std::shared_ptr<Auth
                                 throw std::runtime_error("Choose a validated backup before restoring it.");
                             }
                             try {
-                                preview->restore_workspace_backup(token, session);
+                                auto path = preview->restore_workspace_backup(token, session, *store);
+                                Json reply = {{"ok", true}};
+                                if (!path.empty()) {
+                                    reply["base_path"] = std::move(path);
+                                }
+                                backup_json(res, reply);
+                            } catch (const WorkspaceBackupSessionEnded& error) {
+                                backup_error(res, 401, error.what());
                             } catch (const WorkspaceBackupBusy& error) {
                                 res.status = 409;
                                 backup_json(res, {{"ok", false}, {"error", error.what()}, {"retryable", true}});
-                                return;
                             }
-                            backup_json(res, {{"ok", true}});
                         });
                     });
 }
