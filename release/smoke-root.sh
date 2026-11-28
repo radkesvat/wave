@@ -13,7 +13,8 @@ fail() {
 
 assets=$(realpath -e -- "$1")
 tag=$2
-work_dir=$(mktemp -d -- /opt/.wave-root-smoke.XXXXXXXX)
+# The hosted runner makes /opt writable. Test below a trusted system directory.
+work_dir=$(mktemp -d -- /var/lib/.wave-root-smoke.XXXXXXXX)
 suffix=${work_dir##*.}
 first_name=wave-root-smoke-$suffix
 second_name=$first_name-2

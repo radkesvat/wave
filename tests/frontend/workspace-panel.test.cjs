@@ -90,6 +90,8 @@ async function versionControls(page) {
 }
 
 test('opens the authenticated workspace, updates host metrics, and navigates the sidebar', async () => {
+    const panelVersion = process.env.WAVE_EXPECT_PANEL_VERSION;
+    assert.ok(panelVersion, 'Set WAVE_EXPECT_PANEL_VERSION or run through a Wave frontend CTest preset.');
     const page = await workspace.browser.newPage({ viewport: desktop });
     const data = fixture();
     delete data.server.version;
@@ -119,7 +121,8 @@ test('opens the authenticated workspace, updates host metrics, and navigates the
 
         await openView(page, 'Server Status');
         await status(page, /CPU 25\.0%\. Memory 4\.0 \/ 16\.0 GiB.*Upload 2\.0 MiB\/s\. Download 6\.0 MiB\/s/);
-        await status(page, /Panel version 0\.0\.1 beta\..*Core version 1\.6\.0\./);
+        await status(page, `Panel version ${panelVersion}.`);
+        await status(page, /Core version 1\.6\.0\./);
         await status(page, /Server Information\..*Host sent 13\.4 GB\. Host received 59\.9 GB\./);
         const dividerScanEnd = desktop.height - 11 - donationSlotHeight;
         const dividers = await verticalRuns(page, 152, 91, dividerScanEnd, [61, 58, 67]);
