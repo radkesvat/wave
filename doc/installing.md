@@ -12,7 +12,7 @@ Python 3.9 or later, and `flock`. Run it as root or as a regular user with
 
 ## Install an instance
 
-1. Enter an exact tag, such as `v0.0.2-beta`, or press Enter for the latest
+1. Enter an exact tag, such as `v0.0.3-beta`, or press Enter for the latest
    stable package. If only a beta is available, the interactive installer
    offers it for confirmation.
 2. Choose the instance directory. The default is the first available name
@@ -54,7 +54,7 @@ WaterWall offline.
 [WaterWall versions and offline provisioning](building.md#panel-controls-and-versioning)
 
 ```bash
-bash install.sh --yes --version v0.0.2-beta --from-dir "$PWD" \
+bash install.sh --yes --version v0.0.3-beta --from-dir "$PWD" \
   --path /opt/wave-test --port 2045 --no-start
 ```
 
@@ -92,7 +92,7 @@ TLS certificates or config dependencies you want to keep.
 ## Package a release
 
 Set the Wave version and channel in `CMakeLists.txt` and use the matching tag,
-such as `v0.0.2-beta`. The **Wave release packages** GitHub Actions workflow
+such as `v0.0.3-beta`. The **Wave release packages** GitHub Actions workflow
 builds the web site once and uses native x86-64 and ARM64 runners for the two
 backends. The smoke tests check the packaged musl notice, installation under
 inherited directory permissions, boot enablement, the setup page, and the

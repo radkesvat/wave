@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(Wave VERSION 0.0.2 LANGUAGES C CXX)
+project(Wave VERSION 0.0.3 LANGUAGES C CXX)
 
 set(WAVE_VERSION_CHANNEL "beta")
 set(WAVE_DISPLAY_VERSION "${PROJECT_VERSION}")
