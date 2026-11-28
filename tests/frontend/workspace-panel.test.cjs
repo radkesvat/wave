@@ -22,6 +22,7 @@ const {
     replaceText,
     assertRequest,
     verticalRuns,
+    horizontalRuns,
     rectangleColorCount,
     rectangleContainsColor,
     expectDonationBox,
@@ -207,23 +208,76 @@ test('opens the authenticated workspace, updates host metrics, and navigates the
     }
 });
 
-test('records About donation answers and shows the next-month reminder', async () => {
+test('records all illustrated donation choices and shows the 30-day reminder', async () => {
     const page = await workspace.browser.newPage({ viewport: desktop, hasTouch: true });
     const data = fixture();
     const preview = await mockPreview(page, data);
     const buttonFace = [69, 64, 79];
-    const yellowFace = [255, 195, 106];
     const linkColor = [81, 165, 246];
     const desktopBadge = { x: 22, y: 743, width: 36, height: 36 };
-    const choices = /did you donate anything to the project this month\? no\. yes, below 5\$\. yes, more than 5\$\./;
+    const responseWidth = 420;
+    const pickerWidth = 737;
+    const choices = /Did you donate to the project in the past 30 days\? No donation\. 1 USD\. 3 USD\. 5 USD\. 10 USD\. 15 USD\. 30 USD\. 50\+ USD\./;
     const inlineChoices = page.getByRole('img', { name: choices });
-    const picker = page.getByRole('img', { name: new RegExp(`Change answer\\. ${choices.source} Cancel\\.`) });
-    const reminder = page.getByRole('img', { name: /The sidebar badge will remind you next month/ });
+    const picker = page.getByRole('img', { name: /Change answer.*Cancel\./ });
+    const reminder = page.getByRole('img', { name: /The sidebar badge will remind you in 30 days\./ });
     const modal = page.getByRole('img', { name: /Donation response/ });
+    const nextReminder = page.getByRole('img', { name: /Next reminder/ });
     const clickAt = (x, y) => click(page, x, y);
     const tapAt = async (x, y) => {
         await page.touchscreen.tap(x, y);
         await settleCanvas(page);
+    };
+    const expectBadge = text => page.waitForFunction(text =>
+        document.getElementById('navigation').getAttribute('aria-description') === text, text, { timeout });
+    const captureBadge = async () => {
+        await page.mouse.move(0, 0);
+        await settleCanvas(page);
+        return (await page.screenshot({ clip: desktopBadge })).toString('base64');
+    };
+    const dialogBody = dialogWidth => {
+        const { width } = page.viewportSize();
+        const outerWidth = Math.min(dialogWidth, width - 24);
+        const left = Math.floor((width - outerWidth) / 2) + 12;
+        return { left, right: left + outerWidth - 24 };
+    };
+    const expectSummary = async (label, date) => {
+        await status(page, `Saved answer is ${label}.${date ? ` Next reminder ${date} (UTC).` : ''} Change answer.`);
+        assert.equal(await inlineChoices.count(), 0, 'A current answer hides the inline options.');
+        assert.equal(await nextReminder.count(), date ? 1 : 0);
+    };
+    const choiceGrid = async ({ left, right, top, bottom }) => {
+        const rows = await verticalRuns(page, left + 5, top, bottom, buttonFace, 48);
+        const cells = [];
+        for (const [rowTop, rowBottom] of rows) {
+            const columns = await horizontalRuns(page, rowTop + 3, left, right, buttonFace, 56);
+            cells.push(...columns.map(([start, end]) => [Math.floor((start + end) / 2),
+                Math.floor((rowTop + rowBottom) / 2)]));
+        }
+        assert.equal(cells.length, 8, 'All eight donation buttons are visible.');
+        return { cells, rows };
+    };
+    const openChangeAnswer = async (activate, left, scanTop) => {
+        const [button] = await verticalRuns(page, left, scanTop, 580, buttonFace, 26);
+        assert.ok(button, 'Change answer is available below the summary.');
+        await activate(left, Math.floor((button[0] + button[1]) / 2));
+        await picker.waitFor({ timeout });
+        await status(page, choices);
+        await page.mouse.move(0, 0);
+        await settleCanvas(page);
+    };
+    const modalChoices = async (touch = false) => {
+        const { top, bottom } = await dialogFrame(page, 30);
+        const { width } = page.viewportSize();
+        const expectedWidth = Math.min(pickerWidth, width - 24);
+        const outline = await horizontalRuns(page, top, 0, width, [138, 132, 149], expectedWidth - 2);
+        assert.ok(outline.some(([left, right]) => Math.abs(right - left - expectedWidth) <= 2),
+            'The enlarged Change answer dialog fits within the viewport.');
+        if (touch) {
+            // Move the last touch from the opening button onto the noninteractive title bar.
+            await tapAt(Math.floor(width / 2), top + 12);
+        }
+        return choiceGrid({ ...dialogBody(pickerWidth), top: top + 35, bottom: bottom - 45 });
     };
     const activateDonateLink = async (left, top, bottom) => {
         await status(page, /Donate link\./);
@@ -232,76 +286,43 @@ test('records About donation answers and shows the next-month reminder', async (
         const openedBefore = await page.evaluate(() => window.openedLinks.length);
         await page.mouse.move(0, 0);
         await settleCanvas(page);
-        const link = { x: left, y: top, width: 60, height: bottom - top };
-        assert.ok(await rectangleContainsColor(page, link, linkColor), 'Donate is visible in the expected position.');
+        const link = { x: left, y: top, width: 65, height: bottom - top };
+        assert.ok(await rectangleContainsColor(page, link, linkColor), 'Donate is visible.');
         await clickAt(left + 16, Math.floor((top + bottom) / 2));
         const opened = await page.evaluate(() => window.openedLinks);
         assert.deepEqual(opened.slice(openedBefore), [
             ['https://radkesvat-support.vercel.app/#support', '_blank', 'noopener,noreferrer'],
         ]);
     };
-    const expectBadge = text => page.waitForFunction(text =>
-        document.getElementById('navigation').getAttribute('aria-description') === text, text, { timeout });
-    const dialogBodyLeft = () => {
-        const { width } = page.viewportSize();
-        return Math.floor((width - Math.min(420, width - 24)) / 2) + 12;
-    };
-    const expectCurrentAnswer = async label => {
-        await status(page, `Saved answer is ${label}. Next reminder 27/01/01 (UTC). Change answer.`);
-        assert.equal(await inlineChoices.count(), 0, 'A current positive answer hides the inline options.');
-    };
-    const openChangeAnswer = async (activate, x, scanTop) => {
-        const [button] = await verticalRuns(page, x, scanTop, 580, buttonFace, 26);
-        assert.ok(button, 'Change answer is available below the summary.');
-        await activate(x, Math.floor((button[0] + button[1]) / 2));
-        await picker.waitFor({ timeout });
-        // The opening tap can leave a choice hovered at the same coordinates.
-        await page.mouse.move(0, 0);
-        const { top, bottom } = await dialogFrame(page);
-        const choiceX = dialogBodyLeft() + 4;
-        const rows = await verticalRuns(page, choiceX, top + 35, bottom - 45, buttonFace, 28);
-        return { choiceX, rows };
-    };
-    const respond = async (index, answer, label, response, activate, x, y) => {
-        await activate(x, y);
+    const respond = async ({ key, label, position, activate = clickAt, answeredAt = '2027-01-15T13:00:00Z',
+        remindAt = '2027-02-14T13:00:00Z', date = '27/02/14' }) => {
+        const isDonation = key !== 'no';
+        const index = preview.actions.length;
+        await activate(...position);
         const request = await preview.action(index);
-        assertRequest(request.request, { action: 'apply_donation', answer });
+        assertRequest(request.request, { action: 'apply_donation', answer: key });
         await modal.waitFor({ timeout });
         assert.equal(await picker.count(), 0, 'The donation response replaces the choice dialog.');
-        await status(page, response);
+        await status(page, isDonation ? /Thank you for supporting the project!/ : /The project is free\. No problem!/);
         await status(page, /Operation in progress\./);
         assert.equal(await reminder.count(), 0);
-        data.settings.donation = { answer, answered_at: '2026-12-31T23:30:00Z', reminder_due: false };
+        data.settings.donation = {
+            answer: key, answered_at: answeredAt, reminder_due: false,
+            ...(isDonation ? { next_reminder_at: remindAt } : {}),
+        };
         request.reply();
         await status(page, `Saved answer is ${label}.`);
-        if (answer === 'no') {
-            assert.equal(await reminder.count(), 0);
-        } else {
+        if (isDonation) {
             await reminder.waitFor({ timeout });
-        }
-        const { top } = await dialogFrame(page);
-        const left = dialogBodyLeft();
-        const bodyTop = top + 35;
-        const leading = { x: left, y: bodyTop, width: 24, height: 24 };
-        if (answer === 'more_than_5') {
-            const portraitRegion = { x: left, y: bodyTop, width: 64, height: 48 };
-            assert.ok(await grayscalePixelCount(page, portraitRegion, 106, 145) > 750,
-                'The highest-tier dialog shows the grayscale portrait at the start of its body.');
-        } else if (answer === 'no') {
-            const trailing = { x: left + 190, y: bodyTop, width: 170, height: 22 };
-            assert.equal(await rectangleContainsColor(page, leading, yellowFace), false,
-                'The No response starts with its message.');
-            assert.ok(await rectangleColorCount(page, trailing, yellowFace) > 40,
-                'The No response has a yellow face after the message on the same line.');
-            await status(page, /Donation response\. the project is free, no problem Donate link\./);
-            await activateDonateLink(left, bodyTop + 18, bodyTop + 45);
         } else {
-            assert.ok(await rectangleContainsColor(page, leading, yellowFace),
-                'The below-$5 dialog keeps its leading yellow face.');
+            assert.equal(await reminder.count(), 0);
+            const { top } = await dialogFrame(page, 30);
+            await activateDonateLink(dialogBody(responseWidth).left + 64, top + 53, top + 78);
         }
-        await confirmDialog(page, activate, 420);
+        await confirmDialog(page, activate, responseWidth, 30);
         await modal.waitFor({ state: 'hidden', timeout });
-        await status(page, `Saved answer is ${label}.`);
+        await expectBadge(isDonation ? 'donated' : 'no donation');
+        await expectSummary(label, isDonation ? date : undefined);
     };
 
     try {
@@ -315,82 +336,74 @@ test('records About donation answers and shows the next-month reminder', async (
         await page.goto(workspace.url);
         await waitForServerStatus(page);
         await expectBadge('no donation');
+        const noBadge = await captureBadge();
         await openView(page, 'About');
         await status(page, choices);
         assert.equal(preview.actions.length, 0, 'Opening About leaves the question unanswered.');
 
-        const [row] = await verticalRuns(page, 203, 113, 310, buttonFace, 28);
-        assert.ok(row, 'The donation choices are visible together on desktop.');
-        const choiceY = Math.floor((row[0] + row[1]) / 2);
-        const topChoiceSticker = { x: 407, y: choiceY - 12, width: 24, height: 24 };
-        await activateDonateLink(199, row[1], row[1] + 32);
-        assert.equal(await rectangleContainsColor(page, {
-            x: 198, y: row[1] + 40, width: 150, height: 70,
-        }, linkColor), true, 'Project links follow the Donate link.');
-        for (const x of [206, 271]) {
-            assert.ok(await rectangleContainsColor(page, { x, y: choiceY - 9, width: 18, height: 18 }, yellowFace),
-                'The lower-tier button keeps its yellow face.');
-        }
-        assert.ok(await grayscalePixelCount(page, topChoiceSticker, 60, 105) > 225,
-            'The highest-tier button shows the round grayscale image beside its label.');
+        const inline = await choiceGrid({ left: 198, right: 1256, top: 113, bottom: 415 });
+        const lastRow = inline.rows.at(-1)[1];
+        await activateDonateLink(198, lastRow, lastRow + 30);
+        assert.ok(await rectangleContainsColor(page, {
+            x: 198, y: lastRow + 40, width: 150, height: 70,
+        }, linkColor), 'Project links follow the Donate link.');
+        await respond({ key: '1', label: '1 USD', position: inline.cells[1], answeredAt: '2026-12-31T23:30:00Z',
+            remindAt: '2027-01-30T23:30:00Z', date: '27/01/30' });
+        const badges = [noBadge, await captureBadge()];
 
-        await respond(0, 'below_5', 'yes, below 5$', /Thank you for supporting the project!/,
-            clickAt, 279, choiceY);
-        await expectBadge('donated');
-        await expectCurrentAnswer('yes, below 5$');
-        assert.ok(await grayscalePixelCount(page, topChoiceSticker, 60, 105) < 20,
-            'The highest-tier inline choice is no longer drawn beside the summary.');
-        assert.ok(await rectangleContainsColor(page, desktopBadge, yellowFace),
-            'The lower-tier donation badge keeps its yellow face.');
-
-        const desktopPicker = await openChangeAnswer(clickAt, 203, 113);
-        assert.equal(desktopPicker.rows.length, 1, 'The desktop change dialog shows the choices in a row.');
-        await confirmDialog(page, clickAt, 420);
+        await openChangeAnswer(clickAt, 203, 113);
+        const desktopPicker = await modalChoices();
+        const artwork = {
+            x: desktopPicker.cells[2][0] - 10, y: desktopPicker.rows[0][0] + 72, width: 20, height: 10,
+        };
+        const artworkBackground = await rectangleColorCount(page, artwork, buttonFace);
+        assert.ok(artworkBackground < artwork.width * artwork.height / 2,
+            'The cat image extends into the enlarged area above its label.');
+        await confirmDialog(page, clickAt, pickerWidth, 30);
         await picker.waitFor({ state: 'hidden', timeout });
-        await expectCurrentAnswer('yes, below 5$');
-        assert.equal(preview.actions.length, 1, 'Cancel preserves the saved answer without submitting.');
+        await expectSummary('1 USD', '27/01/30');
+        assert.equal(preview.actions.length, 1, 'Cancel preserves the saved answer.');
 
         await page.reload();
         await waitForServerStatus(page);
         await expectBadge('donated');
         await openView(page, 'About');
-        await expectCurrentAnswer('yes, below 5$');
-        assert.equal(preview.actions.length, 1, 'Reloading restores the saved answer without submitting it.');
+        await expectSummary('1 USD', '27/01/30');
+        assert.equal(preview.actions.length, 1, 'Reloading restores the saved answer.');
 
-        const noPicker = await openChangeAnswer(clickAt, 203, 113);
-        const [noTop, noBottom] = noPicker.rows[0];
-        await respond(1, 'no', 'no', /Donation response\. the project is free, no problem(?= Operation in progress\. Donate link\.)/,
-            clickAt, noPicker.choiceX, Math.floor((noTop + noBottom) / 2));
-        await expectBadge('no donation');
-        await inlineChoices.waitFor({ timeout });
+        await openChangeAnswer(clickAt, 203, 113);
+        await respond({ key: 'no', label: 'No donation', position: desktopPicker.cells[0] });
+        assert.equal(await captureBadge(), noBadge, 'No donation uses the first cat.');
 
-        await respond(2, 'below_5', 'yes, below 5$', /Thank you for supporting the project!/,
-            clickAt, 279, choiceY);
-        await expectCurrentAnswer('yes, below 5$');
+        const amounts = ['3', '5', '10', '15', '30'];
+        for (const [index, amount] of amounts.entries()) {
+            await openChangeAnswer(clickAt, 203, 113);
+            await respond({ key: amount, label: `${amount} USD`, position: desktopPicker.cells[index + 2] });
+            badges.push(await captureBadge());
+        }
 
         await page.setViewportSize(portrait);
         await settleCanvas(page);
-        const touchPicker = await openChangeAnswer(tapAt, 25, 245 + donationSlotHeight);
-        assert.equal(touchPicker.rows.length, 3, 'The change dialog stacks the choices on a narrow screen.');
-        const [lastTop, lastBottom] = touchPicker.rows[2];
-        await respond(3, 'more_than_5', 'yes, more than 5$', /Thank you for supporting the project!/,
-            tapAt, touchPicker.choiceX, Math.floor((lastTop + lastBottom) / 2));
-        await expectBadge('donated');
-        await expectCurrentAnswer('yes, more than 5$');
+        await openChangeAnswer(tapAt, 25, 245 + donationSlotHeight);
+        const touchPicker = await modalChoices(true);
+        assert.ok(touchPicker.rows.length > desktopPicker.rows.length, 'The choices reflow on a narrow screen.');
+        await respond({ key: '50_plus', label: '50+ USD', position: touchPicker.cells[7], activate: tapAt });
         await page.setViewportSize(desktop);
         await settleCanvas(page);
+        badges.push(await captureBadge());
+        assert.equal(new Set(badges).size, 8, 'Each donation answer has a distinct sticker.');
         assert.ok(await grayscalePixelCount(page, desktopBadge, 60, 105) > 550,
-            'The highest-tier donation badge shows the round grayscale image beside its label.');
+            'The highest tier uses the grayscale Gigachad sticker.');
 
+        delete data.settings.donation.next_reminder_at;
         data.settings.donation.reminder_due = true;
         await preview.broadcast();
         await expectBadge('donation?');
-        await inlineChoices.waitFor({ timeout });
-        await status(page, 'Last answer was yes, more than 5$.');
-        assert.ok(await grayscalePixelCount(page, topChoiceSticker, 60, 105) > 225,
-            'The next-month reminder restores the illustrated inline choices.');
-        assert.equal(await page.getByRole('img', { name: /Next reminder/ }).count(), 0);
-        assert.equal(preview.actions.length, 4, 'The next-month reminder does not submit an answer.');
+        assert.equal(await captureBadge(), noBadge, 'A due reminder uses the first cat.');
+        await status(page, choices);
+        await status(page, 'Last answer was 50+ USD.');
+        assert.equal(await nextReminder.count(), 0);
+        assert.equal(preview.actions.length, 8, 'The reminder does not submit an answer.');
     } finally {
         await page.close();
     }

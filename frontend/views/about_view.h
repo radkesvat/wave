@@ -8,16 +8,10 @@
 namespace wave {
 
 class PreviewSession;
+struct DonationChoice;
 
 struct AboutViewState {
-    enum class Answer {
-        none,
-        no,
-        below_5,
-        more_than_5
-    };
-
-    Answer submitted = Answer::none;
+    const DonationChoice* submitted = nullptr;
     std::optional<std::uint64_t> donation_request;
     bool donation_saved = false;
     bool choosing_answer = false;

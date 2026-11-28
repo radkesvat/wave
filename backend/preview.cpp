@@ -57,6 +57,7 @@ using namespace std::chrono_literals;
 constexpr auto host_sample_interval = 500ms;
 constexpr auto users_roster_poll_interval = 500ms;
 constexpr auto core_update_check_interval = 24h;
+constexpr auto donation_reminder_interval = std::chrono::days{30};
 constexpr std::size_t max_request_bytes = 8192;
 constexpr std::size_t max_user_request_bytes = 32 * 1024;
 constexpr std::size_t max_live_user_request_bytes = 32 * 1024 + 2048;
@@ -207,12 +208,26 @@ struct Donation {
 
 bool valid_donation_answer(std::string_view answer)
 {
-    return answer == "no" || answer == "below_5" || answer == "more_than_5";
+    constexpr std::string_view answers[] = {"no", "1", "3", "5", "10", "15", "30", "50_plus",
+                                           "below_5", "more_than_5"};
+    return std::ranges::find(answers, answer) != std::end(answers);
 }
 
 UtcTime utc_now()
 {
     return std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+}
+
+std::string format_utc_timestamp(UtcTime time)
+{
+    const auto seconds = std::chrono::system_clock::to_time_t(time);
+    std::tm date{};
+    char timestamp[21];
+    if (!gmtime_r(&seconds, &date) ||
+        std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &date) != 20) {
+        return {};
+    }
+    return timestamp;
 }
 
 std::optional<UtcTime> parse_utc_timestamp(std::string_view timestamp)
@@ -267,13 +282,14 @@ Json donation_settings(const std::optional<Donation>& donation)
     if (!donation) {
         return {{"reminder_due", true}};
     }
-    const auto month = [](UtcTime time) {
-        const std::chrono::year_month_day date{std::chrono::floor<std::chrono::days>(time)};
-        return date.year() / date.month();
-    };
-    return {{"answer", donation->answer},
-            {"answered_at", donation->answered_at},
-            {"reminder_due", month(donation->time) < month(utc_now())}};
+    const auto reminder_at = donation->time + donation_reminder_interval;
+    const bool donated = donation->answer != "no";
+    const bool due = donated && utc_now() >= reminder_at;
+    Json settings = {{"answer", donation->answer}, {"answered_at", donation->answered_at}, {"reminder_due", due}};
+    if (donated && !due) {
+        settings["next_reminder_at"] = format_utc_timestamp(reminder_at);
+    }
+    return settings;
 }
 
 bool integer_value(const Json& value, int minimum, int maximum)
@@ -1621,11 +1637,8 @@ class Preview {
             return {false, "Choose a donation response."};
         }
         const auto now = utc_now();
-        const auto seconds = std::chrono::system_clock::to_time_t(now);
-        std::tm date{};
-        char timestamp[21];
-        if (!gmtime_r(&seconds, &date) ||
-            std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &date) != 20) {
+        auto timestamp = format_utc_timestamp(now);
+        if (timestamp.empty()) {
             return {false, "Could not read the UTC date for the donation response."};
         }
         try {
@@ -1633,7 +1646,7 @@ class Preview {
         } catch (const std::runtime_error&) {
             return {false, "Could not save the donation response in wave-db.json."};
         }
-        donation_ = Donation{*answer, timestamp, now};
+        donation_ = Donation{*answer, std::move(timestamp), now};
         return complete("Saved donation response.");
     }
 

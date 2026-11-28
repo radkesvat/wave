@@ -1435,9 +1435,19 @@ test('persists the panel theme and leaves saved settings intact on invalid choic
     assert.equal(restarted.initial.settings.theme, 'darker');
 });
 
-test('persists donation responses and prompts again in the next UTC calendar month', async t => {
+test('persists donation tiers and reminds donors 30 days after their latest response', async t => {
     const fixture = await authFixture(t, undefined, { encrypted: false });
     const start = () => fixture.start({ TZ: 'UTC+12' });
+    const hour = 60 * 60 * 1000;
+    const reminderInterval = 30 * 24 * hour;
+    const utcTimestamp = milliseconds => new Date(milliseconds).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const expectedDonation = (record, due = false) => ({
+        ...record,
+        reminder_due: due,
+        ...(record.answer === 'no' || due ? {} : {
+            next_reminder_at: utcTimestamp(Date.parse(record.answered_at) + reminderInterval),
+        }),
+    });
     await start();
     const session = await fixtureSession(fixture);
     const { socket, initial } = await connectPreview(t, fixture.origin, session);
@@ -1445,50 +1455,66 @@ test('persists donation responses and prompts again in the next UTC calendar mon
     const original = JSON.parse(await readFile(fixture.database, 'utf8'));
     assert.equal(original.donation, undefined);
 
-    let response;
-    for (const answer of ['no', 'below_5', 'more_than_5']) {
-        const before = new Date();
+    const submitDonation = async (socket, answer) => {
+        const before = Date.now();
         const saved = await requestPreview(socket, 'apply_donation', { answer });
-        const after = new Date();
+        const after = Date.now();
         assert.equal(saved.ok, true, saved.feedback);
-        const { reminder_due: due, ...record } = saved.data.settings.donation;
-        assert.equal(record.answer, answer);
+        const record = { answer, answered_at: saved.data.settings.donation.answered_at };
         assert.match(record.answered_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
         const recorded = Date.parse(record.answered_at);
-        assert.ok(recorded >= Math.floor(before.getTime() / 1000) * 1000 && recorded <= after.getTime(),
+        assert.ok(recorded >= Math.floor(before / 1000) * 1000 && recorded <= after,
             'The timestamp uses the current UTC time even when the server is in another time zone.');
-        if (before.toISOString().slice(0, 7) === after.toISOString().slice(0, 7)) {
-            assert.equal(due, false);
-        }
+        assert.deepEqual(saved.data.settings.donation, expectedDonation(record));
         assert.deepEqual(JSON.parse(await readFile(fixture.database, 'utf8')), { ...original, donation: record });
-        response = record;
+        return record;
+    };
+
+    let response;
+    for (const answer of ['below_5', 'more_than_5', 'no', '1', '3', '5', '10', '15', '30', '50_plus']) {
+        response = await submitDonation(socket, answer);
     }
 
     const contents = await readFile(fixture.database, 'utf8');
-    for (const input of [{}, { answer: true }, { answer: 'yes' }, { answer: 'NO' }]) {
+    for (const input of [{}, { answer: 1 }, { answer: 'yes' }, { answer: 'NO' }]) {
         const rejected = await requestPreview(socket, 'apply_donation', input);
         assert.equal(rejected.ok, false);
-        assert.equal(rejected.data.settings.donation.answer, response.answer);
-        assert.equal(rejected.data.settings.donation.answered_at, response.answered_at);
+        assert.deepEqual(rejected.data.settings.donation, expectedDonation(response));
         assert.equal(await readFile(fixture.database, 'utf8'), contents);
     }
 
     await fixture.stop();
     await start();
     const reopened = await connectPreview(t, fixture.origin, session);
-    assert.equal(reopened.initial.settings.donation.answer, response.answer);
-    assert.equal(reopened.initial.settings.donation.answered_at, response.answered_at);
+    assert.deepEqual(reopened.initial.settings.donation, expectedDonation(response));
 
-    await fixture.stop();
-    const now = new Date();
-    const previousMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) - 1000);
-    const expired = { ...response, answered_at: previousMonth.toISOString().replace('.000Z', 'Z') };
-    await writeFile(fixture.database, JSON.stringify({ ...original, donation: expired }));
-    await start();
-    const due = await connectPreview(t, fixture.origin, session);
-    assert.deepEqual(due.initial.settings.donation, { ...expired, reminder_due: true });
+    const restartWithDonation = async record => {
+        await fixture.stop();
+        await writeFile(fixture.database, JSON.stringify({ ...original, donation: record }));
+        await start();
+        return connectPreview(t, fixture.origin, session);
+    };
+    const now = Date.now();
+    const pending = { ...response, answered_at: utcTimestamp(now - reminderInterval + hour) };
+    assert.deepEqual((await restartWithDonation(pending)).initial.settings.donation, expectedDonation(pending));
+
+    const expired = { ...response, answered_at: utcTimestamp(now - reminderInterval) };
+    const due = await restartWithDonation(expired);
+    assert.deepEqual(due.initial.settings.donation, expectedDonation(expired, true));
     assert.deepEqual((await nextPreviewSnapshot(due.socket)).data.settings.donation,
-        { ...expired, reminder_due: true });
+        expectedDonation(expired, true));
+    const updated = await submitDonation(due.socket, '5');
+    assert.ok(updated.answered_at > expired.answered_at, 'Changing the donation tier starts a fresh 30 days.');
+    await submitDonation(due.socket, 'no');
+
+    for (const [record, reminderDue] of [
+        [{ ...expired, answer: 'no' }, false],
+        [{ ...pending, answer: 'below_5' }, false],
+        [{ ...expired, answer: 'more_than_5' }, true],
+    ]) {
+        const saved = await restartWithDonation(record);
+        assert.deepEqual(saved.initial.settings.donation, expectedDonation(record, reminderDue));
+    }
 
     await fixture.stop();
     const invalid = JSON.stringify({ ...original, donation: { ...response, answered_at: '2025-02-30T12:00:00Z' } });

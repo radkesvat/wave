@@ -456,21 +456,18 @@ void navigation_divider(float width, float top, float thickness = theme::border_
 
 struct DonationBadge {
     const char* label = "no donation";
-    DonationFace face = DonationFace::sad;
+    DonationFace face = DonationFace::cat_1;
 };
 
 DonationBadge donation_badge(const PreviewSession& session)
 {
     const auto& donation = view::field(view::field(session.data(), "settings"), "donation");
-    const auto answer = view::string_field(donation, "answer");
-    if (!answer.empty() && view::bool_field(donation, "reminder_due", true)) {
-        return {"donation?", DonationFace::sad};
-    }
-    if (answer == "below_5") {
-        return {"donated", DonationFace::happy};
-    }
-    if (answer == "more_than_5") {
-        return {"donated", DonationFace::happiest};
+    const auto* choice = find_donation_choice(view::string_field(donation, "answer"));
+    if (choice && choice->is_donation()) {
+        if (view::bool_field(donation, "reminder_due", true)) {
+            return {"donation?", DonationFace::cat_1};
+        }
+        return {"donated", choice->face};
     }
     return {};
 }
@@ -539,15 +536,19 @@ void render_donation_badge(PanelState& state, ImVec2 position, float width, floa
         });
     }
 
-    const float face_radius = std::floor(std::min(width * 0.30f, height - 2 * content_padding.y) / 2);
-    const ImVec2 face_center{left + content_padding.x + face_radius, top + height / 2};
-    draw_donation_face(draw, face_center, face_radius, badge.face);
-    const float label_left = face_center.x + face_radius + face_gap;
+    const float center_y = top + height / 2;
+    float label_left = left + content_padding.x;
+    if (badge.face != DonationFace::none) {
+        const float face_radius = std::floor(std::min(width * 0.30f, height - 2 * content_padding.y) / 2);
+        const float face_size = 2 * face_radius;
+        draw_donation_face(draw, {label_left, center_y - face_radius}, {face_size, face_size}, badge.face);
+        label_left += face_size + face_gap;
+    }
     const float label_right = right - content_padding.x;
     const auto text = std::string_view(badge.label);
     const auto size = ImGui::CalcTextSize(text.data(), text.data() + text.size());
     const float text_offset = std::max(0.0f, (label_right - label_left - size.x) / 2);
-    const ImVec2 text_start{std::floor(label_left + text_offset), std::floor(face_center.y - size.y / 2)};
+    const ImVec2 text_start{std::floor(label_left + text_offset), std::floor(center_y - size.y / 2)};
     ImGui::RenderTextEllipsis(&draw, text_start, {label_right, bottom}, label_right, text.data(),
                               text.data() + text.size(), nullptr);
 }

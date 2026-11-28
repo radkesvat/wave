@@ -142,6 +142,11 @@ set(wave_donation_face "${CMAKE_CURRENT_SOURCE_DIR}/assets/gc1.bmp")
 set(wave_donation_portrait "${CMAKE_CURRENT_SOURCE_DIR}/assets/gc2.bmp")
 set_property(TARGET wave APPEND PROPERTY LINK_DEPENDS
     "${wave_shell}" "${wave_font}" "${wave_donation_face}" "${wave_donation_portrait}")
+foreach(cat IN ITEMS cat_01 cat_02 cat_03 cat_04 cat_05 cat_06 cat_07)
+    set(sticker "${CMAKE_CURRENT_SOURCE_DIR}/assets/donation/${cat}.bmp")
+    set_property(TARGET wave APPEND PROPERTY LINK_DEPENDS "${sticker}")
+    target_link_options(wave PRIVATE "SHELL:--embed-file \"${sticker}@/donation/${cat}.bmp\"")
+endforeach()
 target_link_options(wave PRIVATE
     -fexceptions
     -sUSE_SDL=2

@@ -245,22 +245,26 @@ The sidebar starts with **Server Status**, followed by the WaterWall configs.
 **Console**, **Settings**, and **About** are pinned to the bottom of the desktop
 sidebar and share the last row on narrow screens. The dashed donation box sits
 below the sidebar and matches its width and corner rounding. Select the box to
-open **About**. It shows **no donation** or **donated** for the current month and
-**donation?** when a new UTC calendar month begins after a saved answer.
+open **About**. The box shows a cat for **no donation** and for donations of
+**1 USD**, **3 USD**, **5 USD**, **10 USD**, **15 USD**, and **30 USD**. The
+**50+ USD** choice uses the Gigachad sticker. Before the first answer, the box
+shows **no donation**. When a reminder is due, it shows **donation?** with the
+first cat.
 Tab goes from **Menu** and **Tools** into the workspace. Press Enter on a
 focused pane, then use Tab to move between its controls.
 
 The **Donations** section in **About** records your answer and the time you
-answered. Select **Donate** in this section or in the **No** response to open
-the project's support page. A current-month Yes answer shows the saved choice
-and next reminder date in `YY/MM/DD` (UTC). **Change answer** opens the same
-choices in a dialog. When the reminder is due, the choices return to the page
-for the new month.
+answered. Select **Donate** in this section or in the **No donation** response
+to open the project's support page. Each donation answer schedules a reminder
+for 30 days after you save it. The saved choice shows the next reminder date in
+`YY/MM/DD` (UTC). **No donation** clears the reminder. **Change answer** opens
+the choices in a dialog. When a reminder is due, the choices return to the page.
 
 Wave stores the answer and timestamp as plain JSON in `wave-db.json` under `donation`.
-Set `answer` to `no`, `below_5`, or `more_than_5`. Set `answered_at` to a UTC
-timestamp such as `2026-11-27T14:15:00Z`. To edit the file by hand, stop Wave,
-update the object, and restart Wave to load it.
+Set `answer` to `no`, `1`, `3`, `5`, `10`, `15`, `30`, or `50_plus` as a string.
+Set `answered_at` to a UTC timestamp such as `2026-11-27T14:15:00Z`. Wave keeps
+the original ranges for older answers saved as `below_5` or `more_than_5`. To
+edit the file by hand, stop Wave, update the object, and restart Wave to load it.
 
 Wave's scrollable panes use inset, rounded scrollbar thumbs and share the
 same track, hover, and drag colors in each contrast mode. Classic page
@@ -815,7 +819,7 @@ connection closes, Server Status shows the last snapshot and offers to reconnect
 | `update_core` | Cached WaterWall `version` to select |
 | `apply_core_settings` | Overrides supported by the selected schematic as `settings`, up to 16 KiB |
 | `apply_theme` | `theme` set to `default`, `light`, `classic`, `dark`, or `darker` |
-| `apply_donation` | `answer` set to `no`, `below_5`, or `more_than_5`. The snapshot reports the saved answer, its UTC timestamp, and whether the reminder is due in `data.settings.donation`. |
+| `apply_donation` | `answer` set to the string `no`, `1`, `3`, `5`, `10`, `15`, `30`, or `50_plus`. Older clients can still send `below_5` or `more_than_5`. The snapshot reports `answer`, `answered_at` (UTC), and `reminder_due` in `data.settings.donation`. `next_reminder_at` (UTC) is present when a donation reminder is scheduled and still upcoming. |
 | `create_core_config` | `name` and optional boolean `add_auth_nodes`. Setting it to `true` provisions the starter chains with full scoped user management. Older clients can explicitly send `allow_live_user_management: false` to retain the template's original grants. |
 | `get_core_config` | Config `id`. The result has `config`, `revision`, and `editable`. |
 | `save_core_config` | Config `id`, edited `config` object, and last loaded `revision` |

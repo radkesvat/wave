@@ -370,21 +370,17 @@ async function expectDonationBox(page, { left, right, top, bottom, stickerDiamet
         assert.ok(await rectangleContainsColor(page, { x, y: centerY - 2, width: 2, height: 4 }, fill),
             'The donation box reaches both sides of the navigation pane.');
     }
-    const stickerLeft = left + 12;
-    const stickerFace = [255, 195, 106];
-    assert.equal(await rectangleContainsColor(page, { x: left, y: centerY - 2, width: 12, height: 4 }, stickerFace),
-        false, 'The donation sticker leaves twelve pixels of padding on the left.');
-    assert.ok(await rectangleContainsColor(page, { x: stickerLeft, y: centerY - 2, width: 3, height: 4 }, stickerFace),
-        'The donation sticker starts just after the left padding.');
-    const sticker = await verticalRuns(page, stickerLeft + stickerDiameter / 2, top, bottom, stickerFace);
-    assert.ok(sticker.length, 'The sad-face sticker is visible in the donation box.');
-    const topInset = sticker[0][0] - top;
-    const bottomInset = bottom - sticker.at(-1)[1];
-    assert.ok(Math.min(topInset, bottomInset) >= 7 && Math.abs(topInset - bottomInset) <= 2,
-        'The donation sticker is vertically centered with at least seven pixels of padding.');
-    const visibleDiameter = bottom - top - topInset - bottomInset;
-    assert.ok(Math.abs(visibleDiameter - stickerDiameter) <= 2,
-        `Expected the donation sticker to span about ${stickerDiameter}px, got ${visibleDiameter}px.`);
+    const sticker = { x: left + 12, y: centerY - stickerDiameter / 2, width: stickerDiameter, height: stickerDiameter };
+    assert.ok(await rectangleColorCount(page, sticker, fill) < stickerDiameter ** 2 * 0.8,
+        'The no-donation cat occupies the sticker area.');
+    for (const padding of [
+        { x: left + 4, y: centerY - 4, width: 8, height: 8 },
+        { x: sticker.x, y: top + 2, width: sticker.width, height: 4 },
+        { x: sticker.x, y: bottom - 6, width: sticker.width, height: 4 },
+    ]) {
+        assert.equal(await rectangleColorCount(page, padding, fill), padding.width * padding.height,
+            'The centered donation sticker leaves padding around its reserved area.');
+    }
 }
 
 async function dialogFrame(page, scanTop = 114) {
