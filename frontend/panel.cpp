@@ -474,7 +474,7 @@ DonationBadge donation_badge(const PreviewSession& session)
         if (view::bool_field(donation, "reminder_due", true)) {
             return {"donation?", DonationFace::cat_1};
         }
-        return {"donated", choice->face};
+        return {"Donator", choice->face};
     }
     return {};
 }

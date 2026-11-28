@@ -326,7 +326,7 @@ test('records all illustrated donation choices and shows the 30-day reminder', a
         }
         await confirmDialog(page, activate, responseWidth, 30);
         await modal.waitFor({ state: 'hidden', timeout });
-        await expectBadge(isDonation ? 'donated' : 'no donation');
+        await expectBadge(isDonation ? 'Donator' : 'no donation');
         await expectSummary(label, isDonation ? date : undefined);
     };
 
@@ -371,7 +371,7 @@ test('records all illustrated donation choices and shows the 30-day reminder', a
 
         await page.reload();
         await waitForServerStatus(page);
-        await expectBadge('donated');
+        await expectBadge('Donator');
         await openView(page, 'About');
         await expectSummary('1 USD', '27/01/30');
         assert.equal(preview.actions.length, 1, 'Reloading restores the saved answer.');
