@@ -218,12 +218,63 @@ Authentication POST requests require a same-origin `Origin`, JSON, and
 `X-Wave-CSRF: 1`. `POST /panel/api/auth/admin` takes `username`,
 `current_password`, and `password`. An empty new password keeps the
 current one. The session monitor at `/panel/ws/panel` and the workspace sockets
-check origin and session before upgrading. Active connections close when
-their session expires or is revoked.
+check origin and session before upgrading. The monitor's identity message
+includes an opaque `session_id` for that sign-in. The open panel uses it to
+recognize the same session after a connection drops. Authentication still
+requires the signed session cookie. Active connections close when their
+session expires or is revoked.
 
 The Console starts a host shell under the Wave backend's operating system
 account after the administrator opens it. Sign-out and credential changes
 revoke access to open terminals as well. [Console](building.md#console)
+
+## Workspace roster stream
+
+Workspace snapshots advertise roster support with a top-level
+`users_roster: true`. A browser watching a Users tab sends
+`users_roster_subscribe` with a fresh `subscription` string, `config_id`,
+exact `node`, `source` (`live` or `offline`), `run_id`, the
+`database_generation` when present in `users_access`, and the current
+`schematic_revision`. Live subscriptions require the `list-users` grant.
+Subscribers receive only that node's account summaries. Navigating away,
+hiding the document, ending the sign-in or closing the connection releases
+the subscription. `users_roster_unsubscribe` takes the subscription string.
+`users_roster_refresh` takes the same string and requests a reread or retry.
+Set `resync: true` to restart delivery from the latest cached baseline.
+Before sending the first baseline to a saved subscription, Wave validates
+the file in a read scheduled for that entry. Concurrent entries can share that
+read. The gate also applies to resync. If Wave cannot read the saved config
+or verify its node structure, it keeps the last verified tabs and generations
+in `users_access` with a `binding_error` message. Saved actions and roster
+delivery pause until the binding is verified.
+
+The authenticated workspace handler sends these frames with
+`type: "users_roster"`, the subscription string and an `event` field.
+Ordinary workspace snapshots and action replies still use their existing
+format and may arrive between roster frames.
+
+| Event | Fields and behavior |
+| --- | --- |
+| `begin` | Identifies an `attempt`, expected final `total`, and Wave `sequence`. A delta also carries the required `base_sequence`. |
+| `chunk` | Carries the `attempt`, zero-based `index`, complete changed `rows` and `removed` IDs. Each frame is at most 128 KiB. |
+| `end` | Commits the `attempt` and its expected `chunks` count, including empty rosters. May carry `host_time` and `accounting_time` samples in milliseconds. If the source became stale during delivery, sets `state` to `stale` and carries its `message`. |
+| `state` | Reports `loading`, `ready`, `stale`, `error` or `lost` and a display `message`. A `lost` frame also reports a `cause` of `permission` for live list denial, `config_unverified` for an unreadable saved config, or `identity` for other access or identity losses. |
+
+Sequences, attempts, account IDs, counters and time fields use decimal
+strings. A transfer commits only after all of its chunks arrive in order.
+A delta applies to its matching complete baseline. If multiple edits publish
+between deliveries, Wave compares the latest version with the version already
+delivered to that socket. A delta can skip sequence numbers and can have zero
+chunks when edits cancel out. A viewer can request a fresh baseline when it
+needs to resync. On the first `lost` frame the browser unsubscribes that ID
+and keeps the loss message on screen. This releases its share of the polling
+work. Retry starts a fresh scoped subscription. Protocol callers that keep
+their own subscriptions can explicitly refresh them.
+
+The backend bounds the cache at
+100,000 normalized rows and 32 MiB of serialized rows per roster. It keeps
+account credentials, full edit details and write preconditions on their
+separately scoped action paths.
 
 ## Tests
 

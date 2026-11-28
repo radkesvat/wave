@@ -123,6 +123,7 @@
           }
         ]
       },
+      "management_operations_slot": "/nodes/3/settings/clients/0/allow/0/operations",
       "slots": {
         "name": ["/name", "/nodes/3/settings/clients/0/allow/0/config"],
         "secret": ["/nodes/0/settings/secret", "/nodes/1/settings/auth-clients/0/secret"],
@@ -135,14 +136,14 @@
     "users": {
       "offline_description": "AuthenticationServer users.",
       "live_description": "AuthenticationServer live users.",
-      "starter_help": "Adds a local API listener and an AuthenticationServer node for managing this config's user database.",
+      "starter_help": "Adds an AuthenticationServer and a local API with all six live user-management permissions for this config's user database.",
       "limits_help": "Blank or zero leaves a limit unlimited.",
       "fields": {
         "id": {
           "path": "/id",
           "label": "User ID",
           "hint": "Automatically assigned",
-          "help": "WaterWall uses this unique, nonzero ID to track the account. Leave blank to let Wave assign one.",
+          "help": "Leave blank to use the next ID, starting at 1. Without live list access Wave assigns a random ID. You can also enter an unused ID.",
           "key": "id",
           "minimum": 1,
           "edit_help": "WaterWall uses this unique, nonzero ID to track the account across database updates."
@@ -333,7 +334,7 @@
           ]
         }
       ],
-      "live_setup_help": "Configure a local TcpListener and an APIServer client with list-users permission for this node.",
+      "live_setup_help": "Configure a dedicated local TcpListener and an APIServer client with permissions for this config and node. Grant list-users for monitoring and grant each management operation separately. Restart the config to apply the grants.",
       "starter_label": "Add API and authentication database nodes",
       "starter_compact_label": "Add API and authentication\ndatabase nodes"
     }
@@ -1372,7 +1373,7 @@
           "minimum": 0.0
         },
         {
-          "hint": "Default 300000. 0 disables periodic reports.",
+          "hint": "WaterWall uses 300000 when omitted. 0 disables periodic reports.",
           "key": "push-interval-ms",
           "kind": "integer",
           "label": "Usage report interval (ms)",

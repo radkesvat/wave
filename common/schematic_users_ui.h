@@ -2,8 +2,12 @@
 
 #include "waterwall_schematic.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <limits>
+#include <map>
+#include <optional>
 #include <string>
 
 namespace wave {
@@ -22,6 +26,33 @@ constexpr SchematicUserNumberBounds whole_megabyte_bounds(SchematicUserNumberBou
     const auto minimum = bytes.minimum / bytes_per_megabyte + (bytes.minimum % bytes_per_megabyte != 0);
     return {minimum, bytes.maximum / bytes_per_megabyte};
 }
+
+template <typename Row>
+std::optional<std::uint64_t> next_sequential_user_id(const std::map<std::uint64_t, Row>& users,
+                                                     SchematicUserNumberBounds bounds, bool gigabytes,
+                                                     std::uint64_t known_id = 0)
+{
+    auto highest = known_id <= bounds.maximum ? known_id : 0;
+    const auto upper = users.upper_bound(bounds.maximum);
+    if (upper != users.begin()) {
+        highest = std::max(highest, std::prev(upper)->first);
+    }
+    if (highest >= bounds.maximum) {
+        return std::nullopt;
+    }
+    bounds.minimum = std::max(highest + 1, bounds.minimum);
+    if (gigabytes) {
+        const auto megabytes = whole_megabyte_bounds(bounds);
+        if (megabytes.minimum > megabytes.maximum) {
+            return std::nullopt;
+        }
+        return megabytes.minimum * bytes_per_megabyte;
+    }
+    return bounds.minimum;
+}
+
+inline constexpr char exhausted_user_ids[] =
+    "No higher account ID is available in the configured range. Enter an unused ID.";
 
 inline SchematicUserNumberBounds schematic_user_number_bounds(const nlohmann::json& field,
                                                                SchematicUserNumberBounds defaults)

@@ -1,4 +1,4 @@
-foreach(suite IN ITEMS panel config users)
+foreach(suite IN ITEMS panel config users users-live)
     add_test(
         NAME frontend.workspace.${suite}
         COMMAND node --test "${CMAKE_CURRENT_SOURCE_DIR}/workspace-${suite}.test.cjs"

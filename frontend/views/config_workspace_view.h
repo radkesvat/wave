@@ -1,6 +1,5 @@
 #pragma once
 
-#include "config_live_users_view.h"
 #include "config_nodes_view.h"
 #include "config_users_view.h"
 
@@ -16,8 +15,7 @@ struct PanelControlsState;
 struct ConfigWorkspaceTab {
     enum class Kind {
         nodes,
-        offline_users,
-        live_users
+        users
     };
 
     std::string node;
@@ -30,16 +28,17 @@ struct ConfigWorkspaceTab {
 struct ConfigWorkspaceState {
     ConfigNodesState nodes;
     std::map<std::string, ConfigUsersState, std::less<>> users;
-    std::map<std::string, ConfigLiveUsersState, std::less<>> live_users;
     std::vector<ConfigWorkspaceTab> tabs;
     ConfigWorkspaceTab selected;
     std::optional<ConfigWorkspaceTab> requested;
 };
 
+void sync_config_workspace(ConfigWorkspaceState& state, PreviewSession& session,
+                           const nlohmann::json& config, bool visible);
 void render_config_workspace(ConfigWorkspaceState& state, PanelControlsState& controls,
                              PreviewSession& session, const nlohmann::json& config, int config_id,
                              bool narrow);
-std::string describe_config_workspace(const ConfigWorkspaceState& state);
+std::string describe_config_workspace(const ConfigWorkspaceState& state, const PreviewSession& session);
 CanvasViewport config_workspace_scroll_bounds(const ConfigWorkspaceState& state);
 void abandon_config_workspace(ConfigWorkspaceState& state, PreviewSession& session);
 

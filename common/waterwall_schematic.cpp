@@ -308,6 +308,15 @@ std::string_view waterwall_version()
     return schematic_text(schematic_field(waterwall_schematic(), "version"));
 }
 
+std::string_view users_starter_management_slot(const Json& schematic)
+{
+    if (schematic_field(schematic_field(schematic, "runtime"), "users_protocol") != "auth-json-and-api-v1") {
+        return {};
+    }
+    const auto& starter = schematic_field(schematic_field(schematic, "config"), "users_starter");
+    return schematic_text(schematic_field(starter, "management_operations_slot"));
+}
+
 std::span<const std::string_view> waterwall_node_types()
 {
     return active ? std::span<const std::string_view>{active->types} : std::span<const std::string_view>{};

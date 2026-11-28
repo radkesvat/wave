@@ -50,6 +50,7 @@ constexpr SiteAsset site_assets[] = {
     {"/licenses/poppins.txt", "text/plain; charset=utf-8"},
     {"/licenses/nlohmann-json.txt", "text/plain; charset=utf-8"},
     {"/licenses/nlohmann-json-third-party.txt", "text/plain; charset=utf-8"},
+    {"/licenses/utf8proc.txt", "text/plain; charset=utf-8"},
     {"/licenses/implot.txt", "text/plain; charset=utf-8"},
     {"/licenses/xterm.txt", "text/plain; charset=utf-8"},
     {"/licenses/xterm-addon-fit.txt", "text/plain; charset=utf-8"},
@@ -435,7 +436,10 @@ void configure_authenticated_routes(Server& server, const std::filesystem::path&
             socket.close(httplib::ws::CloseStatus::PolicyViolation, "Session ended.");
             return;
         }
-        if (!socket.send(session_data(*session).dump())) {
+        auto identity = session_data(*session);
+        // The record ID identifies this sign-in. Authenticating requires the signed cookie.
+        identity["session_id"] = session->id;
+        if (!socket.send(identity.dump())) {
             return;
         }
         socket.set_read_timeout(1);

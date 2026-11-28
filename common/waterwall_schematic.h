@@ -34,6 +34,7 @@ std::string set_waterwall_schematic(nlohmann::json document);
 void clear_waterwall_schematic();
 const nlohmann::json& waterwall_schematic();
 std::string_view waterwall_version();
+std::string_view users_starter_management_slot(const nlohmann::json& schematic);
 std::span<const std::string_view> waterwall_node_types();
 const nlohmann::json& waterwall_node(std::string_view type);
 bool valid_waterwall_version(std::string_view version);

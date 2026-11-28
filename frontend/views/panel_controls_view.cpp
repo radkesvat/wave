@@ -33,6 +33,7 @@ constexpr char build_guide_url[] =
 constexpr char update_notice[] =
     "WaterWall will stay stopped. Open configuration forms will reload from their saved settings.";
 constexpr char unsaved_config_warning[] = "Unsaved node changes will be lost.";
+constexpr char managed_starter_notice[] = "Grants Wave all live user-management permissions for this config.";
 constexpr char restore_message[] =
     "Choose a backup JSON file to replace the sample TLS settings and inactive config list.";
 constexpr char backup_selected_message[] = "Wave preview backup selected.";
@@ -358,9 +359,8 @@ bool config_enabled_switch(ImVec2 hit_size, ImVec2 track_size, bool enabled, boo
 std::string_view starter_label()
 {
     const auto& schematic = waterwall_schematic();
-    return field(field(schematic, "config"), "users_starter").is_object()
-               ? string_field(field(field(schematic, "ui"), "users"), "starter_label")
-               : std::string_view{};
+    return users_starter_management_slot(schematic).empty()
+               ? std::string_view{} : string_field(field(field(schematic, "ui"), "users"), "starter_label");
 }
 
 void render_create(PanelControlsState& state, PreviewSession& session, const Json& core)
@@ -397,6 +397,9 @@ void render_create(PanelControlsState& state, PreviewSession& session, const Jso
     ImGui::EndDisabled();
     if (!label.empty()) {
         help_marker(string_field(users, "starter_help"));
+        if (state.add_auth_nodes) {
+            wrapped(managed_starter_notice, Color::secondary_text);
+        }
     }
     const auto name = core_config_name(state.config_name.data());
     if (!name.empty() || state.config_name.front() == '\0') {
@@ -416,6 +419,8 @@ void render_create(PanelControlsState& state, PreviewSession& session, const Jso
         Json request{{"action", "create_core_config"}, {"name", state.config_name.data()}};
         if (!label.empty() && state.add_auth_nodes) {
             request["add_auth_nodes"] = true;
+            // Older backends require this opt-in when their starter advertises the operation slot.
+            request["allow_live_user_management"] = true;
         }
         submit(state, session, std::move(request));
     }
@@ -888,6 +893,10 @@ std::string describe_panel_controls(const PanelControlsState& state, const Previ
         if (const auto label = starter_label(); !label.empty()) {
             description += label;
             description += state.add_auth_nodes ? " checked. " : " unchecked. ";
+            if (state.add_auth_nodes) {
+                description += managed_starter_notice;
+                description += ' ';
+            }
         }
         break;
     case ControlsDialog::remove:

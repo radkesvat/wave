@@ -4,6 +4,7 @@
 #include "core_config_users.h"
 #include "schematic_rules.h"
 #include "waterwall_node_links.h"
+#include "waterwall_users.h"
 
 #include <openssl/rand.h>
 
@@ -88,27 +89,49 @@ Json make_empty_core_config(std::string_view name)
     return {{"name", name}, {"config-version", 1}, {"core-minimum-version", 0}, {"nodes", Json::array()}};
 }
 
-Json make_users_starter_config(std::string_view name, std::uint16_t port)
+Json make_users_starter_config(std::string_view name, std::uint16_t port, bool allow_live_user_management)
 {
+    const auto& schematic = waterwall_schematic();
+    const auto& starter = schematic_field(schematic_field(schematic, "config"), "users_starter");
+    const auto management_slot = users_starter_management_slot(schematic);
+    if (!starter.is_object() || (allow_live_user_management && management_slot.empty())) {
+        return nullptr;
+    }
     const auto secret = random_hex<32>();
     const auto token = random_hex<32>();
     if (secret.empty() || token.empty()) {
         return nullptr;
     }
 
-    const auto& starter = schematic_field(schematic_field(waterwall_schematic(), "config"), "users_starter");
-    if (!starter.is_object()) {
-        return nullptr;
-    }
-    // Bind generated values as JSON nodes so config names and ports keep their types.
     auto config = make_empty_core_config(name);
     config.update(starter.at("template"));
+    constexpr char report_interval[] = "push-interval-ms";
+    const auto& client_fields = field(waterwall_node("AuthenticationClient"), "fields");
+    const bool supports_reports = std::ranges::any_of(client_fields, [&](const Json& descriptor) {
+        return field(descriptor, "key") == report_interval;
+    });
+    if (supports_reports) {
+        for (auto& node : config.at("nodes")) {
+            if (field(node, "type") == "AuthenticationClient" && field(node, "settings").is_object()) {
+                node.at("settings").emplace(report_interval, 500);
+            }
+        }
+    }
+
+    // Bind generated values as JSON nodes so config names and ports keep their types.
     const auto& slots = starter.at("slots");
     for (const auto& [slot, value] : std::array<std::pair<const char*, Json>, 4>{
              {{"name", name}, {"secret", secret}, {"token", token}, {"port", port}}}) {
         for (const auto& pointer : slots.at(slot)) {
             config.at(Json::json_pointer(pointer.get<std::string>())) = value;
         }
+    }
+    if (allow_live_user_management) {
+        auto operations = Json::array();
+        for (const auto operation : waterwall_users_operations) {
+            operations.push_back(waterwall_users_operation_name(operation));
+        }
+        config.at(Json::json_pointer(std::string(management_slot))) = std::move(operations);
     }
     config["name"] = name;
     return config;
@@ -267,18 +290,13 @@ std::string validate_config_graph(const Json& config, const Json& previous)
     return {};
 }
 
-std::string configure_auth_databases(Json& config, const Json& previous, std::string_view config_name,
+std::string configure_auth_databases(Json& config, const OfflineUsersBindings& previous, std::string_view config_name,
                                      const fs::path& executable_directory)
 {
-    std::map<std::string_view, std::string> existing;
-    std::set<std::string> known;
-    for (const auto& node : field(previous, "nodes")) {
-        if (uses_auth_database(node)) {
-            auto filename = auth_database_name(node, config_name, executable_directory);
-            if (!filename.empty()) {
-                known.insert(filename);
-            }
-            existing.try_emplace(text(field(node, "name")), std::move(filename));
+    std::set<std::string_view> known;
+    for (const auto& [name, binding] : previous) {
+        if (!binding.database.empty()) {
+            known.insert(binding.database);
         }
     }
     std::set<std::string> assigned;
@@ -294,12 +312,12 @@ std::string configure_auth_databases(Json& config, const Json& previous, std::st
         const auto stored_name = text(field(metadata, "auth-db"));
         const auto requested = auth_database_name(node, config_name, executable_directory);
         std::string filename;
-        if (!stored_name.empty() && known.contains(std::string(stored_name))) {
+        if (known.contains(stored_name)) {
             filename = stored_name;
         } else if (known.contains(requested)) {
             filename = requested;
-        } else if (const auto original = existing.find(name); original != existing.end()) {
-            filename = original->second;
+        } else if (const auto original = previous.find(name); original != previous.end()) {
+            filename = original->second.database;
         }
         if (filename.empty() && settings.contains(database_key)) {
             return "The existing database for " + std::string(name) +

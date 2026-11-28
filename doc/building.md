@@ -11,12 +11,12 @@ See **Panel Controls** there for the WaterWall process state.
 - Git and Python 3 for the Emscripten SDK setup
 - Emscripten SDK 7.0.1
 - Network access on the first build to fetch Dear ImGui v1.93.0, ImPlot v1.1,
-  nlohmann/json v3.12.0,
+  nlohmann/json v3.12.0, utf8proc v2.12.0,
   xterm.js 6.0.0, its Fit Addon 0.11.0, vanilla-jsoneditor 3.13.1,
   lossless-json 4.3.4, and the SDK's SDL2 port.
   [ImPlot release](https://github.com/epezent/implot/releases/tag/v1.1) [xterm.js](https://www.npmjs.com/package/@xterm/xterm/v/6.0.0) [Fit Addon](https://www.npmjs.com/package/@xterm/addon-fit/v/0.11.0)
 
-The SDK supplies the Clang-based `em++` driver and the Emscripten CMake toolchain.
+The SDK supplies the Clang-based `emcc` and `em++` drivers and the Emscripten CMake toolchain.
 Install the SDK outside the Wave checkout and activate it in the shell you will
 use to build. [Emscripten SDK setup](https://emscripten.org/docs/getting_started/downloads.html)
 
@@ -144,10 +144,11 @@ Replace `--dry-run --Werror` with `-i` to apply the format.
 
 The backend needs CMake 3.24 or newer, Ninja, host C and C++20 compilers, and
 the OpenSSL 3 development package. The first configure downloads cpp-httplib
-v0.67.0, nlohmann/json v3.12.0, the Argon2 reference implementation release
+v0.67.0, nlohmann/json v3.12.0, utf8proc v2.12.0, the Argon2 reference implementation release
 `20190702`, and zxcvbn-c v2.7, then verifies their pinned archive checksums.
 [cpp-httplib release](https://github.com/yhirose/cpp-httplib/releases/tag/v0.67.0),
 [nlohmann/json release](https://github.com/nlohmann/json/releases/tag/v3.12.0),
+[utf8proc release](https://github.com/JuliaStrings/utf8proc/releases/tag/v2.12.0),
 [zxcvbn-c release](https://github.com/tsyrogit/zxcvbn-c/releases/tag/v2.7),
 [zxcvbn-c license](licenses/zxcvbn-c.txt)
 
@@ -170,6 +171,7 @@ If an existing backend build directory was configured from `backend/`, add
 The executable is `build/backend-release/wave-backend` or
 `build/backend-debug/wave-backend`. With Ninja Multi-Config, each configuration
 builds the executable in its own directory, such as `Debug/` or `Release/`.
+Keep the build's `licenses/utf8proc.txt` with the backend when distributing it.
 The executable contains the default WaterWall 1.6.0 schematic. On first
 startup, Wave creates its `waterwall_bin/` cache and seeds the default
 release from that embedded copy. Rebuilding after a schematic edit updates
@@ -497,12 +499,23 @@ Configs in use by the running core are protected.
 
 Select **Add API and authentication database nodes** in **Create config** to
 start with an **AuthenticationClient → AuthenticationServer** chain and a
-**TcpListener → UsersApi** chain. `UsersApi` is an `APIServer` with a randomly
-generated token that allows `list-users` for this config's AuthenticationServer.
-Wave creates a private, empty user database and a separate shared secret for
-the authentication chain. The TCP listener uses `127.0.0.1` and a random port
-from 49152 to 65535. Wave checks that the port can be bound during creation and
-skips ports already assigned to conflicting listeners in saved configs.
+**TcpListener → UsersApi** chain. The generated API client can run
+`status`, `list-users`, `get-user`, `create-user`, `update-user`, and
+`change-user-password` for this config's AuthenticationServer.
+The single checkbox enables live account edits,
+including the Enable switch and traffic quotas. Deletion is available after
+stopping WaterWall. To enable live edits on a previously created
+monitoring-only config, add `get-user` and `update-user` to its existing
+`list-users` grant, save the config, and restart WaterWall.
+
+Wave creates a private, empty user database, a random API token and a separate
+shared secret for the authentication chain. By default, it sets the new
+**AuthenticationClient → Usage report interval (ms)** to **500**. Edit that
+field to change how often the client reports accumulated traffic to WaterWall.
+The TCP listener uses `127.0.0.1` and a random port from 49152 to 65535.
+Wave checks that the port can be bound
+during creation and skips ports already assigned to conflicting listeners in
+saved configs.
 
 #### Nodes and AuthenticationServer users
 
@@ -561,22 +574,92 @@ rejects them. Add and configure the nodes needed for each chain before enabling
 the config. WaterWall checks each node's settings and chain compatibility when
 it starts.
 
-Saving an **AuthenticationServer** adds a tab with the node's name. Its user
-database is a separate JSON file under `configs/<name>/`. Wave sets the node's
-`db-path` and keeps the same file when the node is renamed. The offline editor
-can read and change the database while WaterWall is stopped. WaterWall writes
-its in-memory users back to the database and can keep recovery backups in the
-same folder.
+Saving an **AuthenticationServer** adds one users tab with the node's name.
+While WaterWall is stopped, Wave uses the private JSON file under
+`configs/<name>/` and validates the current file each time an operator opens the
+roster, including when another operator already has it open. **Refresh from
+disk** picks up external edits while the tab is open. Saved rosters have no timed
+reads. Committed Wave edits also update active viewers of that file. Wave sets the node's
+`db-path` and keeps the same file when the node is renamed. When WaterWall
+runs the selected config, the same tab uses the local API. While at least one
+operator views a live roster, Wave shares one revision check for the node
+every 500 ms. Browsers receive changed summaries and removed IDs after their
+initial load. Starting and stopping pause account access. If the selected config is
+inactive or the API is unavailable, the tab shows the reason and disk access
+resumes after WaterWall stops.
 
-Use **Add user** or **Edit** to change the account, access, expiry, and limit
-settings. You can enter a unique nonzero user ID when adding an account or
-leave it blank to generate one. Existing IDs, creation and first-use times,
-and recorded statistics are shown for reference. The offline list shows
-account state and group assignments independently of which fields the selected
-release allows you to edit. The desktop list labels unassigned accounts
-**Default** in the **Group** column.
+During a refresh or account request, the spinner appears at the right end of
+the summary above the Users table. The rows stay in place. Successful account
+changes appear in **Logs**.
 
-The offline editor shows traffic quotas and recorded traffic in decimal GB.
+**Search** finds an exact decimal ID or a case-insensitive substring of the
+displayed name. Surrounding whitespace is ignored, and spaces inside names
+are significant. Exact-ID lookup also ignores surrounding whitespace and
+accepts leading zeroes. Both sources use Unicode case folding and preserve
+accent distinctions. Search, column sorting and scrolling work over the full roster in
+the browser. WaterWall 1.6.0 list summaries show at most 256 UTF-8 bytes of a
+name. Search uses that displayed preview. **Options** can open the full name
+with the `get-user` grant. When only exact-ID lookup is available or the
+live list is unavailable, **Find account** opens that account's details
+directly. A `get-user` grant is enough to view it. Save or cancel pending
+account edits before using **Change password** when that action is granted.
+Add `list-users` to enable browsing and name search.
+
+**Traffic usage** shows total charged upload and download combined. It can
+be sorted locally, including for large imported accounts. A missing counter
+makes the total unavailable. To clear one user's usage, stop WaterWall, open
+**Options → Reset traffic** on that user's row, and confirm. Wave sets both
+charged counters to zero. The account keeps its configured quota and expiry.
+WaterWall 1.6.0 has no live API operation for this reset.
+
+**Avg upload speed** and **Avg download speed** show estimated charged bytes
+per second. Each live tab times two consecutive changes to an account's
+counters, then divides the bytes added in each direction by that interval.
+Estimates can vary slightly across viewers. For example, 6 MiB of new upload over 60 seconds gives
+102.4 KiB/s. WaterWall batches usage and can apply quota multipliers.
+Accounts with longer reporting intervals can take several minutes to show
+their first estimate. Hover over a speed to see its interval and the age of
+the last update. Both columns
+sort locally. The last estimate stays visible between reports and clears if
+the roster goes stale or the counters reset. Speeds are unavailable offline.
+
+**Days Left** shows the earlier active
+absolute or first-use deadline, with separate displays for expiry, unlimited
+duration, first-use timers and unavailable values. Saved first-use durations
+that have started show as unavailable while their accounting clock is offline.
+Enable the optional **Group** column to see assigned groups. Unassigned rows
+show **Default**. Measured network speeds require additional WaterWall
+telemetry. [Per-user rate proposal](waterwall-user-rates.md)
+
+Leave **User ID** blank to start at `1` in an empty database and then use the
+highest existing ID plus one. The form shows the next ID when it has a current
+account list. Search and sort have no effect on this suggestion. In offline
+mode Wave assigns the ID from the saved file when it writes the account.
+Custom schematic ID ranges limit the sequence. If the highest ID has reached
+the upper limit, enter an unused ID within the range.
+
+A live panel with create permission alone picks a random ID within the allowed
+range. If a permitted list is still loading or stale, wait for it to refresh
+or enter an ID yourself. If another admin takes the suggested ID first, Wave
+refreshes the list. Review the new suggestion, re-enter the password, and
+submit again. A manually entered ID stays in the form until you change it.
+
+For a live create, the browser knows the exact ID it sent.
+An open browser tab retains the ID of an unconfirmed
+create when the connection drops. Reconnecting to the same sign-in restores
+the ID. The tab's local **Logs** also record the account ID, config and node for
+confirmed or unconfirmed creates. If Wave loses the database identity during
+a create, it closes the draft. Check the account ID in the original database
+using the config and node recorded in Logs. A later acknowledgement can still
+confirm the original write. Reloading the page or
+starting a new sign-in clears these browser-local receipts.
+
+Use **Options** to fetch the account and open its access, expiry, activity and limit settings.
+Existing IDs, creation and first-use times, and recorded statistics are shown for
+reference. The inline switch fills the fixed-width **Enable** column when the
+schematic defines the control and the source permits editing.
+
+The editor shows traffic quotas and recorded traffic in decimal GB.
 Enter up to three decimal places for quotas. `10.531` GB is 10 GB and 531 MB.
 WaterWall stores the charged byte count. Saved values with finer precision
 retain their exact byte count until the field is changed. Bandwidth limits
@@ -586,28 +669,55 @@ milliseconds. Clearing a numeric override restores WaterWall's default,
 including the 120,000 ms statistics record interval. A WireGuard account can
 have one IPv4 or IPv6 CIDR.
 
-**Edit** shows the saved WaterWall user password in clear text for the
-selected account. The authenticated offline read retrieves just that
-password from the private node database. A blank replacement keeps the saved
-password. Wave reads databases up to 16 MiB and loads 50 users per page.
-Deleting a node or removing a config preserves user
-database files. To manage a pre-existing AuthenticationServer in Wave, place
-its database in the config folder and set its `db-path` to that file before
-editing the node. Each server also needs its own `auth-clients` settings before
-it can run. [WaterWall 1.6.0 AuthenticationServer](https://github.com/radkesvat/WaterWall/blob/v1.6.0/tunnels/AuthenticationServer/description.md)
+| Action | WaterWall stopped | WaterWall running the selected config |
+| --- | --- | --- |
+| Browse, search, sort and monitor users | Saved roster and charged totals | `list-users` gives the roster and current charged totals. `status`, when granted, can accelerate revision checks. |
+| Database status | — | `status` gives save, checkpoint, user count, and audit health |
+| Account details and exact-ID lookup | Saved account data | `get-user` gives redacted account data |
+| Create an account | Available | `create-user` |
+| Edit account fields or toggle Enable | Available | `get-user` and `update-user` |
+| Change password | Available in the account editor | Separate **Change password** action with `get-user` and `change-user-password` |
+| Show saved password | Individual password read | — |
+| Reset traffic usage | Available with confirmation | — |
+| Delete an account | Available with confirmation | — |
 
-A saved config with a direct **TcpListener → APIServer** connection also has a
-**Live** tab for each AuthenticationServer. The tab is empty until WaterWall
-runs that config and answers a `list-users` request. The live list refreshes
-while open and shows account state and accepted upload and download totals.
+A successful live write updates the running core. WaterWall saves changes to
+disk on its normal save cycle and can keep recovery backups in the same folder.
+If a newer account edit conflicts with a draft, review the latest values
+before trying again. If a live write loses its acknowledgement, use the
+original account ID to inspect the result before taking further action.
+If a live read fails temporarily, Wave marks the displayed rows stale. When
+access is lost, Wave clears the list. Use **Retry** once access returns. An
+open editor for the same verified account can review fresh details and
+resume with independently granted edit or password access. When there are multiple
+eligible local listeners, Wave can try another after a transport failure. A
+write can move to another listener only when its complete request could not
+have reached WaterWall. Once Wave sends the complete write, it waits for its
+acknowledgement for the rest of the two-second request deadline.
 
-Use a dedicated API listener on `127.0.0.1` or `::1` with an explicit port. Wave
-also reaches wildcard listeners through loopback. In the APIServer's
+Wave reads private databases up to 16 MiB. Deleting a node or removing a
+config preserves these database files. To manage an existing database, put it
+in the config folder and set the node's `db-path` to that file. Each server
+needs `auth-clients` settings to run. [WaterWall 1.6.0 AuthenticationServer](https://github.com/radkesvat/WaterWall/blob/v1.6.0/tunnels/AuthenticationServer/description.md)
+If a saved node is reassigned to a different database, reopen the account in
+its tab before editing or showing its password.
+If Wave temporarily cannot read a saved config or its `nodes` field is missing
+or is the wrong type, it keeps the Users tabs and nonsecret drafts. Account
+actions pause until the config can be verified. A valid empty `nodes` array
+removes the tabs.
+Restore the config and select **Retry** to validate the binding and file again.
+
+Use a dedicated API port on `127.0.0.1` or `::1`. For a listener with multiple
+explicit ports or a socket-backed range, Wave checks which ports are dedicated
+to the API. Wave also reaches wildcard listeners through loopback. In the APIServer's
 `settings.clients`, set a client name, a 64-character hexadecimal token, and
 an `allow` entry with the config's top-level `name`, the exact
-AuthenticationServer node name, and `"operations": ["list-users"]`. Wave
-verifies the local TCP peer belongs to its WaterWall process before sending
-the request. [WaterWall 1.6.0 APIServer](https://github.com/radkesvat/WaterWall/blob/v1.6.0/tunnels/APIServer/description.md)
+AuthenticationServer node name, and the operations from the table above.
+For example, `"operations": ["list-users", "get-user", "update-user"]` lets
+the client monitor and edit accounts. Add each operation explicitly to give
+the client additional access. Save the config and restart WaterWall to apply
+the new grants. Wave verifies the local TCP peer belongs to its WaterWall
+process before sending credentials. [WaterWall 1.6.0 APIServer](https://github.com/radkesvat/WaterWall/blob/v1.6.0/tunnels/APIServer/description.md)
 
 **Backup** in Panel Controls downloads `wave-preview-backup.json` with the
 sample TLS domain, PEM paths, and the inactive config list. The backup contains
@@ -641,7 +751,8 @@ must include its current `schematic_revision`, even if the connection has
 already received the schematic. Older clients can omit the revision while
 Wave is on its initial bundled 1.6.0 selection before the first switch.
 Selecting another release at startup also requires the revision. Requests
-use the existing `request_id` and snapshot reply.
+use the existing `request_id` and snapshot reply for workspace actions.
+The opt-in Users roster stream uses separate messages. [Workspace roster protocol](authentication.md#workspace-roster-stream)
 Checks, installs, and other operations that continue in the background
 acknowledge receipt and report completion in later snapshots. Stop and restart
 dialogs keep the spinner visible while WaterWall is changing state.
@@ -662,18 +773,41 @@ connection closes, Server Status shows the last snapshot and offers to reconnect
 | `apply_core_settings` | Overrides supported by the selected schematic as `settings`, up to 16 KiB |
 | `apply_theme` | `theme` set to `default`, `light`, `classic`, `dark`, or `darker` |
 | `apply_donation` | `answer` set to `no`, `below_5`, or `more_than_5`. The snapshot reports the saved answer, its UTC timestamp, and whether the reminder is due in `data.settings.donation`. |
-| `create_core_config` | `name`, optional boolean `add_auth_nodes` to provision the two starter chains |
+| `create_core_config` | `name` and optional boolean `add_auth_nodes`. Setting it to `true` provisions the starter chains with full scoped user management. Older clients can explicitly send `allow_live_user_management: false` to retain the template's original grants. |
 | `get_core_config` | Config `id`. The result has `config`, `revision`, and `editable`. |
 | `save_core_config` | Config `id`, edited `config` object, and last loaded `revision` |
 | `set_core_config_enabled` | Config `id` and boolean `enabled` |
 | `remove_core_config` | Config `id` |
-| `get_config_users` | `config_id`, AuthServer `node` name, and optional zero-based `page` |
-| `get_config_user_password` | `config_id`, AuthServer `node` name, and decimal string `user_id`. The offline edit read returns `result.password` to the requesting administrator. |
+| `get_config_users` | Offline scope, optional zero-based `page`, and optional `search` string |
+| `get_config_user` | Offline scope and decimal string `user_id`. Returns the redacted editable account. |
+| `get_config_user_password` | Offline scope and decimal string `user_id`. The offline edit read returns `result.password` to the requesting administrator. |
 | `get_live_config_users` | `config_id`, AuthServer `node` name, and optional opaque `cursor` from the previous live page |
-| `create_config_user` | `config_id`, `node`, `user` object with `password` and optional decimal string `id`, and optional `page` |
-| `edit_config_user` | `config_id`, `node`, string `user_id`, changed fields in `user`, and optional `page`. Set a numeric override to `null` to restore its default. |
-| `delete_config_user` | `config_id`, `node`, string `user_id`, and optional `page` |
+| `get_live_config_user_status` | Live scope. Returns the public database status. |
+| `get_live_config_user` | Live scope and decimal string `user_id`. Returns a redacted `user`, `if_match` edit token, `accounting_time_ms` and `host_time_ms` samples. |
+| `create_live_config_user` | Live scope, `user` object with an initial `password`, and a required canonical nonzero unsigned 64-bit decimal string in `user.id` or `user_id`. Both values must agree when both are supplied. |
+| `edit_live_config_user` | Live scope, `user_id`, original `if_match`, and changed fields in `user` |
+| `change_live_config_user_password` | Live scope, `user_id`, original `if_match`, and the new `password` |
+| `create_config_user` | Offline scope, `user` object with `password` and optional decimal string `id`, and optional `page` or `roster: true` |
+| `edit_config_user` | Offline scope, string `user_id`, changed fields in `user`, and optional `page` or `roster: true`. Set a numeric override to `null` to restore its default. |
+| `reset_config_user_traffic` | Current offline scope, decimal string `user_id`, and optional `page` or `roster: true`. Sets the saved charged upload and download counters to zero. |
+| `delete_config_user` | Offline scope, string `user_id`, and optional `page` or `roster: true` |
 | `restore_preview_backup` | Downloaded JSON object as `backup` |
+
+Live scope consists of `config_id`, `node`, `source` set to `live`, and the
+node's `run_id` from `users_access` on the config snapshot. The legacy paged
+action remains available to existing clients.
+
+Offline scope consists of `config_id`, `node`, `source` set to `offline`, and the
+node's `run_id` from the current offline snapshot. The opaque scope includes the
+generation of the node's assigned database. The browser tracks the opaque
+`database_generation` across starts and stops and asks the operator to reopen
+the account when the assignment changes. The reply to a stale request carries
+the refreshed snapshot. Legacy paged account actions also accept just
+`config_id` and `node` and use the current database mapping at dispatch.
+
+Saved mutation replies with `roster: true` return the committed `user_id`
+in place of a page. The roster stream delivers the resulting row change
+independently of the action acknowledgement.
 
 ### Backend tests
 
@@ -686,3 +820,16 @@ build.
 ctest --preset backend-debug
 ctest --preset backend-release
 ```
+
+To exercise all six live user operations against the actual core, supply a
+WaterWall 1.6.0 executable. The test creates private config and database
+files in a temporary deployment, uses loopback for the API and usage producer,
+and removes the deployment when it finishes.
+
+```sh
+WAVE_BACKEND="$PWD/build/backend-release/wave-backend" \
+WAVE_WATERWALL_V160="$PWD/build/backend-release/waterwall_bin/1.6.0/Waterwall" \
+node --test tests/backend/users-real-core.test.cjs
+```
+
+[Users roster validation and measurements](users-roster-validation.md)

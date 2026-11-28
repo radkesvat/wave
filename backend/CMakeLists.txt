@@ -21,7 +21,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     include(httplib_websocket_close.cmake)
 endif()
 
-enable_language(C)
 # Argon2 reference implementation, release 20190702.
 FetchContent_Declare(argon2
     URL https://codeload.github.com/P-H-C/phc-winner-argon2/tar.gz/refs/tags/20190702
@@ -68,7 +67,7 @@ endif()
 
 add_executable(wave-backend
     main.cpp panel_settings.cpp panel_update.cpp preview.cpp linux_metrics.cpp auth.cpp auth_store.cpp
-    waterwall.cpp waterwall_install.cpp waterwall_logs.cpp waterwall_users.cpp
+    waterwall.cpp waterwall_install.cpp waterwall_logs.cpp waterwall_users.cpp users_roster.cpp users_roster_stream.cpp
     core_config_files.cpp core_config_graph.cpp core_config_users.cpp console.cpp
     waterwall_schematic_file.cpp waterwall_schematic_catalog.cpp "${PROJECT_SOURCE_DIR}/common/waterwall_schematic.cpp"
 )
@@ -80,7 +79,7 @@ set_target_properties(wave-backend PROPERTIES
 )
 target_include_directories(wave-backend PRIVATE "${PROJECT_SOURCE_DIR}/common" "${PROJECT_BINARY_DIR}/generated")
 target_link_libraries(wave-backend PRIVATE
-    httplib::httplib nlohmann_json::nlohmann_json OpenSSL::Crypto Threads::Threads wave-argon2 wave-zxcvbn
+    httplib::httplib nlohmann_json::nlohmann_json OpenSSL::Crypto Threads::Threads wave-argon2 wave-zxcvbn wave-utf8proc
 )
 if(WIN32)
     target_link_libraries(wave-backend PRIVATE advapi32)
@@ -101,3 +100,4 @@ file(READ "${waterwall_schematic_source}" schematic_hex HEX)
 string(REGEX REPLACE "(..)" "\\\\x\\1" schematic_bytes "${schematic_hex}")
 configure_file(bundled_waterwall_schematic.h.in
     "${PROJECT_BINARY_DIR}/generated/bundled_waterwall_schematic.h" @ONLY)
+configure_file("${utf8proc_SOURCE_DIR}/LICENSE.md" "${CMAKE_BINARY_DIR}/licenses/utf8proc.txt" COPYONLY)

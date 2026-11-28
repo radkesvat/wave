@@ -126,7 +126,7 @@ test('shows the footer spinner when reloading a config with unsaved changes', as
     }
 });
 
-test('creates a config with authentication and API starter nodes selected', async () => {
+test('selecting the API starter grants live user management with a single checkbox', async () => {
     const page = await workspace.browser.newPage({ viewport: desktop });
     const data = fixture();
     const preview = await mockPreview(page, data);
@@ -150,11 +150,14 @@ test('creates a config with authentication and API starter nodes selected', asyn
         const [checkbox] = await verticalRuns(page, 474, top + 87, top + 137, [13, 11, 14], 15);
         assert.ok(checkbox, 'Expected the unchecked starter nodes option.');
         await click(page, 474, (checkbox[0] + checkbox[1]) / 2);
-        await status(page, /Add API and authentication database nodes checked\./);
+        await status(page, /Add API and authentication database nodes checked\. Grants Wave all live user-management permissions for this config\./);
+        assert.doesNotMatch(await page.locator('#canvas').getAttribute('aria-label'), /Allow live user management/);
         await confirmDialog(page, activate);
 
         const created = await preview.action(0);
-        assertRequest(created.request, { action: 'create_core_config', name, add_auth_nodes: true });
+        assertRequest(created.request, {
+            action: 'create_core_config', name, add_auth_nodes: true, allow_live_user_management: true,
+        });
         data.server.core.configs.push({
             id: 2, name, enabled: false, active: false, auth_nodes: ['AuthenticationServer'], live_users: true,
         });
@@ -172,7 +175,7 @@ test('creates a config with authentication and API starter nodes selected', asyn
     }
 });
 
-test('creates an empty config when another session selects a starterless release', async () => {
+test('clears the starter selection when another release lacks a management grant slot', async () => {
     const page = await workspace.browser.newPage({ viewport: desktop });
     const data = fixture('stopped');
     const preview = await mockPreview(page, data);
@@ -194,14 +197,18 @@ test('creates an empty config when another session selects a starterless release
 
         const schematic = structuredClone(workspace.waterwallSchematic);
         schematic.version = '1.6.1';
-        delete schematic.config.users_starter;
+        delete schematic.config.users_starter.management_operations_slot;
         data.server.core.version = schematic.version;
         await preview.broadcast({ schematic, schematic_revision: 2 });
         await status(page, /Create new config\.(?! Add API and authentication database nodes)/);
 
+        data.server.core.version = workspace.waterwallSchematic.version;
+        await preview.broadcast({ schematic: workspace.waterwallSchematic, schematic_revision: 3 });
+        await status(page, /Add API and authentication database nodes unchecked\./);
+
         await confirmDialog(page, (x, y) => click(page, x, y));
         const created = await preview.action(0);
-        assertRequest(created.request, { action: 'create_core_config', name, schematic_revision: 2 });
+        assertRequest(created.request, { action: 'create_core_config', name, schematic_revision: 3 });
         const id = 2;
         data.server.core.configs.push({ id, name, enabled: false, active: false });
         created.reply();
@@ -209,7 +216,7 @@ test('creates an empty config when another session selects a starterless release
         await page.getByRole('link', { name, exact: true }).focus();
         await page.keyboard.press('Enter');
         const opened = await preview.action(1);
-        assertRequest(opened.request, { action: 'get_core_config', id, schematic_revision: 2 });
+        assertRequest(opened.request, { action: 'get_core_config', id, schematic_revision: 3 });
         opened.reply({ result: { config: { name, nodes: [] }, revision: 'empty', editable: true } });
         await status(page, /Nodes tab\. Nodes\. 0 nodes\./);
     } finally {

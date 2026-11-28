@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -14,6 +15,8 @@ class CoreConfigUsers {
         bool success;
         std::string message;
         nlohmann::json result = nullptr;
+        std::optional<nlohmann::json> roster_change;
+        bool database_unavailable = false;
     };
 
     explicit CoreConfigUsers(const std::filesystem::path& executable_directory);
@@ -24,8 +27,9 @@ class CoreConfigUsers {
 
     std::string prepare(std::string_view config_name, std::string_view db_name, bool& created) const;
     bool remove(std::string_view config_name, std::string_view db_name) const;
+    Result load_roster(std::string_view config_name, std::string_view db_name) const;
     Result execute(std::string_view action, std::string_view config_name, std::string_view db_name,
-                   const nlohmann::json& input) const;
+                   const nlohmann::json& input, bool include_roster_change = false) const;
 
   private:
     std::filesystem::path root_;

@@ -12,7 +12,8 @@ const { createInterface } = require('node:readline');
 const { after, before, test } = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
 const { isDeepStrictEqual, promisify } = require('node:util');
-const { authFixture, emptyCatalogPath, panelBasePath, rotatingLogPath, seedCore } = require('./auth_fixture.cjs');
+const { authFixture, emptyCatalogPath, fixtureSession, nextPreviewSnapshot, openPreview, panelBasePath,
+    requestPreview, rotatingLogPath, seedCore } = require('./auth_fixture.cjs');
 const { bundledSchematicFile, copyBackend, coreReleaseDir, schematicFile } = require('./tls_fixture.cjs');
 
 const sourceBackend = process.env.WAVE_BACKEND;
@@ -388,54 +389,8 @@ async function readOverview(t) {
     return JSON.parse(frames[0]);
 }
 
-const schematicRevisions = new WeakMap();
-
-async function nextPreviewSnapshot(socket, matches = () => true, wait = timeout) {
-    const signal = AbortSignal.timeout(wait);
-    for (;;) {
-        const [message] = await once(socket, 'message', { signal });
-        assert.equal(typeof message.data, 'string');
-        const frame = JSON.parse(message.data);
-        assert.equal(frame.type, 'snapshot');
-        schematicRevisions.set(socket, frame.schematic_revision);
-        if (matches(frame)) return frame;
-    }
-}
-
-async function connectPreview(t, base, sessionCookie, basePath) {
-    const socket = connectSocket('/ws/workspace', base, sessionCookie, basePath);
-    t.after(() => socket.close());
-    const { data: initial, schematic, schematic_revision } = await nextPreviewSnapshot(socket);
-    return { socket, initial, schematic, schematicRevision: schematic_revision };
-}
-
-async function fixtureSession(fixture) {
-    const credentials = { username: 'fixture-admin', password: 'fixture core test passphrase 4Kq7v' };
-    const post = action => fetch(new URL(`${fixture.basePath}/api/auth/${action}`, fixture.origin), {
-        method: 'POST',
-        headers: { Origin: fixture.origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json' },
-        body: JSON.stringify(credentials),
-        signal: AbortSignal.timeout(timeout),
-    });
-    assert.equal((await post('setup')).status, 201);
-    const login = await post('sign-in');
-    assert.equal(login.status, 204);
-    return login.headers.get('set-cookie').split(';', 1)[0];
-}
-
-let requestId = 0;
-function requestPreview(socket, action, fields = {}) {
-    const id = ++requestId;
-    const reply = nextPreviewSnapshot(socket, frame => frame.request_id === id);
-    socket.send(JSON.stringify({
-        action, request_id: id, schematic_revision: schematicRevisions.get(socket), ...fields,
-    }));
-    return reply.then(frame => {
-        assert.equal(frame.action, action);
-        assert.equal(typeof frame.ok, 'boolean');
-        assert.equal(typeof frame.feedback, 'string');
-        return frame;
-    });
+function connectPreview(t, base = url, sessionCookie = cookie, basePath = panelBasePath) {
+    return openPreview(t, base, sessionCookie, basePath);
 }
 
 function assertHostHistory(server) {
@@ -1635,6 +1590,8 @@ test('preserves config files and keeps outdated core settings until the administ
     assert.equal(await readFile(notes, 'utf8'), 'Fixture notes survive removal.');
 });
 
+const userApiOperations = ['status', 'list-users', 'get-user', 'create-user', 'update-user', 'change-user-password'];
+
 test('creates disabled configs with protected authentication and API starter nodes', async t => {
     const fixture = await authFixture(t, undefined, { encrypted: false });
     await fixture.start();
@@ -1642,13 +1599,24 @@ test('creates disabled configs with protected authentication and API starter nod
     const { socket } = await connectPreview(t, fixture.origin, session);
     const ports = new Set();
     const credentials = new Set();
-    const rejected = await requestPreview(socket, 'create_core_config', { name: 'Invalid starter', add_auth_nodes: 'true' });
-    assert.equal(rejected.ok, false);
-    assert.deepEqual(rejected.data.server.core.configs, []);
-    assert.deepEqual(await readdir(join(dirname(fixture.backend), 'configs')), []);
+    for (const invalid of [
+        { add_auth_nodes: 'true' },
+        { add_auth_nodes: true, allow_live_user_management: 'true' },
+        { allow_live_user_management: true },
+    ]) {
+        const rejected = await requestPreview(socket, 'create_core_config', { name: 'Invalid starter', ...invalid });
+        assert.equal(rejected.ok, false);
+        assert.deepEqual(rejected.data.server.core.configs, []);
+    }
+    const configDir = join(dirname(fixture.backend), 'configs');
+    assert.deepEqual(await readdir(configDir), []);
 
-    for (const name of ['Starter Alpha', 'Starter Beta']) {
-        const created = await requestPreview(socket, 'create_core_config', { name: ` ${name} `, add_auth_nodes: true });
+    const monitorFile = join(configDir, 'Legacy monitor', 'config.json');
+    let monitorBefore;
+    for (const [name, management] of [['Legacy monitor', false], ['Default starter'], ['Explicit management', true]]) {
+        const created = await requestPreview(socket, 'create_core_config', {
+            name: ` ${name} `, add_auth_nodes: true, allow_live_user_management: management,
+        });
         assert.equal(created.ok, true, created.feedback);
         const row = created.data.server.core.configs.find(config => config.name === name);
         assert.ok(row, 'The new config is registered under its trimmed name.');
@@ -1661,9 +1629,11 @@ test('creates disabled configs with protected authentication and API starter nod
         assert.equal(opened.ok, true, opened.feedback);
         assert.equal(opened.result.editable, true);
         const { config } = opened.result;
-        const directory = join(dirname(fixture.backend), 'configs', name);
+        const directory = join(configDir, name);
         const file = join(directory, 'config.json');
-        assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), config);
+        const contents = await readFile(file, 'utf8');
+        assert.deepEqual(JSON.parse(contents), config);
+        if (file === monitorFile) monitorBefore = contents;
         assert.equal((await stat(file)).mode & 0o777, 0o600);
         assert.equal(config.name, name);
         assert.equal(config['config-version'], 1);
@@ -1679,14 +1649,17 @@ test('creates disabled configs with protected authentication and API starter nod
         assert.equal(authClient.next, authServer.name);
         assert.equal(listener.next, api.name);
         assert.equal(authClient.settings.name, 'wave-auth');
+        assert.equal(authClient.settings['push-interval-ms'], 500);
         assert.deepEqual(authServer.settings['auth-clients'], [{
-            ...authClient.settings, 'allow-user-pull': true, 'allow-stats-push': true,
+            name: authClient.settings.name, secret: authClient.settings.secret,
+            'allow-user-pull': true, 'allow-stats-push': true,
         }]);
         assert.equal(api.settings.clients.length, 1);
-        const [reader] = api.settings.clients;
-        assert.equal(reader.name, 'wave-users');
-        assert.deepEqual(reader.allow, [{ config: name, node: authServer.name, operations: ['list-users'] }]);
-        for (const credential of [authClient.settings.secret, reader.token]) {
+        const [client] = api.settings.clients;
+        assert.equal(client.name, 'wave-users');
+        const operations = management === false ? ['list-users'] : userApiOperations;
+        assert.deepEqual(client.allow, [{ config: name, node: authServer.name, operations }]);
+        for (const credential of [authClient.settings.secret, client.token]) {
             assert.ok(typeof credential === 'string' && /^[0-9a-f]{64}$/.test(credential));
             assert.ok(!credentials.has(credential), 'Each generated credential is independent.');
             assert.ok(!JSON.stringify(created).includes(credential), 'The creation acknowledgement keeps credentials private.');
@@ -1714,15 +1687,16 @@ test('creates disabled configs with protected authentication and API starter nod
         occupied.listen(port, address);
         await once(occupied, 'listening');
     }
+    assert.equal(await readFile(monitorFile, 'utf8'), monitorBefore);
 });
 
-test('persists starter template versions and extra top-level members', async t => {
+async function cachedStarter(t, edit) {
     const fixture = await authFixture(t, undefined, { encrypted: false });
     const schematic = parseSchematic(await readFile(bundledSchematicFile, 'utf8'));
     schematic.version = '1.6.1';
-    const template = schematic.config.users_starter.template;
-    template['config-version'] = 2;
-    template['fixture-metadata'] = { members: ['kept', 12] };
+    const starter = schematic.config.users_starter;
+    const client = starter.template.nodes.find(node => node.type === 'APIServer').settings.clients[0];
+    edit(starter, client);
     const selected = schematicFile(fixture.backend, schematic.version);
     await mkdir(dirname(selected), { mode: 0o700 });
     await writeFile(selected, JSON.stringify(schematic), { mode: 0o600 });
@@ -1733,18 +1707,64 @@ test('persists starter template versions and extra top-level members', async t =
     const session = await fixtureSession(fixture);
     const { socket, initial } = await connectPreview(t, fixture.origin, session);
     assert.equal(initial.server.core.version, schematic.version);
-    const name = 'Starter template';
-    const created = await requestPreview(socket, 'create_core_config', { name, add_auth_nodes: true });
-    assert.equal(created.ok, true, created.feedback);
-    const [row] = created.data.server.core.configs;
-    const opened = await requestPreview(socket, 'get_core_config', { id: row.id });
-    assert.equal(opened.ok, true, opened.feedback);
-    const file = join(dirname(fixture.backend), 'configs', name, 'config.json');
-    const saved = JSON.parse(await readFile(file, 'utf8'));
-    assert.equal(saved['config-version'], 2);
-    assert.equal(saved['core-minimum-version'], 0);
-    assert.deepEqual(saved['fixture-metadata'], template['fixture-metadata']);
-    assert.deepEqual(opened.result.config, saved);
+    return { socket, configDir: join(dirname(fixture.backend), 'configs') };
+}
+
+for (const [kind, hasSlot, operations, pushInterval] of [
+    ['list-only slot', true, ['list-users']],
+    ['legacy list-only grant', false, ['list-users']],
+    ['custom read grant', false, ['list-users', 'get-user'], 10000],
+    ['complete management slot', true, userApiOperations, 0],
+]) {
+    test(`grants scoped management for a cached starter with a ${kind}`, async t => {
+        const retained = { config: 'Another config', node: 'AuthenticationServer', operations: ['list-users'] };
+        const { socket, configDir } = await cachedStarter(t, (starter, client) => {
+            if (!hasSlot) delete starter.management_operations_slot;
+            starter.template['config-version'] = 2;
+            starter.template['fixture-metadata'] = { members: ['kept', 12] };
+            const authClient = starter.template.nodes.find(node => node.type === 'AuthenticationClient');
+            if (pushInterval === undefined) delete authClient.settings['push-interval-ms'];
+            else authClient.settings['push-interval-ms'] = pushInterval;
+            client.allow[0].operations = operations;
+            client.allow.push(retained);
+        });
+        const name = 'Starter template';
+        const created = await requestPreview(socket, 'create_core_config', { name, add_auth_nodes: true });
+        assert.equal(created.ok, true, created.feedback);
+        const [row] = created.data.server.core.configs;
+        const opened = await requestPreview(socket, 'get_core_config', { id: row.id });
+        assert.equal(opened.ok, true, opened.feedback);
+        const saved = JSON.parse(await readFile(join(configDir, name, 'config.json'), 'utf8'));
+        assert.equal(saved['config-version'], 2);
+        assert.equal(saved['core-minimum-version'], 0);
+        assert.deepEqual(saved['fixture-metadata'], { members: ['kept', 12] });
+        const authClient = saved.nodes.find(node => node.type === 'AuthenticationClient');
+        assert.equal(authClient.settings['push-interval-ms'], pushInterval ?? 500);
+        const [client] = saved.nodes.find(node => node.type === 'APIServer').settings.clients;
+        assert.deepEqual(client.allow, [
+            { config: name, node: 'AuthenticationServer', operations: userApiOperations }, retained,
+        ]);
+        assert.deepEqual(opened.result.config, saved);
+    });
+}
+
+test('refuses a full management starter when its cached template only grants access to another config', async t => {
+    const foreignGrant = { config: 'Another config', node: 'AuthenticationServer', operations: ['list-users'] };
+    const { socket, configDir } = await cachedStarter(t, (starter, client) => {
+        delete starter.management_operations_slot;
+        starter.slots.name = ['/name'];
+        client.allow = [foreignGrant];
+    });
+    const name = 'Custom template';
+    const create = fields => requestPreview(socket, 'create_core_config', { name, add_auth_nodes: true, ...fields });
+    const denied = await create({});
+    assert.equal(denied.ok, false);
+    assert.deepEqual(denied.data.server.core.configs, []);
+    assert.deepEqual(await readdir(configDir), []);
+    const monitor = await create({ allow_live_user_management: false });
+    assert.equal(monitor.ok, true, monitor.feedback);
+    const config = JSON.parse(await readFile(join(configDir, name, 'config.json'), 'utf8'));
+    assert.deepEqual(config.nodes.find(node => node.type === 'APIServer').settings.clients[0].allow, [foreignGrant]);
 });
 
 test('rejects starter nodes when every eligible API port is occupied', async t => {
@@ -1840,6 +1860,59 @@ test('validates configured WaterWall links and preserves supported aliases and p
     const reopened = await requestPreview(socket, 'get_core_config', { id: profile.id });
     assert.equal(reopened.result.revision, saved.result.revision);
     assert.deepEqual(reopened.result.config.nodes, nodes);
+});
+
+test('assigns sequential saved user IDs from the current database within the schematic range', async t => {
+    const fixture = await authFixture(t, undefined, { encrypted: false });
+    await fixture.start();
+    const session = await fixtureSession(fixture);
+    const { socket } = await openPreview(t, fixture.origin, session);
+    const { socket: peer } = await openPreview(t, fixture.origin, session);
+    const created = await requestPreview(socket, 'create_core_config', { name: 'Saved ID fixture', add_auth_nodes: true });
+    assert.equal(created.ok, true, created.feedback);
+    const [config] = created.data.server.core.configs;
+    const node = config.auth_nodes[0];
+    const create = (client, password, id) => requestPreview(client, 'create_config_user', {
+        config_id: config.id, node, user: { id, password },
+    });
+    const added = async (client, password, id) => {
+        const reply = await create(client, password, id);
+        assert.equal(reply.ok, true, reply.feedback);
+        return reply.result.users.at(-1).id;
+    };
+    const first = await Promise.all([added(socket, 'first'), added(peer, 'second')]);
+    assert.deepEqual(first.sort(), ['1', '2']);
+    await added(socket, 'large imported ID', '9007199254740993');
+    await added(socket, 'smaller ID', '7');
+    assert.equal(await added(socket, 'after the largest ID'), '9007199254740994');
+    await added(socket, 'maximum ID', '18446744073709551615');
+    const exhausted = await create(socket, 'above the maximum');
+    assert.equal(exhausted.ok, false);
+    assert.match(exhausted.feedback, /no higher account id/i);
+    assert.equal(await added(socket, 'explicit unused ID', '3'), '3');
+
+    const opened = await requestPreview(socket, 'get_core_config', { id: config.id });
+    const file = opened.result.config.nodes.find(entry => entry.name === node).settings['db-path'];
+    await fixture.stop();
+    // A custom ID control accepts only whole megabytes within these byte bounds.
+    const cached = schematicFile(fixture.backend);
+    const schematic = parseSchematic(await readFile(cached, 'utf8'));
+    Object.assign(schematic.ui.users.fields.id, { minimum: 1500000, maximum: 3500000, gigabytes: true });
+    await writeFile(cached, JSON.stringify(schematic));
+    const database = join(dirname(fixture.backend), file);
+    await writeFile(database, JSON.stringify({ users: [
+        { id: '9007199254740993', password: 'above the custom range' },
+        { 'user-id': '1750000', pass: 'legacy fixture account' },
+    ] }));
+    await fixture.start();
+    const restarted = await openPreview(t, fixture.origin, session);
+    assert.equal(await added(restarted.socket, 'first whole megabyte above the legacy ID'), '2000000');
+    assert.equal(await added(restarted.socket, 'last whole megabyte in range'), '3000000');
+    const before = await readFile(database, 'utf8');
+    const limited = await create(restarted.socket, 'beyond the custom range');
+    assert.equal(limited.ok, false);
+    assert.match(limited.feedback, /no higher account id/i);
+    assert.equal(await readFile(database, 'utf8'), before);
 });
 
 test('persists config graphs and isolates AuthenticationServer users by node', async t => {
@@ -1951,6 +2024,54 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     const listed = await users(socket, 'staff');
     assert.deepEqual(listed.result.users, [record]);
     assert.doesNotMatch(JSON.stringify(listed), new RegExp(password));
+    const detailScope = {
+        source: 'offline', run_id: listed.data.server.core.configs[0].users_access.staff.run_id,
+    };
+    const detail = user_id => users(socket, 'staff', 'get_config_user', { ...detailScope, user_id });
+    const openedDetail = await detail(record.id);
+    assert.equal(openedDetail.ok, true, openedDetail.feedback);
+    assert.deepEqual(openedDetail.result, { user: record });
+    assert.doesNotMatch(JSON.stringify(openedDetail), new RegExp(password));
+    assert.equal((await detail(`0${record.id}`)).ok, false);
+
+    const mapped = { id: '18446744073709551615', pass: 'mapped-credential', name: '' };
+    for (const [contents, expectedName] of [
+        [[mapped], ''], [{ users: [mapped] }, ''], [mapped, ''], [{ 'Name from key': mapped }, 'Name from key'],
+    ]) {
+        await writeFile(databases[0], JSON.stringify(contents));
+        const opened = await detail(mapped.id);
+        assert.equal(opened.ok, true, opened.feedback);
+        assert.deepEqual(opened.result, { user: { id: mapped.id, name: expectedName, enabled: true } });
+    }
+    const additional = Array.from({ length: 51 }, (_, index) => ({
+        id: String(index + 1), password: `pagination-credential-${index}`,
+    }));
+    const farAccount = { id: '18446744073709551615', name: 'Élodie Directory', password: 'search-fixture' };
+    const greek = { id: '60', name: 'ΝΙΚΟΣ', password: 'search-greek' };
+    const german = { id: '61', name: 'Straße', password: 'search-german' };
+    const accented = { id: '62', name: 'café', password: 'search-accented' };
+    const many = { users: [...stored.users, ...additional, farAccount, greek, german, accented] };
+    await writeFile(databases[0], JSON.stringify(many));
+    for (const [search, account] of [
+        ['éLODIE', farAccount], [farAccount.id, farAccount], ['νικος', greek], ['νικοσ', greek],
+        ['STRASSE', german], ['CAFÉ', accented],
+    ]) {
+        const found = (await users(socket, 'staff', 'get_config_users', { search, page: 99 })).result;
+        assert.deepEqual(found, {
+            users: [{ id: account.id, name: account.name, enabled: true }],
+            editable: true, page: 0, page_count: 1, matched: 1, total: many.users.length,
+        });
+    }
+    for (const search of ['999999', 'cafe']) {
+        const missing = (await users(socket, 'staff', 'get_config_users', { search })).result;
+        assert.equal(missing.matched, 0);
+        assert.equal(missing.total, many.users.length);
+    }
+    await writeFile(databases[0], JSON.stringify({ users: [...many.users, farAccount] }));
+    const duplicate = await users(socket, 'staff', 'get_config_users', { search: 'Alex' });
+    assert.match(duplicate.feedback, /IDs must be unique/);
+    assert.match((await detail(record.id)).feedback, /IDs must be unique/);
+    await writeFile(databases[0], JSON.stringify(stored));
     for (const userId of [null, `0${record.id}`, '18446744073709551616', '2']) {
         const rejected = await readPassword(socket, 'staff', userId);
         assert.equal(rejected.ok, false);
@@ -2063,12 +2184,135 @@ test('persists config graphs and isolates AuthenticationServer users by node', a
     assert.equal(storedRotation.password, otherPassword);
     assert.equal(storedRotation.pass, undefined);
     assert.deepEqual((await readPassword(restarted.socket, 'directory')).result, { password: otherPassword });
+    const currentScope = {
+        source: 'offline', run_id: restarted.initial.server.core.configs[0].users_access.directory.run_id,
+    };
+    const compact = await users(restarted.socket, 'directory', 'edit_config_user', {
+        ...currentScope, roster: true, user_id: record.id, user: { name: updated.name },
+    });
+    assert.equal(compact.ok, true, compact.feedback);
+    assert.deepEqual(compact.result, { user_id: record.id });
     const deleted = await users(restarted.socket, 'directory', 'delete_config_user', { user_id: record.id });
     assert.equal(deleted.ok, true, deleted.feedback);
     assert.equal(deleted.feedback_in_logs_only, true);
     assert.deepEqual(deleted.result.users, []);
     assert.deepEqual(JSON.parse(await readFile(databases[0], 'utf8')), { users: [] });
+
+    const neighbor = { id: '42', name: 'Neighbor', password: 'neighbor-fixture-password' };
+    await writeFile(databases[0], JSON.stringify({ users: [
+        { id: record.id, notes: 'x'.repeat(17 * 1024), password }, neighbor,
+    ] }));
+    const { run_id } = restarted.initial.server.core.configs[0].users_access.directory;
+    const scope = { source: 'offline', run_id };
+    const oversize = await users(restarted.socket, 'directory', 'get_config_users', scope);
+    assert.deepEqual(oversize.result.users[0], { id: record.id, enabled: true, oversized: true });
+    const oversizedDetail = await users(restarted.socket, 'directory', 'get_config_user', {
+        ...scope, user_id: record.id,
+    });
+    assert.equal(oversizedDetail.ok, false);
+    assert.match(oversizedDetail.feedback, /too large to edit/);
+    const oversizedEdit = await users(restarted.socket, 'directory', 'edit_config_user', {
+        ...scope, roster: true, user_id: record.id, user: { enabled: false },
+    });
+    assert.equal(oversizedEdit.ok, false);
+    assert.match(oversizedEdit.feedback, /too large to edit/);
+    const removed = await users(restarted.socket, 'directory', 'delete_config_user', { ...scope, user_id: record.id });
+    assert.equal(removed.ok, true, removed.feedback);
+    const reloaded = await users(restarted.socket, 'directory', 'get_config_users', scope);
+    assert.deepEqual(reloaded.result.users, [{ id: neighbor.id, name: neighbor.name, enabled: true }]);
+    assert.deepEqual(JSON.parse(await readFile(databases[0], 'utf8')), { users: [neighbor] });
 });
+
+test('rejects stale offline user requests after the database binding changes',
+    { skip: process.platform !== 'linux' }, async t => {
+        const fixture = await authFixture(t, undefined, { encrypted: false });
+        await seedCore(fixture.backend);
+        await fixture.start();
+        const session = await fixtureSession(fixture);
+        const { socket: first } = await connectPreview(t, fixture.origin, session);
+        const { socket: second } = await connectPreview(t, fixture.origin, session);
+        const profile = await createCoreConfig(first, 'Database scope fixture');
+        const configDir = join(dirname(fixture.backend), 'configs', profile.name);
+        const file = join(configDir, 'config.json');
+        const openGraph = () => requestPreview(second, 'get_core_config', { id: profile.id });
+        const saveGraph = (config, revision) => requestPreview(second, 'save_core_config', {
+            id: profile.id, config, revision,
+        });
+        const staffAccess = reply => reply.data.server.core.configs.find(row => row.id === profile.id).users_access?.staff;
+        const users = (action, run_id, fields = {}) => requestPreview(first, action, {
+            config_id: profile.id, node: 'staff', source: 'offline', run_id, ...fields,
+        });
+        const { result: original } = await openGraph();
+        const configured = await saveGraph({ ...original.config, nodes: ['staff', 'guests'].map(name => ({
+            name, type: 'AuthenticationServer',
+        })) }, original.revision);
+        assert.equal(configured.ok, true, configured.feedback);
+        const { config, revision } = configured.result;
+        const [staff, guests] = config.nodes.map(node => join(dirname(fixture.backend), node.settings['db-path']));
+        const id = '41';
+        await writeFile(staff, JSON.stringify({ users: [{ id, name: 'Staff account', password: 'staff-fixture-secret' }] }));
+        await writeFile(guests, JSON.stringify({ users: [{ id, name: 'Guest account', password: 'guest-fixture-secret' }] }));
+        const old = staffAccess(configured);
+        assert.ok(old.database_generation);
+        assert.doesNotMatch(JSON.stringify(old), /auth-[a-f0-9]{32}\.json/);
+        const opened = await users('get_config_users', old.run_id);
+        assert.equal(opened.result.users[0].name, 'Staff account');
+
+        const unrelated = await saveGraph({ ...config, author: 'Graph fixture' }, revision);
+        assert.equal(unrelated.ok, true, unrelated.feedback);
+        assert.deepEqual(staffAccess(unrelated), old);
+        const ordinary = await users('edit_config_user', old.run_id, { user_id: id, user: { notes: 'Same database' } });
+        assert.equal(ordinary.ok, true, ordinary.feedback);
+        assert.deepEqual(staffAccess(ordinary), old);
+        const staffBytes = await readFile(staff);
+        const guestBytes = await readFile(guests);
+
+        const reassigned = await saveGraph({ ...unrelated.result.config, nodes: [{ ...config.nodes[1], name: 'staff' }] },
+            unrelated.result.revision);
+        assert.equal(reassigned.ok, true, reassigned.feedback);
+        const replacement = staffAccess(reassigned);
+        assert.notEqual(replacement.run_id, old.run_id);
+        assert.notEqual(replacement.database_generation, old.database_generation);
+        for (const [action, fields] of [
+            ['edit_config_user', { user_id: id, user: { name: 'Wrong account' } }],
+            ['delete_config_user', { user_id: id }],
+            ['create_config_user', { user: { id: '42', password: 'unused-create-secret' } }],
+            ['get_config_user_password', { user_id: id }],
+            ['get_config_user', { user_id: id }],
+        ]) {
+            const result = await users(action, old.run_id, fields);
+            assert.equal(result.ok, false, action);
+            assert.match(result.feedback, /reopen the account/i);
+            assert.equal(result.result, undefined);
+            assert.deepEqual(staffAccess(result), replacement);
+            assert.deepEqual(await readFile(staff), staffBytes);
+            assert.deepEqual(await readFile(guests), guestBytes);
+        }
+        const reopened = await users('get_config_users', replacement.run_id);
+        assert.equal(reopened.result.users[0].name, 'Guest account');
+        const credential = await users('get_config_user_password', replacement.run_id, { user_id: id });
+        assert.equal(credential.result.password, 'guest-fixture-secret');
+        const detail = await users('get_config_user', replacement.run_id, { user_id: id });
+        assert.deepEqual(detail.result, { user: { id, enabled: true, name: 'Guest account' } });
+
+        const external = { ...reassigned.result.config, nodes: [config.nodes[0]] };
+        await writeFile(file, JSON.stringify(external));
+        const stale = await users('edit_config_user', replacement.run_id, { user_id: id, user: { enabled: false } });
+        assert.equal(stale.ok, false);
+        assert.match(stale.feedback, /reopen the account/i);
+        assert.notEqual(staffAccess(stale).database_generation, replacement.database_generation);
+        assert.notEqual(staffAccess(stale).database_generation, old.database_generation);
+        assert.deepEqual(await readFile(staff), staffBytes);
+        assert.deepEqual(await readFile(guests), guestBytes);
+        const fresh = await users('get_config_users', staffAccess(stale).run_id);
+        assert.equal(fresh.result.users[0].name, 'Staff account');
+
+        await writeFile(file, JSON.stringify({ ...external, nodes: [] }));
+        assert.equal(staffAccess(await openGraph()), undefined);
+        await writeFile(file, JSON.stringify(external));
+        const recreated = staffAccess(await openGraph());
+        assert.notEqual(recreated.database_generation, staffAccess(fresh).database_generation);
+    });
 
 function liveWaterWallFixture({ configName, cursor, user }) {
     const { appendFileSync, readFileSync, writeFileSync } = require('node:fs');
@@ -2213,6 +2457,279 @@ test('lists active AuthenticationServer users through the scoped WaterWall loopb
         assert.equal(foreignBytes, 0, 'Wave sends no API bytes to the process that reused the port.');
     });
 
+function managementWaterWallFixture(configName) {
+    const { appendFileSync, readFileSync, writeFileSync } = require('node:fs');
+    const { createServer } = require('node:net');
+    const settings = JSON.parse(readFileSync(0, 'utf8'));
+    const config = settings.configs.map(path => JSON.parse(readFileSync(path, 'utf8')))
+        .find(entry => entry.name === configName);
+    const listener = config.nodes.find(node => node.name === 'listener');
+    const id = '18446744073709551615';
+    const token = '12'.repeat(24);
+    const cursor = '34'.repeat(32);
+    const revisions = { config_revision: '3', stats_revision: '4', edit_token: token, accounting_time_ms: id };
+    const times = { expire_at_ms: '0', expire_after_first_usage_ms: id, first_usage_at_ms: '0' };
+    const traffic = { u: id, d: '0', total: '0' };
+    const base = { id, gid: '0', enabled: true, usage: { u: id, d: '0' } };
+    const summary = { ...base, name_preview: 'Élodie', name_preview_state: 'truncated', traffic_limit: traffic,
+        time: times, password: 'secret-from-list' };
+    const user = { ...base, name: 'Élodie Directory', email: '', notes: '', wireguard_allowed_ips: '',
+        record_stat_interval_ms: '120000', time: { ...times, created_at_ms: '1' },
+        limit: { traffic, bandwidth: { u: '0', d: '1' }, ips: '2', devices: '3', cons_in: '4', cons_out: '5' },
+        password: 'secret-from-detail' };
+    const server = createServer(connection => {
+        let input = Buffer.alloc(0);
+        let complete = false;
+        connection.on('error', () => {});
+        connection.on('data', chunk => {
+            if (complete) return;
+            input = Buffer.concat([input, chunk]);
+            if (input.length < 4 || input.length < 4 + input.readUInt32BE(0)) return;
+            complete = true;
+            const request = JSON.parse(input.subarray(4).toString('utf8'));
+            const body = JSON.parse(request.body);
+            appendFileSync('management-requests.jsonl', JSON.stringify({ ...request, body }) + '\n', { mode: 0o600 });
+            const envelope = { id: request.id, error: null, result: null };
+            let result;
+            switch (request.operation) {
+            case 'status':
+                result = { ...revisions, database_loaded: true, database_dirty: false, primary_checkpoint_valid: true,
+                    user_count: id, configured_producer_count: '1', session_record_count: '2',
+                    primary_save: { last_result: 'not_attempted', last_attempt_age_ms: null, last_success_age_ms: null },
+                    audit: { enabled: false, healthy: true, queued_records: '0', written_records: '0',
+                        dropped_records: '0', suppressed_rejections: '0', write_failures: '0', last_error: null } };
+                break;
+            case 'list-users':
+                result = body.cursor === cursor ? { error: { code: 'stale_cursor' } }
+                    : { ...revisions, total_users: '2', users: [summary], next_cursor: cursor };
+                break;
+            case 'get-user':
+                result = body.id === '1' ? { error: { code: 'not_found' } } : { ...revisions, user };
+                break;
+            default:
+                result = { id: body.id, config_revision: '5', edit_token: token };
+                if (body.password === 'lost-create-ack') return connection.destroy();
+                if (body.password === 'gateway-denied') {
+                    result = null;
+                    envelope.error = { code: 'forbidden', message: 'secret-from-gateway' };
+                }
+                if (body.password === 'wrong-ack') result.id = '1';
+                if (body.patch?.name === 'conflict') result = { error: { code: 'conflict' } };
+                if (body.patch?.name === 'stop-during-write') {
+                    writeFileSync('management-write-pending', 'pending');
+                    return;
+                }
+                if (body.patch?.name === 'oversized-response') {
+                    const header = Buffer.alloc(4);
+                    header.writeUInt32BE(1024 * 1024);
+                    return connection.end(header);
+                }
+                if (body.patch?.name === 'wrong-correlation') envelope.id += '-wrong';
+                break;
+            }
+            if (result) envelope.result = { code: result.error ? 1 : 0, content_type: 'application/json',
+                body_encoding: 'utf8', body: JSON.stringify(result) };
+            const payload = Buffer.from(JSON.stringify(envelope));
+            const header = Buffer.alloc(4);
+            header.writeUInt32BE(payload.length);
+            connection.write(header.subarray(0, 2));
+            setImmediate(() => connection.write(Buffer.concat([header.subarray(2), payload.subarray(0, 15)]),
+                () => connection.end(payload.subarray(15))));
+        });
+    });
+    server.listen(listener.settings['port-range'][0], '127.0.0.1',
+        () => writeFileSync('management-ready', String(process.pid)));
+}
+
+test('scopes and validates each WaterWall management operation through the workspace',
+    { skip: process.platform !== 'linux' }, async t => {
+        const fixture = await authFixture(t, undefined, { encrypted: false });
+        const core = await seedCore(fixture.backend);
+        const configName = 'Management logical profile';
+        await writeFile(core.program, `#!/usr/bin/env node\n(${managementWaterWallFixture})(${JSON.stringify(configName)});\n`,
+            { mode: 0o700 });
+        const reserved = createServer();
+        reserved.listen(0, '127.0.0.1');
+        await once(reserved, 'listening');
+        const { port } = reserved.address();
+        await new Promise(resolve => reserved.close(resolve));
+        const fixtureDir = dirname(fixture.backend);
+        const requestsFile = join(fixtureDir, 'management-requests.jsonl');
+        const requests = async () => (await readFile(requestsFile, 'utf8')).trim().split('\n').map(JSON.parse);
+        await fixture.start();
+        const session = await fixtureSession(fixture);
+        const { socket } = await connectPreview(t, fixture.origin, session);
+        const { socket: observer } = await connectPreview(t, fixture.origin, session);
+        const profile = await createCoreConfig(socket, 'Managed files', true);
+        const standby = await createCoreConfig(socket, 'Standby');
+        const saveGraph = async (id, config) => {
+            const { revision } = (await requestPreview(socket, 'get_core_config', { id })).result;
+            const result = await requestPreview(socket, 'save_core_config', { id, config, revision });
+            assert.equal(result.ok, true, result.feedback);
+            return result.result.config;
+        };
+        const listener = (name, next) => ({ name, type: 'TcpListener', ...(next ? { next } : {}),
+            settings: { address: '127.0.0.1', 'port-range': [port, port] } });
+        const grant = (name, key, node, operations, config = configName) => ({ name, token: key.repeat(32),
+            allow: [{ config, node, operations }] });
+        const clients = [
+            grant('wrong logical selector', 'a1', 'staff', ['status', 'update-user'], profile.name),
+            grant('status client', 'a2', 'health', ['status']),
+            grant('read-only client', 'a3', 'readers', ['list-users']),
+            grant('staff reader', 'a4', 'staff', ['list-users', 'get-user']),
+            grant('staff editor', 'a5', 'staff', ['update-user']),
+            grant('staff creator', 'a6', 'staff', ['create-user']),
+            grant('staff credentials', 'a7', 'staff', ['change-user-password']),
+        ];
+        const configured = await saveGraph(profile.id, { name: configName, nodes: [
+            ...['staff', 'health', 'readers', 'ungranted'].map(name => ({ name, type: 'AuthenticationServer' })),
+            listener('listener', 'api'), { name: 'api', type: 'APIServer', settings: { clients } },
+        ] });
+        await saveGraph(standby.id, { name: 'Standby', nodes: [{ name: 'staff', type: 'AuthenticationServer' },
+            listener('overlapping listener')] });
+        const db = join(fixtureDir, configured.nodes[0].settings['db-path']);
+        const initialDb = await readFile(db);
+        const access = (frame, id = profile.id) => frame.data.server.core.configs.find(row => row.id === id).users_access;
+        const withState = (sock, state) => nextPreviewSnapshot(sock, frame => frame.data.server.core.state === state);
+        const start = async () => {
+            const running = withState(observer, 'running');
+            assert.equal((await requestPreview(socket, 'start_core')).ok, true);
+            return running;
+        };
+        const running = await start();
+        await waitForFile(join(fixtureDir, 'management-ready'));
+        const nodeAccess = access(running);
+        const scope = (node, id = profile.id) => ({ config_id: id, node, source: 'live', run_id: access(running, id)[node].run_id });
+        const live = (action, fields = {}, node = 'staff', scoped = scope(node)) =>
+            requestPreview(socket, action, { ...scoped, ...fields });
+        assert.deepEqual(nodeAccess.health.operations, ['status']);
+        assert.deepEqual(nodeAccess.readers.operations, ['list-users']);
+        assert.deepEqual(nodeAccess.staff.operations,
+            ['list-users', 'get-user', 'create-user', 'update-user', 'change-user-password']);
+        assert.equal(nodeAccess.ungranted.source, 'blocked');
+        assert.match(nodeAccess.ungranted.reason, /grant/i);
+        assert.match(access(running, standby.id).staff.reason, /inactive/i);
+        const health = await live('get_live_config_user_status', {}, 'health');
+        assert.equal(health.ok, true, health.feedback);
+        assert.equal(health.result.status.user_count, '18446744073709551615');
+        assert.equal(health.result.status.session_record_count, '2');
+        assert.equal(health.result.status.audit.healthy, true);
+        assert.equal(health.result.status.edit_token, undefined);
+        assert.equal((await live('get_live_config_users', {}, 'health')).ok, false);
+        assert.equal((await live('get_live_config_user_status')).ok, false);
+        const readOnly = await live('get_live_config_users', {}, 'readers');
+        assert.equal(readOnly.ok, true, readOnly.feedback);
+        assert.equal(readOnly.result.users[0].name_preview_state, 'truncated');
+        const id = readOnly.result.users[0].id;
+        assert.equal(id, '18446744073709551615');
+        assert.deepEqual(readOnly.result.users[0].stats.traffic, { up: id, down: '0' });
+        assert.equal(readOnly.result.total, '2');
+        const stale = await live('get_live_config_users', { cursor: readOnly.result.next_cursor }, 'readers');
+        assert.equal(stale.result.reset_cursor, true);
+        const denied = await live('edit_live_config_user', { user_id: id, user: { enabled: false } }, 'readers');
+        assert.equal(denied.result.outcome, 'not_sent');
+        const sibling = await live('create_live_config_user', { node: 'readers', user: { password: 'no-sibling-write' } });
+        assert.equal(sibling.result.outcome, 'not_sent');
+        assert.equal((await live('get_live_config_user', { user_id: '1' })).result.code, 'not_found');
+        const wrongId = await live('get_live_config_user', { user_id: '2' });
+        assert.equal(wrongId.ok, false);
+        const detail = await live('get_live_config_user', { user_id: id });
+        assert.equal(detail.ok, true, detail.feedback);
+        const if_match = detail.result.if_match;
+        assert.match(if_match, /^[0-9a-f]{48}$/);
+        assert.equal(detail.result.user.limit.traffic.up, id);
+        assert.equal(detail.result.user.limit['connections-in'], '4');
+        assert.equal(detail.result.user.time['expire-after-first-usage-ms'], id);
+        const create = (user, fields = {}) => live('create_live_config_user', { user, ...fields });
+        const edit = user => live('edit_live_config_user', { user_id: id, if_match, user });
+        const change = password => live('change_live_config_user_password', { user_id: id, if_match, password });
+        const created = await create({ id: '43', password: 'initial-password-fixture', gid: id, enabled: false });
+        assert.equal(created.result.outcome, 'applied');
+        assert.equal(created.result.user_id, '43');
+        assert.match(created.feedback, /running WaterWall core/);
+        assert.equal((await create({ password: 'top-level-id-fixture' }, { user_id: '44' })).result.user_id, '44');
+        assert.equal((await create({ id: '45', password: 'matching-id-fixture' }, { user_id: '45' })).result.user_id, '45');
+        const createCount = async () => (await requests()).filter(request => request.operation === 'create-user').length;
+        assert.equal(await createCount(), 3);
+        for (const [fields, nested] of [
+            [{}, {}], [{ user_id: '' }, { id: '46' }], [{ user_id: '46' }, { id: '' }],
+            [{ user_id: '46' }, { id: '47' }], [{ user_id: 46 }, { id: '46' }],
+            [{}, { id: '0' }], [{}, { id: '046' }], [{}, { id: '18446744073709551616' }],
+        ]) {
+            const invalid = await create({ ...nested, password: 'unused-id-fixture' }, fields);
+            assert.equal(invalid.ok, false);
+            assert.equal(invalid.result.outcome, 'not_sent');
+        }
+        assert.equal(await createCount(), 3, 'Invalid IDs never reach the WaterWall fixture.');
+        assert.equal((await edit({ enabled: false })).result.outcome, 'applied');
+        const multi = await edit({ limit: { traffic: { up: id, down: null }, 'connections-out': '2' },
+            'wireguard-allowed-ips': '192.0.2.1/32', 'record-stat-interval-ms': null });
+        assert.equal(multi.result.outcome, 'applied');
+        const acceptedLarge = '\\"'.repeat(8000);
+        assert.equal((await edit({ notes: acceptedLarge })).result.outcome, 'applied');
+        const sentBeforeLarge = (await requests()).length;
+        assert.equal((await edit({ notes: '\\"'.repeat(8250) })).result.outcome, 'not_sent');
+        assert.equal((await edit({ stats: { traffic: { up: '0' } } })).result.outcome, 'not_sent');
+        assert.equal((await requests()).length, sentBeforeLarge);
+        assert.equal((await edit({ name: 'conflict' })).result.outcome, 'conflict');
+        for (const name of ['oversized-response', 'wrong-correlation']) {
+            assert.equal((await edit({ name })).result.outcome, 'unknown');
+        }
+        const lost = await create({ password: 'lost-create-ack' }, { user_id: '46' });
+        assert.equal(lost.result.outcome, 'unknown');
+        assert.equal(lost.result.user_id, '46');
+        assert.equal((await change('gateway-denied')).result.outcome, 'not_sent');
+        assert.equal((await change('wrong-ack')).result.outcome, 'unknown');
+        const changed = await change('rotated-password-fixture');
+        assert.equal(changed.result.outcome, 'applied');
+        const captured = await requests();
+        assert.deepEqual(captured[0].body, {});
+        assert.deepEqual(captured[0].selector, { config: configName, node: 'health' });
+        assert.equal(captured[0].auth.client, 'status client');
+        assert.equal(captured[1].auth.client, 'read-only client');
+        assert.equal(captured.find(request => request.operation === 'get-user').auth.client, 'staff reader');
+        const createdWire = captured.find(request => request.operation === 'create-user');
+        assert.equal(createdWire.auth.client, 'staff creator');
+        assert.deepEqual(createdWire.body, { id: '43', password: 'initial-password-fixture', config: { gid: id, enabled: false } });
+        const edits = captured.filter(request => request.operation === 'update-user');
+        assert.equal(edits[0].auth.client, 'staff editor');
+        assert.deepEqual(edits[0].body, { id, if_match, patch: { enabled: false } });
+        assert.deepEqual(edits[1].body, { id, if_match, patch: {
+            limit: { traffic: { u: id, d: '0' }, cons_out: '2' }, wireguard_allowed_ips: '192.0.2.1/32',
+            record_stat_interval_ms: '120000',
+        } });
+        assert.equal(edits[2].body.patch.notes, acceptedLarge);
+        assert.equal(captured.filter(request => request.body.password === 'lost-create-ack').length, 1);
+        assert.equal(captured.find(request => request.body.password === 'lost-create-ack').body.id, lost.result.user_id);
+        assert.equal(captured.at(-1).auth.client, 'staff credentials');
+        assert.deepEqual(captured.at(-1).body, { id, if_match, password: 'rotated-password-fixture' });
+        for (const reply of [running, health, readOnly, detail, created, multi, lost, changed]) {
+            assert.doesNotMatch(JSON.stringify(reply), /secret-from|password-fixture|lost-create-ack/);
+            for (const client of clients) assert.doesNotMatch(JSON.stringify(reply), new RegExp(client.token));
+        }
+        assert.deepEqual(await readFile(db), initialDb);
+
+        const pending = edit({ name: 'stop-during-write' });
+        await waitForFile(join(fixtureDir, 'management-write-pending'));
+        const stopped = withState(observer, 'stopped');
+        assert.equal((await requestPreview(observer, 'stop_core')).ok, true);
+        assert.equal((await pending).result.outcome, 'unknown');
+        await stopped;
+        assert.equal((await requestPreview(socket, 'set_core_config_enabled', { id: standby.id, enabled: true })).ok, true);
+        const second = await start();
+        assert.notEqual(access(second).staff.run_id, nodeAccess.staff.run_id);
+        assert.match(access(second).staff.reason, /dedicated listener port/);
+        const beforeRetry = (await requests()).length;
+        const oldRun = await create({ password: 'do-not-retry' });
+        assert.equal(oldRun.result.outcome, 'not_sent');
+        assert.match(oldRun.feedback, /source changed/i);
+        const ambiguous = await live('get_live_config_users', { run_id: access(second).staff.run_id });
+        assert.equal(ambiguous.ok, false);
+        assert.match(ambiguous.feedback, /dedicated listener port/);
+        assert.equal((await requests()).length, beforeRetry);
+        assert.deepEqual(await readFile(db), initialDb);
+    });
+
 test('restores backup metadata atomically and preserves running and edited config files',
     { skip: process.platform !== 'linux' }, async t => {
         const { socket, initial } = await connectPreview(t);
@@ -2314,6 +2831,22 @@ test('validates choice controls and offline user mappings in release schematics'
     await rejects(document => { document.ui.users.access_fields[0].path = '/enabled'; }, /editable.*\/enabled/);
     await rejects(document => { document.ui.users.limit_groups[0].fields[0].path = '/stats/traffic/up'; },
         /editable.*\/stats\/traffic\/up/);
+    const starter = document => document.config.users_starter;
+    const managementSlot = /starter management operations slot/;
+    await rejects(document => { starter(document).management_operations_slot = null; }, managementSlot);
+    await rejects(document => { starter(document).management_operations_slot = '/nodes/3/settings/clients/0/token'; },
+        managementSlot);
+    await rejects(document => {
+        starter(document).template.nodes[3].settings.clients[0].allow[0].node = 'AuthenticationClient';
+    }, managementSlot);
+    await rejects(document => {
+        starter(document).template.nodes[3].settings.clients[0].allow[0].operations = ['list-users', 'unsupported'];
+    }, managementSlot);
+    await rejects(document => {
+        const { allow } = starter(document).template.nodes[3].settings.clients[0];
+        allow.push({ ...allow[0], config: 'Another config' });
+        starter(document).management_operations_slot = '/nodes/3/settings/clients/0/allow/1/operations';
+    }, managementSlot);
 
     const interval = document => document.ui.users.access_fields.find(
         field => field.path === '/record-stat-interval-ms');

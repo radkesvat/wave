@@ -205,7 +205,65 @@ async function authFixture(t, webSite, {
     }
 
     return { cwd, backend, ca: tls?.ca, rootPath: tls?.rootPath, hostname, bindHost, lookup, origin, basePath,
-        index, database, start, stop, get stderr() { return stderr; } };
+        index, database, start, stop, get pid() { return server?.pid; }, get stderr() { return stderr; } };
 }
 
-module.exports = { authFixture, emptyCatalogPath, panelBasePath, rotatingLogPath, seedCore, timeout };
+const previewTimeout = 5000;
+
+async function fixtureSession(fixture, { setup = true } = {}) {
+    const credentials = { username: 'fixture-admin', password: 'fixture core test passphrase 4Kq7v' };
+    const post = action => fetch(new URL(`${fixture.basePath}/api/auth/${action}`, fixture.origin), {
+        method: 'POST',
+        headers: { Origin: fixture.origin, 'X-Wave-CSRF': '1', 'Content-Type': 'application/json' },
+        body: JSON.stringify(credentials),
+        signal: AbortSignal.timeout(previewTimeout),
+    });
+    if (setup) assert.equal((await post('setup')).status, 201);
+    const login = await post('sign-in');
+    assert.equal(login.status, 204);
+    return login.headers.get('set-cookie').split(';', 1)[0];
+}
+
+const schematicRevisions = new WeakMap();
+
+async function nextPreviewSnapshot(socket, matches = () => true, wait = previewTimeout) {
+    const signal = AbortSignal.timeout(wait);
+    for (;;) {
+        const [message] = await once(socket, 'message', { signal });
+        assert.equal(typeof message.data, 'string');
+        const frame = JSON.parse(message.data);
+        assert.equal(frame.type, 'snapshot');
+        schematicRevisions.set(socket, frame.schematic_revision);
+        if (matches(frame)) return frame;
+    }
+}
+
+async function openPreview(t, base, sessionCookie, basePath = panelBasePath) {
+    const endpoint = new URL(`${basePath}/ws/workspace`, base);
+    const origin = endpoint.origin;
+    endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(endpoint, { headers: { Cookie: sessionCookie, Origin: origin } });
+    t.after(() => socket.close());
+    const { data: initial, schematic, schematic_revision } = await nextPreviewSnapshot(socket);
+    return { socket, initial, schematic, schematicRevision: schematic_revision };
+}
+
+let requestId = 0;
+function requestPreview(socket, action, fields = {}) {
+    const id = ++requestId;
+    const reply = nextPreviewSnapshot(socket, frame => frame.request_id === id);
+    socket.send(JSON.stringify({
+        action, request_id: id, schematic_revision: schematicRevisions.get(socket), ...fields,
+    }));
+    return reply.then(frame => {
+        assert.equal(frame.action, action);
+        assert.equal(typeof frame.ok, 'boolean');
+        assert.equal(typeof frame.feedback, 'string');
+        return frame;
+    });
+}
+
+module.exports = {
+    authFixture, emptyCatalogPath, fixtureSession, nextPreviewSnapshot, openPreview,
+    panelBasePath, requestPreview, rotatingLogPath, seedCore, timeout,
+};

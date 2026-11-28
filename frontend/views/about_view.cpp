@@ -312,6 +312,7 @@ void render_about(AboutViewState& state, PreviewSession& session, std::string_vi
     ImGui::TextLinkOpenURL("Poppins Medium (SIL OFL 1.1)", "/licenses/poppins.txt");
     ImGui::TextLinkOpenURL("nlohmann/json (MIT)", "/licenses/nlohmann-json.txt");
     ImGui::TextLinkOpenURL("nlohmann/json third-party notices", "/licenses/nlohmann-json-third-party.txt");
+    ImGui::TextLinkOpenURL("utf8proc (MIT and Unicode data notices)", "/licenses/utf8proc.txt");
     ImGui::TextLinkOpenURL("ImPlot (MIT)", "/licenses/implot.txt");
     ImGui::TextLinkOpenURL("xterm.js (MIT)", "/licenses/xterm.txt");
     ImGui::TextLinkOpenURL("xterm.js Fit addon (MIT)", "/licenses/xterm-addon-fit.txt");

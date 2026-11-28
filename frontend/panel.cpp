@@ -334,9 +334,6 @@ const view::Json& config_registry(const PreviewSession& session)
 
 void sync_configs(PanelState& state, PreviewSession& session)
 {
-    if (!session.ready()) {
-        return;
-    }
     std::vector<PanelConfigItem> items;
     for (const auto& config : config_registry(session)) {
         const auto& key = view::field(config, "id");
@@ -348,7 +345,19 @@ void sync_configs(PanelState& state, PreviewSession& session)
             }
         }
     }
-    if (state.config_items == items) {
+    const auto& configs = config_registry(session);
+    for (auto& [id, workspace] : state.workspaces) {
+        if (state.page == PanelPage::config && state.config_id == id) {
+            continue;
+        }
+        const auto config = std::ranges::find_if(configs, [id](const view::Json& item) {
+            return view::field(item, "id") == id;
+        });
+        if (config != configs.end()) {
+            sync_config_workspace(workspace, session, *config, false);
+        }
+    }
+    if (!session.ready() || state.config_items == items) {
         return;
     }
     state.config_items = std::move(items);
@@ -1030,7 +1039,7 @@ std::string describe_workspace_page(const PanelState& state, const PreviewSessio
         const auto workspace = state.workspaces.find(state.config_id);
         if (item != state.config_items.end() && workspace != state.workspaces.end()) {
             description =
-                std::format("Wave Config {}. {}", item->name, describe_config_workspace(workspace->second));
+                std::format("Wave Config {}. {}", item->name, describe_config_workspace(workspace->second, session));
             if (config_action_pending(state.panel_controls, state.config_id)) {
                 description += std::string(" ") + busy_description;
             }

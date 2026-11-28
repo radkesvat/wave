@@ -420,7 +420,7 @@ std::optional<AuthStore::Session> AuthStore::session(std::string_view token) con
     if (match == impl_->admin->sessions.end()) {
         return std::nullopt;
     }
-    return Session{impl_->admin->username, match->expires_at};
+    return Session{impl_->admin->username, match->expires_at, match->id};
 }
 
 void AuthStore::sign_out(std::string_view token)

@@ -62,12 +62,14 @@ EM_JS(void, monitor_session, (AuthSession* session), {
             const data = JSON.parse(event.data);
             if (data.type === 'session' && typeof data.username === 'string') {
                 const username = stringToNewUTF8(data.username);
-                Module['_wave_auth_identity'](session, username);
+                const id = typeof data.session_id === 'string' ? stringToNewUTF8(data.session_id) : 0;
+                Module['_wave_auth_identity'](session, username, id);
+                _free(id);
                 _free(username);
             }
         });
         socket.addEventListener('close', async event => {
-            Module['_wave_auth_identity'](session, 0);
+            Module['_wave_auth_identity'](session, 0, 0);
             if (event.code === 1008) {
                 location.replace(basePath + '/');
                 return;
@@ -150,9 +152,10 @@ void AuthSession::request_failed(int status)
     }
 }
 
-void AuthSession::set_username(const char* username)
+void AuthSession::set_identity(const char* username, const char* session_id)
 {
     username_ = username ? username : "";
+    session_id_ = session_id ? session_id : "";
 }
 
 } // namespace wave
@@ -162,7 +165,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wave_auth_request_failed(wave::AuthSession*
     session->request_failed(status);
 }
 
-extern "C" EMSCRIPTEN_KEEPALIVE void wave_auth_identity(wave::AuthSession* session, const char* username)
+extern "C" EMSCRIPTEN_KEEPALIVE void wave_auth_identity(wave::AuthSession* session, const char* username,
+                                                         const char* id)
 {
-    session->set_username(username);
+    session->set_identity(username, id);
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "users_roster.h"
+
 #include <emscripten/websocket.h>
 #include <nlohmann/json.hpp>
 
@@ -29,6 +31,8 @@ struct PreviewReply {
     Status status;
     std::string message;
     nlohmann::json result;
+    bool feedback_in_logs_only = false;
+    double received_at = 0;
 
     bool ok() const
     {
@@ -47,6 +51,17 @@ class PreviewSession {
     void add_local_log(std::string_view level, std::string_view message);
     void clear_local_logs();
     bool take_schematic_change();
+    bool supports_users_roster() const { return supports_users_roster_; }
+    const UsersRoster* users_roster(std::optional<std::uint64_t> subscription) const;
+    bool lost_users_roster_identity(std::optional<std::uint64_t> subscription) const
+    {
+        return subscription && subscription == last_lost_roster_identity_;
+    }
+    std::optional<std::uint64_t> subscribe_users_roster(nlohmann::json target, bool replace = false);
+    void unsubscribe_users_roster(std::optional<std::uint64_t>& subscription);
+    void refresh_users_roster(std::optional<std::uint64_t> subscription, bool resync = false);
+    void set_document_visible(bool visible);
+    bool document_visible() const { return document_visible_; }
 
     PreviewStatus status() const
     {
@@ -79,6 +94,8 @@ class PreviewSession {
 
     void fail();
     bool receive(std::string_view payload);
+    bool send_users_roster(nlohmann::json request);
+    bool send_roster_unsubscribe(std::uint64_t subscription);
     void expire(Request& request, double now);
     void log_transport_failure(std::string_view action, std::string_view message);
     void update_logs();
@@ -86,6 +103,8 @@ class PreviewSession {
     EMSCRIPTEN_WEBSOCKET_T socket_ = 0;
     double deadline_ = 0;
     bool schematic_changed_ = false;
+    bool supports_users_roster_ = false;
+    bool document_visible_ = true;
     std::uint64_t schematic_revision_ = 0;
     PreviewStatus status_ = PreviewStatus::loading;
     nlohmann::json data_ = nlohmann::json::object();
@@ -93,6 +112,10 @@ class PreviewSession {
     nlohmann::json logs_ = nlohmann::json::array();
     std::map<std::uint64_t, Request> requests_;
     std::uint64_t next_request_id_ = 1;
+    std::uint64_t next_subscription_ = 1;
+    // A close or visibility event may drop the roster before a pending create's owner sees the loss.
+    std::optional<std::uint64_t> last_lost_roster_identity_;
+    std::optional<UsersRoster> users_roster_;
 };
 
 } // namespace wave

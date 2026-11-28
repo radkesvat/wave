@@ -133,6 +133,12 @@ EM_JS(void, install_text_input, (), {
     });
 });
 
+EM_JS(void, install_document_visibility, (), {
+    const update = () => Module['_wave_document_visibility'](document.visibilityState !== 'hidden');
+    document.addEventListener('visibilitychange', update);
+    update();
+});
+
 EM_JS(void, show_startup_error, (), {
     Module['onAbort']();
 });
@@ -168,6 +174,7 @@ struct Application {
     int minimum_height = 0;
     wave::PreviewSession session;
     wave::PanelState panel;
+    std::string workspace_session_id;
     std::string displayed_description;
     std::vector<wave::PanelConfigItem> displayed_config_links;
     std::vector<wave::ConfigWorkspaceTab> displayed_config_tabs;
@@ -242,6 +249,7 @@ struct Application {
         };
         apply_theme(appearance);
         install_text_input();
+        install_document_visibility();
         register_header_controls(wave::panel_menu_control, wave::panel_tools_control);
         for (const auto& item : wave::panel_navigation()) {
             register_panel_page(static_cast<int>(item.page), item.label);
@@ -314,18 +322,21 @@ struct Application {
         if (panel.auth.page() == wave::AuthSession::Page::panel) {
             const bool authenticated = !panel.auth.username().empty();
             const bool in_workspace = panel.entry.page == wave::EntryPage::workspace;
-            if (authenticated && !in_workspace) {
-                panel.entry.page = wave::EntryPage::workspace;
-                session.start();
-            } else if (!authenticated && in_workspace) {
+            if (in_workspace && (!authenticated || workspace_session_id != panel.auth.session_id())) {
                 panel.entry.page = wave::EntryPage::checking;
                 panel.page = wave::PanelPage::server;
                 panel.config_id = 0;
                 panel.config_items.clear();
-                for (auto& [_, workspace] : panel.workspaces) {
+                decltype(panel.workspaces) receipts;
+                for (auto& [config_id, workspace] : panel.workspaces) {
+                    for (auto& [node, users] : workspace.users) {
+                        if (auto receipt = wave::unconfirmed_create(users, session)) {
+                            wave::restore_create_receipt(receipts[config_id].users[node], *receipt);
+                        }
+                    }
                     wave::abandon_config_workspace(workspace, session);
                 }
-                panel.workspaces.clear();
+                panel.workspaces = std::move(receipts);
                 session.abandon(panel.about.donation_request);
                 panel.about = {};
                 session.abandon(panel.panel_controls.updates.request_id);
@@ -334,6 +345,15 @@ struct Application {
                 theme_choice.reset();
                 session.abandon(theme_request);
                 session.stop();
+            }
+            if (authenticated && panel.entry.page != wave::EntryPage::workspace) {
+                if (workspace_session_id.empty() || workspace_session_id != panel.auth.session_id()) {
+                    panel.workspaces.clear();
+                    session.clear_local_logs();
+                }
+                workspace_session_id = panel.auth.session_id();
+                panel.entry.page = wave::EntryPage::workspace;
+                session.start();
             }
         }
         session.update();
@@ -501,6 +521,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void wave_activate_panel_control(int control)
     if (application.panel.entry.page == wave::EntryPage::workspace && !wave::dialog_open()) {
         application.panel.browser_control = control;
     }
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void wave_document_visibility(bool visible)
+{
+    application.session.set_document_visible(visible);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void wave_activate_config_tab(int index)

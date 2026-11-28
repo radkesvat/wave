@@ -15,6 +15,7 @@ class AuthStore {
     struct Session {
         std::string username;
         std::int64_t expires_at;
+        std::string id;
     };
 
     struct IssuedSession {

@@ -29,7 +29,7 @@ class AuthSession {
     void start();
     void submit(Action action, const nlohmann::json& input);
     void request_failed(int status);
-    void set_username(const char* username);
+    void set_identity(const char* username, const char* session_id);
 
     Page page() const
     {
@@ -55,6 +55,10 @@ class AuthSession {
     {
         return username_;
     }
+    const std::string& session_id() const
+    {
+        return session_id_;
+    }
 
   private:
     Page page_ = Page::checking;
@@ -62,6 +66,7 @@ class AuthSession {
     bool pending_ = false;
     std::string error_;
     std::string username_;
+    std::string session_id_;
 };
 
 } // namespace wave

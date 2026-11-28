@@ -5,6 +5,7 @@
 #include "core_settings.h"
 #include "private_temp_directory.h"
 #include "waterwall_schematic.h"
+#include "waterwall_users.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -15,6 +16,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace wave {
 namespace {
@@ -193,7 +195,42 @@ void validate_log_path(const Json& core, const Json& value)
             "A logger path must identify a core text setting with a default.");
 }
 
-void validate_users(const Json& schematic)
+bool is_generated_management_grant(const Json& schematic, const Json& starter, const Json& live,
+                                   const Json::json_pointer& grant, const std::set<std::string>& slots)
+{
+    const auto operations = grant / "operations";
+    const auto allow = grant.parent_pointer();
+    const auto client = allow.parent_pointer();
+    const auto clients = client.parent_pointer();
+    const auto settings = clients.parent_pointer();
+    const auto api = settings.parent_pointer();
+    const auto& config = starter.at("template");
+    if (api.parent_pointer().to_string() != "/nodes" || allow.back() != "allow" ||
+        clients.back() != "clients" || settings.back() != "settings" || !config.contains(operations) ||
+        slots.contains(operations.to_string()) ||
+        !config.at(allow).is_array() || !config.at(clients).is_array() ||
+        schematic_field(config.at(api), "type") != live.at("api_node")) {
+        return false;
+    }
+    const auto& names = config.at(operations);
+    if (!names.is_array() || names.empty() || !std::ranges::all_of(names, [](const Json& operation) {
+            return std::ranges::find(waterwall_users_operations, schematic_text(operation), waterwall_users_operation_name)
+                   != waterwall_users_operations.end();
+        })) {
+        return false;
+    }
+    const auto& tokens = starter.at("slots").at("token");
+    if (std::ranges::find(tokens, Json((client / "token").to_string())) == tokens.end()) {
+        return false;
+    }
+    const auto& target = schematic_field(config.at(grant), "node");
+    return !schematic_text(target).empty() && std::ranges::any_of(config.at("nodes"), [&](const Json& node) {
+        const auto& type = schematic_field(schematic.at("nodes"), schematic_text(node.at("type")));
+        return schematic_field(node, "name") == target && schematic_field(type, "user_database") == true;
+    });
+}
+
+void validate_users(Json& schematic)
 {
     const auto& config = schematic.at("config");
     const auto& nodes = schematic.at("nodes");
@@ -242,10 +279,25 @@ void validate_users(const Json& schematic)
                         "Invalid or duplicate starter config slot.");
             }
         }
+        std::vector<std::string> grants;
+        for (const auto& name_slot : starter.at("slots").at("name")) {
+            const Json::json_pointer name_path(name_slot.get_ref<const std::string&>());
+            const auto grant = name_path.parent_pointer();
+            if (name_path.back() == "config" && is_generated_management_grant(schematic, starter, live, grant, paths)) {
+                grants.push_back((grant / "operations").to_string());
+            }
+        }
+        if (starter.contains("management_operations_slot")) {
+            require(std::ranges::find(grants, users_starter_management_slot(schematic)) != grants.end(),
+                    "The starter management operations slot must identify the generated client's scoped user-management grant.");
+        } else if (grants.size() == 1) {
+            // Older cached schematics identify this same grant only through the generated config and token slots.
+            schematic.at("config").at("users_starter")["management_operations_slot"] = grants.front();
+        }
     }
 }
 
-void validate_runtime(const Json& schematic)
+void validate_runtime(Json& schematic)
 {
     const auto& runtime = schematic.at("runtime");
     if (runtime.at("startup_protocol") != "config-stdin" || runtime.at("log_protocol") != "dated-files" ||
@@ -309,9 +361,8 @@ std::shared_ptr<const WaterWallSchematic> prepare_waterwall_schematic_file(const
             throw std::runtime_error(
                 "The filename must match the release version declared in the schematic.");
         }
-        auto schematic = prepare_waterwall_schematic(std::move(document));
-        validate_runtime(waterwall_schematic(*schematic));
-        return schematic;
+        validate_runtime(document);
+        return prepare_waterwall_schematic(std::move(document));
     } catch (const std::exception& error) {
         throw std::runtime_error("Cannot load WaterWall schematic " + path.string() + ". " + error.what());
     }

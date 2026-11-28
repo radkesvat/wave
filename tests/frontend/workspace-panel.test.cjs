@@ -427,7 +427,9 @@ test('loads workspace pages without passive spinners', async () => {
     const page = await workspace.browser.newPage({ viewport: desktop });
     const data = fixture('stopped');
     const config = { name: 'Default', nodes: [{ name: 'staff', type: 'AuthenticationServer' }] };
-    data.server.core.configs = [{ id: 1, name: config.name, enabled: false, active: false, auth_nodes: ['staff'] }];
+    const offlineScope = { source: 'offline', run_id: 'staff-stopped' };
+    data.server.core.configs = [{ id: 1, name: config.name, enabled: false, active: false, auth_nodes: ['staff'],
+        users_access: { staff: { ...offlineScope, database_generation: 'staff-database' } } }];
     const firstSnapshot = Promise.withResolvers();
     const preview = await mockPreview(page, data, firstSnapshot.promise);
     const expectNoSpinner = async (view, clip) => {
@@ -461,22 +463,19 @@ test('loads workspace pages without passive spinners', async () => {
         await graphCanvasTop(page);
 
         await selectConfigTab(page, 'staff');
-        const userControls = { x: 198, y: 121, width: 310, height: 60 };
-        const userList = { users: [{ id: '1', name: 'Fixture account' }], editable: true,
-            page: 0, page_count: 1, total: 1 };
-        const users = await preview.action(1);
-        assertRequest(users.request, { action: 'get_config_users', config_id: 1, node: 'staff', page: 0 });
-        await status(page, /staff tab\. AuthenticationServer users\. Loading users\./);
+        const userControls = { x: 198, y: 121, width: desktop.width - 198, height: 60 };
+        const users = [{ id: '1', name: 'Fixture account', enabled: true }];
+        const { subscription, ...subscribe } = await preview.rosterAction(0);
+        assert.deepEqual(subscribe, { action: 'users_roster_subscribe', config_id: 1, node: 'staff',
+            database_generation: 'staff-database', ...offlineScope });
+        await status(page, /staff tab\. AuthenticationServer users\..*Loading users\./);
         await expectNoSpinner('Offline users', userControls);
-        users.reply({ result: userList });
-        await status(page, /staff tab\. AuthenticationServer users\. 1 users?\./);
+        await preview.roster(subscription, users);
+        await status(page, /staff tab\. AuthenticationServer users\..*1 users?\./);
 
-        await click(page, 343, 137);
-        const refreshed = await preview.action(2);
-        assertRequest(refreshed.request, { action: 'get_config_users', config_id: 1, node: 'staff', page: 0 });
-        assert.equal(await rectangleContainsColor(page, userControls, [81, 165, 246]), true,
-            'Refresh users shows a spinner while the explicit request is pending.');
-        refreshed.reply({ result: userList });
+        await click(page, 642, 137);
+        assert.deepEqual(await preview.rosterAction(1), { action: 'users_roster_refresh', subscription, resync: false });
+        await preview.roster(subscription, users, { sequence: '2' });
         await status(page, /staff tab\. AuthenticationServer users\..*1 users?\./);
     } finally {
         firstSnapshot.resolve();
@@ -490,11 +489,11 @@ test('switches the canvas, browser, and Console among all five themes', async ()
         ignoreDefaultArgs: ['--hide-scrollbars'],
     });
     const [defaultTheme, lightTheme, ...darkThemes] = [
-        { name: 'Default', canvas: '080c10', terminal: '050506', track: '0d0b0e', thumb: '8a8495' },
-        { name: 'Light', canvas: 'f0f2f7', terminal: 'f9fafd', track: 'ffffff', thumb: '687189' },
-        { name: 'Classic', canvas: '1b2529', terminal: '121b21', track: '141a22', thumb: '778999' },
-        { name: 'Dark', canvas: '171a20', terminal: '101217', track: '111318', thumb: '808ba1' },
-        { name: 'Darker', canvas: '08090b', terminal: '030405', track: '050608', thumb: '787b84' },
+        { name: 'Default', canvas: '080c10', sidebar: '1f1b22', terminal: '050506', track: '0d0b0e', thumb: '8a8495' },
+        { name: 'Light', canvas: 'f0f2f7', sidebar: 'f9fafd', terminal: 'f9fafd', track: 'ffffff', thumb: '687189' },
+        { name: 'Classic', canvas: '1b2529', sidebar: '232c36', terminal: '121b21', track: '141a22', thumb: '778999' },
+        { name: 'Dark', canvas: '171a20', sidebar: '22262e', terminal: '101217', track: '111318', thumb: '808ba1' },
+        { name: 'Darker', canvas: '08090b', sidebar: '141517', terminal: '030405', track: '050608', thumb: '787b84' },
     ];
     const channels = hex => [...Buffer.from(hex, 'hex')];
     const rgb = hex => `rgb(${channels(hex).join(', ')})`;
@@ -525,8 +524,8 @@ test('switches the canvas, browser, and Console among all five themes', async ()
                 thumb: rgb(thumb),
                 terminal: rgb(theme.terminal),
             }, theme.name);
-            assert.deepEqual(await verticalRuns(page, 11, 68, 86, channels(theme.canvas)), [[68, 86]],
-                `${theme.name} recolors the ImGui workspace.`);
+            assert.deepEqual(await verticalRuns(page, 11, 68, 86, channels(theme.sidebar)), [[68, 86]],
+                `${theme.name} recolors the ImGui sidebar.`);
         };
 
         await page.goto(workspace.url);

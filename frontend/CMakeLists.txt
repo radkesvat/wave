@@ -76,10 +76,10 @@ add_executable(wave
     main.cpp
     panel.cpp
     preview_session.cpp
+    users_roster.cpp
     theme.cpp
     views/about_view.cpp
     views/config_json_import.cpp
-    views/config_live_users_view.cpp
     views/config_nodes_view.cpp
     views/config_users_view.cpp
     views/config_workspace_view.cpp
@@ -127,7 +127,7 @@ target_include_directories(wave PRIVATE
     "${imgui_SOURCE_DIR}/backends"
     "${implot_SOURCE_DIR}"
 )
-target_link_libraries(wave PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(wave PRIVATE nlohmann_json::nlohmann_json wave-utf8proc)
 # The WebGL renderer needs 32-bit indices for large meshes in the ImPlot demo.
 target_compile_definitions(wave PRIVATE IMGUI_IMPL_OPENGL_ES3 IMGUI_USE_WCHAR32 "ImDrawIdx=unsigned int")
 target_compile_options(wave PRIVATE
@@ -147,6 +147,9 @@ target_link_options(wave PRIVATE
     -sUSE_SDL=2
     -sMIN_WEBGL_VERSION=2
     -sMAX_WEBGL_VERSION=2
+    # Keep the initial heap small and allow concurrently staged and committed rosters.
+    -sALLOW_MEMORY_GROWTH=1
+    -sMAXIMUM_MEMORY=268435456
     -lwebsocket.js
     "$<$<CONFIG:Release>:-flto>"
     "$<$<CONFIG:Release>:-sENVIRONMENT=web>"
@@ -169,3 +172,4 @@ configure_file("${PROJECT_SOURCE_DIR}/doc/licenses/poppins.txt" "${CMAKE_BINARY_
 configure_file("${nlohmann_json_SOURCE_DIR}/LICENSE.MIT" "${CMAKE_BINARY_DIR}/site/licenses/nlohmann-json.txt" COPYONLY)
 configure_file("${PROJECT_SOURCE_DIR}/doc/licenses/nlohmann-json-third-party.txt"
     "${CMAKE_BINARY_DIR}/site/licenses/nlohmann-json-third-party.txt" COPYONLY)
+configure_file("${utf8proc_SOURCE_DIR}/LICENSE.md" "${CMAKE_BINARY_DIR}/site/licenses/utf8proc.txt" COPYONLY)

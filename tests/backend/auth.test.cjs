@@ -191,7 +191,12 @@ test('HTTPS verifies trust and enforces durable JWT sessions on HTTP and WebSock
     assert.equal(ws.status, 101);
     const terminal = process.platform === 'linux' ? await upgrade(authenticated, '/ws/console') : null;
     try {
-        assert.equal((await ws.frame()).opcode, 1);
+        const identity = await ws.frame();
+        assert.equal(identity.opcode, 1);
+        assert.deepEqual(JSON.parse(identity.payload), {
+            type: 'session', username: claims.sub, expires_at: claims.exp, session_id: claims.jti,
+        });
+        assert.equal((await request('/api/session', { headers: { Cookie: cookiePrefix + claims.jti } })).status, 401);
         if (terminal) {
             assert.equal(terminal.status, 101);
             terminal.socket.write(clientFrame(1, JSON.stringify({ type: 'resize', cols: 80, rows: 24 })));

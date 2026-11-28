@@ -2,6 +2,8 @@
 
 #include "core_config_name.h"
 #include "schematic_users_ui.h"
+#include "unicode_casefold.h"
+#include "users_roster.h"
 #include "waterwall_schematic.h"
 
 #include <openssl/rand.h>
@@ -39,6 +41,11 @@ constexpr std::string_view whitespace = " \n\r\t\v\f";
 class UserError : public std::runtime_error {
   public:
     using std::runtime_error::runtime_error;
+};
+
+class UserDatabaseAccessError : public UserError {
+  public:
+    using UserError::UserError;
 };
 
 class File {
@@ -492,29 +499,76 @@ Json database_rows(Json& database)
 
 struct UserList {
     Json rows = Json::array();
-    std::map<std::uint64_t, std::size_t> index;
     std::size_t page = 0;
     std::size_t page_count = 0;
+    std::size_t matched = 0;
 
-    Json response(bool editable)
+    Json response(std::size_t total)
     {
         return {{"users", std::move(rows)},
-                {"editable", editable},
+                {"editable", true},
                 {"page", page},
                 {"page_count", page_count},
-                {"total", index.size()}};
+                {"matched", matched},
+                {"total", total}};
     }
 };
 
-UserList public_users(const Json& rows, std::uint64_t requested_page)
+Json public_user(const Json& row)
 {
-    UserList result;
-    result.page_count = (rows.size() + users_per_page - 1) / users_per_page;
-    if (result.page_count > 0) {
-        result.page =
-            static_cast<std::size_t>(std::min<std::uint64_t>(requested_page, result.page_count - 1));
+    auto user = read_fields(row, user_fields, ReadMode::disk);
+    if (!user.contains("enabled")) {
+        user["enabled"] = true;
     }
-    const auto start = result.page * users_per_page;
+    for (const auto& field : times) {
+        if (const auto* value = select_field(row, field, true)) {
+            auto top = read_value(*value, field, ReadMode::disk, std::string(field.key));
+            if (!top.is_null()) {
+                user["time"][field.key] = std::move(top);
+            }
+        }
+    }
+    return user;
+}
+
+bool oversized_user(const Json& user)
+{
+    return user.dump().size() > max_public_user_bytes;
+}
+
+Json saved_roster_row(Json user)
+{
+    if (oversized_user(user)) {
+        user["oversized"] = true;
+    }
+    return make_users_roster_row(user);
+}
+
+struct SavedRoster {
+    std::optional<Json> rows = Json::array();
+    std::size_t bytes = 2;
+
+    void append(Json user)
+    {
+        if (!rows) {
+            return;
+        }
+        auto summary = saved_roster_row(std::move(user));
+        const auto size = summary.dump().size() + (rows->empty() ? 0 : 1);
+        if (rows->size() == max_users_roster_rows || size > max_users_roster_bytes - bytes) {
+            rows.reset();
+            return;
+        }
+        bytes += size;
+        rows->push_back(std::move(summary));
+    }
+};
+
+using UserIndex = std::map<std::uint64_t, std::size_t>;
+
+UserIndex index_users(const Json& rows, SavedRoster* roster = nullptr)
+{
+    UserIndex index;
     std::set<std::string> names;
     std::set<std::string_view> passwords;
     std::set<std::string> uuids;
@@ -522,14 +576,15 @@ UserList public_users(const Json& rows, std::uint64_t requested_page)
     std::map<Address, Address> ipv6;
     for (std::size_t i = 0; i < rows.size(); ++i) {
         const auto& row = rows[i];
-        auto user = read_fields(row, user_fields, ReadMode::disk);
+        auto user = public_user(row);
         const auto id = user.find("id");
         const auto* value = select_field(row, password_field, true);
         const auto* password = value ? value->get_ptr<const std::string*>() : nullptr;
         if (id == user.end() || *id == "0" || !password || password->empty()) {
             throw UserError("Every AuthenticationServer user needs a nonzero ID and a password.");
         }
-        if (!result.index.emplace(*decimal(id->get_ref<const std::string&>()), i).second) {
+        const auto account_id = *decimal(id->get_ref<const std::string&>());
+        if (!index.emplace(account_id, i).second) {
             throw UserError("AuthenticationServer user IDs must be unique.");
         }
         const auto uuid = uuid_key(*password);
@@ -544,45 +599,64 @@ UserList public_users(const Json& rows, std::uint64_t requested_page)
             const auto network = parse_network(cidr->get_ref<const std::string&>());
             insert_network(network, network.family == AF_INET ? ipv4 : ipv6);
         }
-        if (!user.contains("enabled")) {
-            user["enabled"] = true;
+        if (roster) {
+            roster->append(std::move(user));
         }
-        for (const auto& field : times) {
-            if (const auto* value = select_field(row, field, true)) {
-                auto top = read_value(*value, field, ReadMode::disk, std::string(field.key));
-                if (!top.is_null()) {
-                    user["time"][field.key] = std::move(top);
-                }
+    }
+    return index;
+}
+
+UserList public_users_page(const Json& rows, const UserIndex& index, std::uint64_t requested_page,
+                           std::string_view search)
+{
+    UserList result;
+    std::vector<std::size_t> matches;
+    if (!search.empty() && search.find_first_not_of("0123456789") == search.npos) {
+        if (const auto id = decimal(search)) {
+            if (const auto row = index.find(*id); row != index.end()) {
+                matches.push_back(row->second);
             }
         }
-        if (i >= start && i - start < users_per_page) {
-            if (user.dump().size() > max_public_user_bytes) {
-                user = {{"id", *id}, {"enabled", user["enabled"]}, {"oversized", true}};
+    } else if (!search.empty()) {
+        const auto name_query = unicode_casefold(search);
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            const auto user = public_user(rows[i]);
+            const auto name = user.find("name");
+            if (name == user.end()) {
+                continue;
             }
-            result.rows.push_back(std::move(user));
+            const auto& text = name->get_ref<const std::string&>();
+            if (text.size() <= max_public_user_bytes &&
+                unicode_casefold(text).find(name_query) != std::string::npos && !oversized_user(user)) {
+                matches.push_back(i);
+            }
         }
+    }
+    result.matched = search.empty() ? rows.size() : matches.size();
+    result.page_count = (result.matched + users_per_page - 1) / users_per_page;
+    if (result.page_count > 0) {
+        result.page = static_cast<std::size_t>(std::min<std::uint64_t>(requested_page, result.page_count - 1));
+    }
+    const auto start = result.page * users_per_page;
+    for (std::size_t i = start; i < result.matched && i - start < users_per_page; ++i) {
+        auto user = public_user(rows[search.empty() ? i : matches[i]]);
+        if (oversized_user(user)) {
+            user = {{"id", user["id"]}, {"enabled", user["enabled"]}, {"oversized", true}};
+        }
+        result.rows.push_back(std::move(user));
     }
     return result;
 }
 
-std::uint64_t random_number()
+std::uint64_t new_user_id(const UserIndex& users)
 {
-    std::uint64_t number;
-    if (RAND_bytes(reinterpret_cast<unsigned char*>(&number), sizeof(number)) != 1) {
-        throw UserError("Could not generate an AuthenticationServer identifier.");
+    const auto& field = waterwall_schematic().at("ui").at("users").at("fields").at("id");
+    const auto bounds = schematic_user_number_bounds(field, explicit_user_id_bounds);
+    const auto id = next_sequential_user_id(users, bounds, field.value("gigabytes", false));
+    if (!id) {
+        throw UserError(exhausted_user_ids);
     }
-    return number;
-}
-
-std::uint64_t new_user_id(const UserList& users)
-{
-    for (int attempt = 0; attempt < 8; ++attempt) {
-        const auto id = random_number();
-        if (id != 0 && !users.index.contains(id)) {
-            return id;
-        }
-    }
-    throw UserError("Could not generate a unique AuthenticationServer user ID.");
+    return *id;
 }
 
 bool trusted_directory(int fd)
@@ -620,6 +694,25 @@ bool private_file(int fd)
            info.st_uid == geteuid() && ((info.st_mode & 07777) == 0600 || fchmod(fd, 0600) == 0);
 }
 
+int open_users_directory(const fs::path& root, std::string_view config_name, std::string_view db_name)
+{
+    const int directory = CoreConfigUsers::valid_filename(db_name) ? open_directory(root, config_name) : -1;
+    if (directory < 0) {
+        throw UserDatabaseAccessError("The AuthenticationServer database path is unavailable.");
+    }
+    return directory;
+}
+
+Json read_saved_database(int directory, const std::string& name)
+{
+    const File file(openat(directory, name.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
+    if (!private_file(file.get())) {
+        throw UserDatabaseAccessError(
+            "The AuthenticationServer database must be a private regular file owned by Wave's user.");
+    }
+    return parse_database(read_database(file.get()));
+}
+
 bool write_all(int fd, std::string_view data)
 {
     while (!data.empty()) {
@@ -640,7 +733,11 @@ bool write_all(int fd, std::string_view data)
 enum class Publication { existing, saved, sync_failed };
 Publication publish(int directory, const std::string& name, std::string_view data, bool replace)
 {
-    const auto temporary = ".auth-tmp-" + std::to_string(random_number());
+    std::uint64_t suffix;
+    if (RAND_bytes(reinterpret_cast<unsigned char*>(&suffix), sizeof(suffix)) != 1) {
+        throw UserError("Could not generate a temporary AuthenticationServer database filename.");
+    }
+    const auto temporary = ".auth-tmp-" + std::to_string(suffix);
     File file(
         openat(directory, temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
     if (file.get() < 0) {
@@ -805,14 +902,37 @@ bool CoreConfigUsers::remove(std::string_view config_name, std::string_view db_n
            fsync(directory.get()) == 0;
 }
 
+CoreConfigUsers::Result CoreConfigUsers::load_roster(std::string_view config_name, std::string_view db_name) const
+{
+    try {
+        const File directory(open_users_directory(root_, config_name, db_name));
+        auto database = read_saved_database(directory.get(), std::string(db_name));
+        const auto users = database_rows(database);
+        SavedRoster roster;
+        index_users(users, &roster);
+        if (!roster.rows) {
+            return {false, "The saved users roster exceeds Wave's 100,000-account or 32 MiB summary limit."};
+        }
+        return {true, {}, std::move(*roster.rows)};
+    } catch (const UserDatabaseAccessError& error) {
+        return {.success = false, .message = error.what(), .database_unavailable = true};
+    } catch (const UserError& error) {
+        return {false, error.what()};
+    }
+}
+
 CoreConfigUsers::Result CoreConfigUsers::execute(std::string_view action, std::string_view config_name,
-                                                 std::string_view db_name, const Json& input) const
+                                                 std::string_view db_name, const Json& input,
+                                                 bool include_roster_change) const
 {
     const bool list = action == "get_config_users";
+    const bool detail = action == "get_config_user";
     const bool read_password = action == "get_config_user_password";
     const bool create = action == "create_config_user";
     const bool edit = action == "edit_config_user";
-    if (!list && !read_password && !create && !edit && action != "delete_config_user") {
+    const bool reset_traffic = action == "reset_config_user_traffic";
+    if (!list && !detail && !read_password && !create && !edit && !reset_traffic &&
+        action != "delete_config_user") {
         return {false, "Unknown AuthenticationServer user action."};
     }
     std::uint64_t page = 0;
@@ -823,23 +943,24 @@ CoreConfigUsers::Result CoreConfigUsers::execute(std::string_view action, std::s
         }
         page = *number;
     }
-    const File directory(open_directory(root_, config_name));
-    if (directory.get() < 0 || !valid_filename(db_name)) {
-        return {false, "The AuthenticationServer database path is unavailable."};
+    std::string_view search;
+    if (const auto value = input.find("search"); value != input.end()) {
+        const auto* text = value->get_ptr<const std::string*>();
+        if (!text || text->size() > 512 || text->find('\0') != text->npos) {
+            return {false, "Enter an account ID or a name of up to 512 bytes."};
+        }
+        search = trim(*text);
     }
-    const std::string name(db_name);
-    const File file(openat(directory.get(), name.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
-    if (!private_file(file.get())) {
-        return {false, "The AuthenticationServer database must be a private "
-                       "regular file owned by Wave's user."};
-    }
+    const bool compact_reply = schematic_field(input, "roster") == true;
     try {
-        auto database = parse_database(read_database(file.get()));
+        const File directory(open_users_directory(root_, config_name, db_name));
+        const std::string name(db_name);
+        auto database = read_saved_database(directory.get(), name);
         const bool wrapper = database.contains("users");
         auto rows = database_rows(database);
-        auto listing = public_users(rows, page);
+        const auto index = index_users(rows);
         if (list) {
-            return {true, {}, listing.response(true)};
+            return {true, {}, public_users_page(rows, index, page, search).response(index.size())};
         }
         Json patch;
         if (create || edit) {
@@ -848,7 +969,11 @@ CoreConfigUsers::Result CoreConfigUsers::execute(std::string_view action, std::s
                 return {false, "Supply fields for the AuthenticationServer user."};
             }
             patch = read_fields(*user, user_fields, create ? ReadMode::create : ReadMode::edit);
+        } else if (reset_traffic) {
+            patch["stats"]["traffic"] = {{"up", "0"}, {"down", "0"}};
         }
+        std::string changed_id;
+        std::optional<std::size_t> changed_row;
         if (create) {
             if (!patch.contains("password")) {
                 return {false, "Enter a password for the AuthenticationServer user."};
@@ -858,32 +983,55 @@ CoreConfigUsers::Result CoreConfigUsers::execute(std::string_view action, std::s
                     return {false, "Choose a nonzero AuthenticationServer user ID."};
                 }
             } else {
-                patch["id"] = std::to_string(new_user_id(listing));
+                patch["id"] = std::to_string(new_user_id(index));
             }
             const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch());
             patch["time"]["created-at-ms"] = std::to_string(now.count());
+            changed_id = patch.at("id").get<std::string>();
+            changed_row = rows.size();
             rows.push_back(std::move(patch));
         } else {
             const auto id = input.find("user_id");
             const auto number =
                 id != input.end() && id->is_string() ? unsigned_value(*id, false) : std::nullopt;
-            const auto row = number ? listing.index.find(*number) : listing.index.end();
-            if (row == listing.index.end()) {
+            const auto row = number ? index.find(*number) : index.end();
+            if (row == index.end()) {
                 return {false, "That AuthenticationServer user is unavailable."};
             }
+            auto& record = rows.at(row->second);
             if (read_password) {
-                // The listing has already validated the credential in every database row.
-                const auto* password = select_field(rows.at(row->second), password_field, true);
+                // Indexing validated the credential in every row.
+                const auto* password = select_field(record, password_field, true);
                 return {true, {}, {{"password", *password}}};
             }
-            if (edit) {
-                patch_fields(rows.at(row->second), patch, user_fields);
+            if (detail || (edit && compact_reply)) {
+                auto user = public_user(record);
+                if (oversized_user(user)) {
+                    return {false, "This saved account is too large to edit. It can be removed by ID."};
+                }
+                if (detail) {
+                    return {true, {}, {{"user", std::move(user)}}};
+                }
+            }
+            changed_id = std::to_string(row->first);
+            if (edit || reset_traffic) {
+                patch_fields(record, patch, user_fields);
+                changed_row = row->second;
             } else {
                 rows.erase(rows.begin() + static_cast<Json::difference_type>(row->second));
             }
         }
-        listing = public_users(rows, page);
+        const auto updated_index = index_users(rows);
+        auto reply = compact_reply
+                         ? Json{{"user_id", changed_id}}
+                         : public_users_page(rows, updated_index, page, search).response(updated_index.size());
+        std::optional<Json> roster_change;
+        if (include_roster_change) {
+            roster_change = Json{{"user_id", changed_id},
+                                 {"user", changed_row ? saved_roster_row(public_user(rows.at(*changed_row)))
+                                                      : Json(nullptr)}};
+        }
         if (!wrapper) {
             database = Json::object();
         }
@@ -897,7 +1045,9 @@ CoreConfigUsers::Result CoreConfigUsers::execute(std::string_view action, std::s
         return {true,
                 status == Publication::sync_failed ? "Users saved. The config directory could not be synced."
                                                    : "Saved AuthenticationServer users.",
-                listing.response(true)};
+                std::move(reply), std::move(roster_change)};
+    } catch (const UserDatabaseAccessError& error) {
+        return {.success = false, .message = error.what(), .database_unavailable = true};
     } catch (const UserError& error) {
         return {false, error.what()};
     }

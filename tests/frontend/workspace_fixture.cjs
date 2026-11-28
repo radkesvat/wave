@@ -8,6 +8,10 @@ const { chromium } = require('playwright-core');
 
 const desktop = { width: 1280, height: 800 };
 const coreDesktop = { width: 1280, height: 1080 };
+// Click positions inside the users table at the coreDesktop viewport.
+const rosterColumnX = {
+    enable: 555, options: 635, trafficUsage: 756, uploadSpeed: 891, downloadSpeed: 1052, daysLeft: 1198,
+};
 const portrait = { width: 390, height: 844 };
 const donationSlotHeight = 63;
 const timeout = 10000;
@@ -75,15 +79,22 @@ function setupWorkspace() {
         }
     });
 
-    async function mockPreview(page, data, gate = Promise.resolve(), schematic = waterwallSchematic) {
+    async function mockPreview(page, data, gate = Promise.resolve(), schematic = waterwallSchematic,
+        usersRoster = true) {
+        let sessionId = 'fixture-sign-in';
+        let identitySocket;
         await page.routeWebSocket(sessionUrl, socket => {
+            identitySocket = socket;
             socket.send(JSON.stringify({
-                type: 'session', username: 'fixture-admin', expires_at: Math.floor(Date.now() / 1000) + 86400,
+                type: 'session', username: 'fixture-admin', session_id: sessionId,
+                expires_at: Math.floor(Date.now() / 1000) + 86400,
             }));
         });
         const connected = Promise.withResolvers();
         const events = new EventEmitter();
         const actions = [];
+        const rosterActions = [];
+        let nextAttempt = 1;
         let previewSocket;
         let sendSnapshot;
         await page.routeWebSocket(previewUrl, async socket => {
@@ -91,6 +102,11 @@ function setupWorkspace() {
                 (_key, value) => typeof value === 'bigint' ? JSON.rawJSON(value.toString()) : value));
             socket.onMessage(raw => {
                 const request = JSON.parse(raw);
+                if (request.action.startsWith('users_roster_')) {
+                    rosterActions.push(request);
+                    events.emit('roster-action');
+                    return;
+                }
                 const reply = ({ ok = true, feedback = '', result, feedback_in_logs_only,
                     level = ok ? 'success' : 'error' } = {}) => {
                     if (feedback_in_logs_only && feedback) {
@@ -104,7 +120,7 @@ function setupWorkspace() {
             await gate;
             previewSocket = socket;
             sendSnapshot = send;
-            send(schematic === null ? {} : { schematic });
+            send({ users_roster: usersRoster, ...(schematic === null ? {} : { schematic }) });
             connected.resolve();
         });
         return {
@@ -116,7 +132,39 @@ function setupWorkspace() {
                 await connected.promise;
                 await previewSocket.close({ code: 1011, reason: 'Fixture connection closed' });
             },
+            async disconnectBoth(nextSessionId = sessionId) {
+                await connected.promise;
+                sessionId = nextSessionId;
+                await Promise.all([previewSocket, identitySocket].map(socket =>
+                    socket.close({ code: 1011, reason: 'Fixture connection closed' })));
+            },
+            async rosterAction(index) {
+                const signal = AbortSignal.timeout(timeout);
+                while (index >= rosterActions.length) await once(events, 'roster-action', { signal });
+                return rosterActions[index];
+            },
+            async rosterFrame(subscription, fields) {
+                await connected.promise;
+                previewSocket.send(JSON.stringify({ type: 'users_roster', subscription, ...fields }));
+            },
+            async roster(subscription, rows, { sequence = '1', base_sequence, removed = [],
+                total = rows.length, chunkSize = 250, host_time = '1795000000000',
+                accounting_time = '1794000000000', attempt = String(nextAttempt++) } = {}) {
+                nextAttempt = Math.max(nextAttempt, Number(attempt) + 1);
+                await this.rosterFrame(subscription, { event: 'begin', attempt, sequence, base_sequence, total });
+                let index = 0;
+                for (let offset = 0; offset < rows.length; offset += chunkSize) {
+                    await this.rosterFrame(subscription, { event: 'chunk', attempt, index: index++,
+                        rows: rows.slice(offset, offset + chunkSize), removed: [] });
+                }
+                for (let offset = 0; offset < removed.length; offset += chunkSize) {
+                    await this.rosterFrame(subscription, { event: 'chunk', attempt, index: index++,
+                        rows: [], removed: removed.slice(offset, offset + chunkSize) });
+                }
+                await this.rosterFrame(subscription, { event: 'end', attempt, chunks: index, host_time, accounting_time });
+            },
             actions,
+            rosterActions,
             async action(index) {
                 const signal = AbortSignal.timeout(timeout);
                 while (index >= actions.length) await once(events, 'action', { signal });
@@ -239,28 +287,36 @@ function assertRequest(request, expected) {
     return id;
 }
 
-// ImGui draws its controls on one canvas. Read a vertical strip to locate the visible rows.
-async function verticalRuns(page, x, top, bottom, [r, g, b], minimum = 1) {
-    const screenshot = await page.screenshot({ clip: { x, y: top, width: 1, height: bottom - top } });
-    return page.evaluate(async ({ encoded, r, g, b, minimum, top }) => {
+// ImGui draws its controls on one canvas. Scan a one-pixel strip to locate their edges.
+async function colorRuns(page, clip, [r, g, b], minimum, origin) {
+    const screenshot = await page.screenshot({ clip });
+    return page.evaluate(async ({ encoded, r, g, b, minimum, origin }) => {
         const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
         const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
-        const canvas = new OffscreenCanvas(1, bitmap.height);
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
         const context = canvas.getContext('2d');
         context.drawImage(bitmap, 0, 0);
-        const { data } = context.getImageData(0, 0, 1, canvas.height);
+        const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
         const runs = [];
         let start = null;
-        for (let y = 0; y <= canvas.height; y++) {
-            const matches = data[y * 4] === r && data[y * 4 + 1] === g && data[y * 4 + 2] === b;
-            if (matches && start === null) start = y;
+        for (let i = 0; i <= data.length / 4; i++) {
+            const matches = data[i * 4] === r && data[i * 4 + 1] === g && data[i * 4 + 2] === b;
+            if (matches && start === null) start = i;
             if (!matches && start !== null) {
-                if (y - start >= minimum) runs.push([top + start, top + y]);
+                if (i - start >= minimum) runs.push([origin + start, origin + i]);
                 start = null;
             }
         }
         return runs;
-    }, { encoded: screenshot.toString('base64'), r, g, b, minimum, top });
+    }, { encoded: screenshot.toString('base64'), r, g, b, minimum, origin });
+}
+
+function verticalRuns(page, x, top, bottom, color, minimum = 1) {
+    return colorRuns(page, { x, y: top, width: 1, height: bottom - top }, color, minimum, top);
+}
+
+function horizontalRuns(page, y, left, right, color, minimum = 1) {
+    return colorRuns(page, { x: left, y, width: right - left, height: 1 }, color, minimum, left);
 }
 
 async function rectangleColorCount(page, clip, [r, g, b]) {
@@ -406,6 +462,7 @@ module.exports = {
     setupWorkspace,
     desktop,
     coreDesktop,
+    rosterColumnX,
     portrait,
     donationSlotHeight,
     timeout,
@@ -422,6 +479,7 @@ module.exports = {
     replaceText,
     assertRequest,
     verticalRuns,
+    horizontalRuns,
     rectangleColorCount,
     rectangleContainsColor,
     expectDonationBox,

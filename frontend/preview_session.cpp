@@ -16,6 +16,7 @@ namespace {
 
 using Json = nlohmann::json;
 constexpr double connect_timeout_ms = 5000;
+constexpr double roster_chunk_timeout_ms = 10000;
 // Match the backend WebSocket frame limit for large config registries.
 constexpr std::size_t max_snapshot_bytes = 16 * 1024 * 1024;
 
@@ -62,6 +63,9 @@ void PreviewSession::start(bool keep_snapshot)
 
     const auto on_message = [](int, const EmscriptenWebSocketMessageEvent* event, void* user_data) {
         auto& session = *static_cast<PreviewSession*>(user_data);
+        if (event->socket != session.socket_) {
+            return true;
+        }
         // Emscripten includes a terminating NUL in the length of text messages.
         if (!event->isText || event->numBytes <= 1 || event->numBytes - 1 > max_snapshot_bytes ||
             !session.receive({reinterpret_cast<const char*>(event->data), event->numBytes - 1})) {
@@ -69,8 +73,11 @@ void PreviewSession::start(bool keep_snapshot)
         }
         return true;
     };
-    const auto on_close = [](int, const EmscriptenWebSocketCloseEvent*, void* user_data) {
-        static_cast<PreviewSession*>(user_data)->fail();
+    const auto on_close = [](int, const EmscriptenWebSocketCloseEvent* event, void* user_data) {
+        auto& session = *static_cast<PreviewSession*>(user_data);
+        if (event->socket == session.socket_) {
+            session.fail();
+        }
         return true;
     };
     if (emscripten_websocket_set_onmessage_callback(socket_, this, on_message) != EMSCRIPTEN_RESULT_SUCCESS ||
@@ -88,6 +95,8 @@ void PreviewSession::stop()
         emscripten_websocket_delete(socket_);
     }
     socket_ = 0;
+    users_roster_.reset();
+    supports_users_roster_ = false;
     std::erase_if(requests_, [&](const auto& item) {
         const auto& request = item.second;
         // A form may consume an acknowledgement on the frame after the socket closes.
@@ -116,6 +125,10 @@ void PreviewSession::update()
     }
     for (auto& [id, request] : requests_) {
         expire(request, now);
+    }
+    if (users_roster_ && users_roster_->transfer &&
+        now - users_roster_->transfer->progress_at >= roster_chunk_timeout_ms) {
+        refresh_users_roster(users_roster_->subscription, true);
     }
 }
 
@@ -164,6 +177,84 @@ void PreviewSession::abandon(std::optional<std::uint64_t>& request_id)
     if (request_id) {
         requests_.erase(*request_id);
         request_id.reset();
+    }
+}
+
+bool PreviewSession::send_users_roster(Json request)
+{
+    if (schematic_revision_ != 0) {
+        request["schematic_revision"] = schematic_revision_;
+    }
+    return ready() && supports_users_roster_ &&
+           emscripten_websocket_send_utf8_text(socket_, request.dump().c_str()) == EMSCRIPTEN_RESULT_SUCCESS;
+}
+
+const UsersRoster* PreviewSession::users_roster(std::optional<std::uint64_t> subscription) const
+{
+    return users_roster_ && subscription == users_roster_->subscription ? &*users_roster_ : nullptr;
+}
+
+std::optional<std::uint64_t> PreviewSession::subscribe_users_roster(Json target, bool replace)
+{
+    if (!document_visible_ || !ready() || !supports_users_roster_) {
+        return std::nullopt;
+    }
+    if (users_roster_ && !replace) {
+        std::optional previous(users_roster_->subscription);
+        unsubscribe_users_roster(previous);
+    }
+    const auto subscription = next_subscription_++;
+    const bool live = target.value("source", "") == "live";
+    target["action"] = "users_roster_subscribe";
+    target["subscription"] = std::to_string(subscription);
+    if (!send_users_roster(std::move(target))) {
+        return std::nullopt;
+    }
+    users_roster_.emplace(UsersRoster{.subscription = subscription, .live = live});
+    return subscription;
+}
+
+bool PreviewSession::send_roster_unsubscribe(std::uint64_t subscription)
+{
+    return send_users_roster({{"action", "users_roster_unsubscribe"},
+                              {"subscription", std::to_string(subscription)}});
+}
+
+void PreviewSession::unsubscribe_users_roster(std::optional<std::uint64_t>& subscription)
+{
+    if (const auto* roster = users_roster(subscription)) {
+        if (roster->state != UsersRoster::State::lost) {
+            send_roster_unsubscribe(roster->subscription);
+        }
+        users_roster_.reset();
+    }
+    subscription.reset();
+}
+
+void PreviewSession::refresh_users_roster(std::optional<std::uint64_t> subscription, bool resync)
+{
+    if (const auto* roster = users_roster(subscription); roster && roster->state != UsersRoster::State::lost) {
+        if (resync) {
+            users_roster_->reset_transfer();
+        } else {
+            users_roster_->state = UsersRoster::State::loading;
+            users_roster_->message.clear();
+        }
+        if (!send_users_roster({{"action", "users_roster_refresh"},
+                               {"subscription", std::to_string(*subscription)}, {"resync", resync}})) {
+            users_roster_->reset_rates();
+            users_roster_->state = UsersRoster::State::error;
+            users_roster_->message = "The account list connection is unavailable.";
+        }
+    }
+}
+
+void PreviewSession::set_document_visible(bool visible)
+{
+    document_visible_ = visible;
+    if (!visible && users_roster_) {
+        std::optional subscription(users_roster_->subscription);
+        unsubscribe_users_roster(subscription);
     }
 }
 
@@ -239,6 +330,22 @@ void PreviewSession::fail()
 bool PreviewSession::receive(std::string_view payload)
 {
     auto frame = Json::parse(payload, nullptr, false);
+    if (frame.is_object() && frame["type"] == "users_roster") {
+        if (!users_roster_ || frame["subscription"] != std::to_string(users_roster_->subscription) ||
+            users_roster_->state == UsersRoster::State::lost) {
+            return true;
+        }
+        if (!users_roster_->receive(frame, payload.size(), emscripten_get_now())) {
+            refresh_users_roster(users_roster_->subscription, true);
+        } else if (users_roster_->state == UsersRoster::State::lost) {
+            if (users_roster_->loss_cause == UsersRoster::LossCause::identity) {
+                last_lost_roster_identity_ = users_roster_->subscription;
+            }
+            // Release server polling while the view keeps the loss reason for Retry.
+            return send_roster_unsubscribe(users_roster_->subscription);
+        }
+        return true;
+    }
     if (!frame.is_object() || frame["type"] != "snapshot" || !valid_snapshot(frame["data"])) {
         return false;
     }
@@ -261,6 +368,9 @@ bool PreviewSession::receive(std::string_view payload)
         revision != frame.end() && revision->is_number_unsigned()) {
         schematic_revision_ = revision->get<std::uint64_t>();
     }
+    if (const auto support = frame.find("users_roster"); support != frame.end()) {
+        supports_users_roster_ = *support == true;
+    }
     const auto action = frame.find("action");
     const auto feedback = frame.find("feedback");
     const auto ok = frame.find("ok");
@@ -271,13 +381,15 @@ bool PreviewSession::receive(std::string_view payload)
             const auto request = requests_.find(id->get<std::uint64_t>());
             if (request != requests_.end() &&
                 request->second.action == action->get_ref<const std::string&>()) {
-                expire(request->second, emscripten_get_now());
+                const auto received_at = emscripten_get_now();
+                expire(request->second, received_at);
                 if (!request->second.reply) {
                     const auto status =
                         ok->get<bool>() ? PreviewReply::Status::accepted : PreviewReply::Status::rejected;
                     auto result = frame.find("result");
                     request->second.reply = PreviewReply{status, feedback->get<std::string>(),
-                                                         result == frame.end() ? Json{} : std::move(*result)};
+                                                         result == frame.end() ? Json{} : std::move(*result),
+                                                         frame["feedback_in_logs_only"] == true, received_at};
                 }
             }
         }
