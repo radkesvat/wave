@@ -19,7 +19,8 @@ constexpr char donation_url[] = "https://radkesvat-support.vercel.app/#support";
 constexpr char change_answer[] = "Change answer";
 constexpr char chooser_title[] = "Change answer###About donation";
 constexpr char response_title[] = "Donation response###About donation";
-constexpr char no_response[] = "The project is free. No problem!";
+constexpr char project_is_free[] = "The project is free.";
+constexpr char no_problem[] = "No problem";
 constexpr char thanks[] = "Thank you for supporting the project!";
 constexpr char reminder[] = "The sidebar badge will remind you in 30 days.";
 constexpr float response_dialog_width = 420;
@@ -59,6 +60,39 @@ std::string next_reminder(std::string_view timestamp)
                        timestamp.substr(8, 2));
 }
 
+void render_declined_response()
+{
+    const float diameter = ImGui::GetTextLineHeight();
+    const float sticker_gap = ImGui::GetStyle().ItemInnerSpacing.x;
+    const float space = ImGui::CalcTextSize(" ").x;
+    const float width = ImGui::CalcTextSize(project_is_free).x + space + ImGui::CalcTextSize(no_problem).x +
+        sticker_gap + diameter;
+    const bool fits_one_line = width <= ImGui::GetContentRegionAvail().x;
+    view::wrapped(project_is_free);
+    if (fits_one_line) {
+        ImGui::SameLine(0, space);
+    }
+    view::text(no_problem);
+    ImGui::SameLine(0, sticker_gap);
+    const auto pos = ImGui::GetCursorScreenPos();
+    ImGui::Dummy({diameter, diameter});
+
+    const ImVec2 center{pos.x + diameter / 2, pos.y + diameter / 2};
+    const float radius = diameter * 0.44f;
+    const auto ink = theme::packed(theme::Color::inset);
+    auto& draw = *ImGui::GetWindowDrawList();
+    draw.AddCircleFilled(center, radius, theme::packed(theme::Color::warning));
+    for (const float side : {-1.0f, 1.0f}) {
+        draw.AddCircleFilled({center.x + side * radius * 0.34f, center.y - radius * 0.28f},
+                             std::max(1.0f, radius / 9), ink);
+    }
+    const float mouth_y = center.y + radius * 0.12f;
+    draw.AddBezierQuadratic({center.x - radius * 0.4f, mouth_y}, {center.x, center.y + radius * 0.74f},
+                            {center.x + radius * 0.4f, mouth_y}, ink, std::max(1.2f, radius * 0.13f));
+
+    ImGui::TextLinkOpenURL(donate_label, donation_url);
+}
+
 void render_donation_dialog(AboutViewState& state)
 {
     if (!state.submitted) {
@@ -81,8 +115,7 @@ void render_donation_dialog(AboutViewState& state)
     }
     ImGui::BeginGroup();
     if (!state.submitted->is_donation()) {
-        view::wrapped(no_response);
-        ImGui::TextLinkOpenURL(donate_label, donation_url);
+        render_declined_response();
     } else {
         view::wrapped(thanks);
         if (state.donation_saved) {
@@ -288,7 +321,12 @@ std::string describe_about(const AboutViewState& state, const PreviewSession& se
     }
     const bool declined = state.submitted && !state.submitted->is_donation();
     if (state.submitted) {
-        description += std::format(" Donation response. {}", declined ? no_response : thanks);
+        description += " Donation response.";
+        if (declined) {
+            description += std::format(" {} {}.", project_is_free, no_problem);
+        } else {
+            description += std::format(" {}", thanks);
+        }
         if (!declined && state.donation_saved) {
             description += std::format(" {}", reminder);
         }

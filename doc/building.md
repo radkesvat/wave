@@ -338,9 +338,10 @@ since the previous reading on a 0–100% scale. Memory shows
 `MemTotal - MemAvailable` against total usable RAM in GiB. Host Network uses
 receive and transmit byte counters from non-loopback interfaces visible to
 Wave. It calculates rates from counter changes on matching interfaces over
-the measured interval and uses KiB/s for small rates. Its sent and received
-totals reflect the current interface counters. Stacked virtual interfaces can
-count traffic on more than one link. [Linux procfs](https://docs.kernel.org/filesystems/proc.html), [Linux interface statistics](https://docs.kernel.org/networking/statistics.html)
+the measured interval and uses KiB/s for small rates. **Server Information**
+shows the sent and received totals from the current interface counters in
+decimal GB. Stacked virtual interfaces can count traffic on more than one link.
+[Linux procfs](https://docs.kernel.org/filesystems/proc.html), [Linux interface statistics](https://docs.kernel.org/networking/statistics.html)
 
 CPU and network rates become available after the first sampling interval.
 Unavailable readings appear as gaps after a chart has data. The charts keep

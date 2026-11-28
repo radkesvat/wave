@@ -113,14 +113,19 @@ std::string traffic_reading(std::string_view name, std::optional<double> value, 
     return std::format("{} {}", name, reading);
 }
 
+std::string host_traffic_total(const Json& server, const char* key)
+{
+    constexpr double gb_per_gib = 1'073'741'824.0 / 1'000'000'000.0;
+    const auto gib = status_metric(field(server, key));
+    return gib ? std::format("{:.1f} GB", *gib * gb_per_gib) : unavailable;
+}
+
 InfoRows server_information(const Json& server, const StatusSamples& samples)
 {
     const auto& core = field(server, "core");
     const VersionStatus panel(string_field(server, "version", wave::version), field(server, "panel"));
     const VersionStatus waterwall(string_field(core, "version", unavailable), core);
     const int uptime = integer_field(server, "uptime_minutes");
-    const auto sent = status_metric(field(server, "upload_total"));
-    const auto received = status_metric(field(server, "download_total"));
     return {{{"Host name", std::string(string_field(server, "name", unavailable))},
              {"Platform", std::string(string_field(server, "platform", unavailable))},
              {"Panel version", std::string(panel.current)},
@@ -134,8 +139,8 @@ InfoRows server_information(const Json& server, const StatusSamples& samples)
                                   ? std::to_string(integer_field(server, "cpu_cores"))
                                   : unavailable},
              {"Memory", samples.memory_value()},
-             {"Host sent", sent ? std::format("{:.1f} GiB", *sent) : unavailable},
-             {"Host received", received ? std::format("{:.1f} GiB", *received) : unavailable}}};
+             {"Host sent", host_traffic_total(server, "upload_total")},
+             {"Host received", host_traffic_total(server, "download_total")}}};
 }
 
 float text_width(std::string_view text)
@@ -345,13 +350,15 @@ std::string describe_server_status(const Json& server)
     const VersionStatus panel(string_field(server, "version", wave::version), field(server, "panel"));
     const VersionStatus waterwall(string_field(core, "version", unavailable), core);
     return std::format("CPU {}. Memory {}. Host network. {}. {}. Server Information. "
-                       "Panel version {}. Latest panel {}.{} Core version {}. Latest core {}.{}",
+                       "Panel version {}. Latest panel {}.{} Core version {}. Latest core {}.{} "
+                       "Host sent {}. Host received {}.",
                        samples.cpu_value(), samples.memory_value(),
                        traffic_reading("Upload", samples.upload_now, network_scale),
                        traffic_reading("Download", samples.download_now, network_scale), panel.current,
                        panel.latest, panel.update_available ? " Panel update available." : "",
                        waterwall.current, waterwall.latest,
-                       waterwall.update_available ? " Core update available." : "");
+                       waterwall.update_available ? " Core update available." : "",
+                       host_traffic_total(server, "upload_total"), host_traffic_total(server, "download_total"));
 }
 
 } // namespace wave

@@ -120,6 +120,7 @@ test('opens the authenticated workspace, updates host metrics, and navigates the
         await openView(page, 'Server Status');
         await status(page, /CPU 25\.0%\. Memory 4\.0 \/ 16\.0 GiB.*Upload 2\.0 MiB\/s\. Download 6\.0 MiB\/s/);
         await status(page, /Panel version 0\.0\.1 beta\..*Core version 1\.6\.0\./);
+        await status(page, /Server Information\..*Host sent 13\.4 GB\. Host received 59\.9 GB\./);
         const dividerScanEnd = desktop.height - 11 - donationSlotHeight;
         const dividers = await verticalRuns(page, 152, 91, dividerScanEnd, [61, 58, 67]);
         assert.deepEqual(dividers.map(([top, bottom]) => bottom - top), [2, 1, 1, 1]);
@@ -303,7 +304,7 @@ test('records all illustrated donation choices and shows the 30-day reminder', a
         assertRequest(request.request, { action: 'apply_donation', answer: key });
         await modal.waitFor({ timeout });
         assert.equal(await picker.count(), 0, 'The donation response replaces the choice dialog.');
-        await status(page, isDonation ? /Thank you for supporting the project!/ : /The project is free\. No problem!/);
+        await status(page, isDonation ? /Thank you for supporting the project!/ : /The project is free\. No problem\./);
         await status(page, /Operation in progress\./);
         assert.equal(await reminder.count(), 0);
         data.settings.donation = {
@@ -317,7 +318,11 @@ test('records all illustrated donation choices and shows the 30-day reminder', a
         } else {
             assert.equal(await reminder.count(), 0);
             const { top } = await dialogFrame(page, 30);
-            await activateDonateLink(dialogBody(responseWidth).left + 64, top + 53, top + 78);
+            const { left, right } = dialogBody(responseWidth);
+            assert.ok(await rectangleContainsColor(page, {
+                x: left + 200, y: top + 33, width: right - left - 200, height: 21,
+            }, [255, 195, 106]), 'An inline smiley sticker is visible at the end of the decline message.');
+            await activateDonateLink(left + 64, top + 53, top + 78);
         }
         await confirmDialog(page, activate, responseWidth, 30);
         await modal.waitFor({ state: 'hidden', timeout });
