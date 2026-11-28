@@ -119,7 +119,8 @@ as the administrator before choosing a replacement.
 Use the saved path for subsequent visits. Pages, assets, API requests, and
 WebSockets all use that prefix. For example, `/panel` serves the workspace at
 `/panel/` and its data socket at `/panel/ws/workspace`. Requests outside the
-selected prefix receive the stock nginx **404 Not Found** HTML from Wave.
+selected prefix receive an nginx-style **404 Not Found** response from Wave
+with `Server: nginx` and a `Date` header in GMT.
 
 To move an existing panel, open **Settings → Panel → Panel base path** and
 save the new path. Wave applies it immediately and opens the new URL with

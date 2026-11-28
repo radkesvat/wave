@@ -9,7 +9,11 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <ctime>
+#include <iomanip>
+#include <locale>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -178,8 +182,35 @@ Decision reject(Response& response, int status)
     return Decision::Handled;
 }
 
+void set_date_header(Response& response)
+{
+    const auto now = std::time(nullptr);
+    if (now == static_cast<std::time_t>(-1)) {
+        return;
+    }
+
+    std::tm utc{};
+#ifdef _WIN32
+    const bool converted = gmtime_s(&utc, &now) == 0;
+#else
+    const bool converted = gmtime_r(&now, &utc) != nullptr;
+#endif
+    if (!converted) {
+        return;
+    }
+
+    std::ostringstream date;
+    date.imbue(std::locale::classic());
+    date << std::put_time(&utc, "%a, %d %b %Y %H:%M:%S GMT");
+    if (date) {
+        response.set_header("Date", date.str());
+    }
+}
+
 Decision not_found(Response& response)
 {
+    response.set_header("Server", "nginx");
+    set_date_header(response);
     response.set_content("<html>\r\n"
                          "<head><title>404 Not Found</title></head>\r\n"
                          "<body>\r\n"

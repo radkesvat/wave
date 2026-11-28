@@ -176,6 +176,12 @@ async function assertNotFound(response) {
     assert.equal(response.status, 404);
     assert.equal(response.headers.get('location'), null);
     assert.equal(response.headers.get('content-type'), 'text/html');
+    assert.equal(response.headers.get('server'), 'nginx');
+    const date = response.headers.get('date');
+    assert.ok(date, '404 response is missing its Date header');
+    const timestamp = new Date(date);
+    assert.equal(date, timestamp.toUTCString());
+    assert.ok(Math.abs(Date.now() - timestamp.getTime()) < 60_000, '404 response Date should be current');
     const expected = Buffer.from([
         '<html>',
         '<head><title>404 Not Found</title></head>',
